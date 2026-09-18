@@ -37,6 +37,15 @@ function isPlaceholder(value: string | undefined): boolean {
   );
 }
 
+/**
+ * Insecure development fallbacks. Named constants so the "is this still the
+ * default?" check can never drift from the value actually used, and so
+ * validateEnv can refuse to boot production with either of them in place.
+ */
+export const DEV_FALLBACK_JWT_SECRET = "dev-insecure-jwt-secret-change-me";
+/** Mirrors the fallback in src/userIntegrationService.ts. */
+export const DEV_FALLBACK_ENCRYPTION_KEY = "default-32-char-encryption-key!!";
+
 export const env = {
   nodeEnv: process.env.NODE_ENV || "development",
   get isProduction() {
@@ -87,7 +96,7 @@ export const env = {
   auth: {
     // Secret used to sign session JWTs. MUST be set to a strong random value
     // in production. Falls back to a dev-only default locally.
-    jwtSecret: process.env.JWT_SECRET || "dev-insecure-jwt-secret-change-me",
+    jwtSecret: process.env.JWT_SECRET || DEV_FALLBACK_JWT_SECRET,
     // Session lifetime in days.
     sessionDays: toInt(process.env.AUTH_SESSION_DAYS, 7),
     // Cookie name for the session token.
@@ -116,6 +125,20 @@ export const env = {
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean),
 
+  // Env-based superadmin console credentials (no database row).
+  adminPassword: process.env.ADMIN_PASSWORD || "",
+  superAdminSecret: process.env.SUPERADMIN_SECRET || "",
+
+  // Key used to encrypt stored per-tenant integration credentials.
+  encryptionKey: process.env.ENCRYPTION_KEY || "",
+
+  /**
+   * Backup restore extracts an archive over the working directory, which is an
+   * arbitrary-file-overwrite primitive. Disabled unless an operator explicitly
+   * opts in, and admin-only even then.
+   */
+  enableBackupRestore: toBool(process.env.ENABLE_BACKUP_RESTORE, false),
+
   // Helpers used across the app
   isWebhookConfigured(): boolean {
     return !isPlaceholder(this.googleSheetWebhookUrl);
@@ -126,8 +149,17 @@ export const env = {
   isSmtpConfigured(): boolean {
     return !!(this.smtp.host && this.smtp.user && this.smtp.pass);
   },
-  isAuthEnabled(): boolean {
+  /** True when a shared API key is configured for machine clients. */
+  isApiKeyEnabled(): boolean {
     return this.apiKey.trim() !== "";
+  },
+  /**
+   * @deprecated Misleading name — this only reports whether the shared API key
+   * is set, not whether user authentication works. Kept so existing callers
+   * (e.g. /api/ready) keep compiling; prefer isApiKeyEnabled().
+   */
+  isAuthEnabled(): boolean {
+    return this.isApiKeyEnabled();
   },
   isDatabaseConfigured(): boolean {
     return this.databaseUrl.trim() !== "";
@@ -135,11 +167,36 @@ export const env = {
   isBootstrapAdmin(email: string): boolean {
     return this.adminEmails.includes(String(email || "").trim().toLowerCase());
   },
+  /** True when the session-signing secret is still the dev fallback. */
+  isDefaultJwtSecret(): boolean {
+    return this.auth.jwtSecret === DEV_FALLBACK_JWT_SECRET;
+  },
+  /** True when integration credentials are encrypted with the dev fallback key. */
+  isDefaultEncryptionKey(): boolean {
+    return this.encryptionKey.trim() === "" || this.encryptionKey === DEV_FALLBACK_ENCRYPTION_KEY;
+  },
+  /**
+   * The env-based superadmin console requires all three values. When any is
+   * missing the console cannot be used, and the synthetic-superadmin admin
+   * bypass in requireAdmin must not be honoured either.
+   */
+  isSuperAdminConfigured(): boolean {
+    return (
+      this.adminEmails.length > 0 &&
+      this.adminPassword.trim() !== "" &&
+      this.superAdminSecret.trim() !== ""
+    );
+  },
 };
 
 /**
- * Validates configuration at startup and returns a list of human-readable
- * warnings. Critical issues (production without auth/webhook) are highlighted.
+ * Validates configuration at startup.
+ *
+ * `warnings` are advisory. `errors` are fatal in production: the caller
+ * (server.ts) refuses to boot. Before this change `errors` was declared but
+ * never populated, so a production deploy would start happily with a
+ * publicly-known signing secret and wildcard CORS after printing three lines
+ * nobody reads.
  */
 export function validateEnv(): { warnings: string[]; errors: string[] } {
   const warnings: string[] = [];
@@ -163,21 +220,48 @@ export function validateEnv(): { warnings: string[]; errors: string[] } {
       "DATABASE_URL is not configured. Authentication (login/signup) will be unavailable until a MySQL database URL is provided."
     );
   }
-  if (env.isProduction && env.auth.jwtSecret === "dev-insecure-jwt-secret-change-me") {
-    warnings.push(
-      "SECURITY: JWT_SECRET is using the insecure development default in production. Set a strong random JWT_SECRET."
-    );
+  if (env.isDefaultJwtSecret()) {
+    const message =
+      "JWT_SECRET is the publicly-known development default. Every session token can be forged by anyone " +
+      "who has read this repository, including a token granting platform-admin access. " +
+      "Set a strong random value: openssl rand -base64 48";
+    if (env.isProduction) errors.push(`SECURITY: ${message}`);
+    else warnings.push(`SECURITY: ${message}`);
   }
 
   if (env.isProduction) {
-    if (!env.isAuthEnabled()) {
-      warnings.push(
-        "SECURITY: Running in production without API_KEY set. All API endpoints are publicly accessible. Set API_KEY to protect mutating routes."
+    if (env.corsOrigins.includes("*")) {
+      errors.push(
+        "SECURITY: CORS_ORIGINS is '*' in production. Credentialed cross-origin requests are refused in this " +
+          "configuration, which will break any separately-hosted frontend. Set CORS_ORIGINS to your explicit " +
+          "dashboard origin(s), e.g. CORS_ORIGINS=\"https://app.example.com\"."
       );
     }
-    if (env.corsOrigins.includes("*")) {
+
+    if (env.isDefaultEncryptionKey()) {
+      errors.push(
+        "SECURITY: ENCRYPTION_KEY is unset or the development default. Stored per-tenant SMTP and WhatsApp " +
+          "credentials would be encrypted with a publicly-known key. Set a strong random value: openssl rand -hex 32"
+      );
+    }
+
+    if (env.auth.cookieSecure === false) {
       warnings.push(
-        "SECURITY: CORS is set to allow all origins ('*') in production. Set CORS_ORIGINS to your dashboard origin(s)."
+        "SECURITY: COOKIE_SECURE=false in production — session cookies will be sent over plain HTTP. " +
+          "Only do this behind a trusted TLS-terminating proxy on a private network."
+      );
+    }
+
+    if (!env.isApiKeyEnabled()) {
+      warnings.push(
+        "API_KEY is not set. Machine clients cannot authenticate; browser sessions still work normally."
+      );
+    }
+
+    if (env.enableBackupRestore) {
+      warnings.push(
+        "SECURITY: ENABLE_BACKUP_RESTORE=true. The restore endpoint overwrites files in the application " +
+          "working directory. Keep this off unless you are actively restoring."
       );
     }
   }

@@ -215,9 +215,18 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
  * Requires an authenticated admin. Verifies the role against the database
  * (not just the token) so revoked admins lose access immediately.
  *
- * Special case: if the token was issued for the env-based superadmin
- * (id = "superadmin", role = "admin"), we skip the DB lookup and allow
- * access directly — this account has no DB row.
+ * Special case: the env-based superadmin console signs in with no database row,
+ * so its token (sub = "superadmin", role = "admin") cannot be verified against
+ * the users table and is accepted on the strength of the signature alone.
+ *
+ * That makes it the single most valuable token in the system, so it is now
+ * accepted only while the console it belongs to is actually configured. If
+ * ADMIN_EMAILS / ADMIN_PASSWORD / SUPERADMIN_SECRET are not all set, the
+ * console cannot issue a token, and any token claiming to be from it is
+ * refused rather than trusted.
+ *
+ * Note this path is only as strong as JWT_SECRET, which is why a default
+ * JWT_SECRET is now a fatal boot error in production (see validateEnv).
  */
 export async function requireAdmin(req: Request, res: Response, next: NextFunction) {
   const token = req.cookies?.[env.auth.cookieName];
@@ -225,11 +234,18 @@ export async function requireAdmin(req: Request, res: Response, next: NextFuncti
   const payload = verifySessionToken(token);
   if (!payload) return res.status(401).json({ error: "Session expired.", code: "invalid_session" });
 
-  // ── Superadmin bypass (env-based, no DB row) ──
-  if (payload.sub === "superadmin" && payload.role === "admin") {
-    (req as any).user = payload;
-    (req as any).adminUser = { id: "superadmin", email: payload.email, role: "admin" };
-    return next();
+  // ── Synthetic superadmin (env-based console, no DB row) ──
+  if (payload.sub === "superadmin") {
+    if (payload.role === "admin" && env.isSuperAdminConfigured()) {
+      (req as any).user = payload;
+      (req as any).adminUser = { id: "superadmin", email: payload.email, role: "admin" };
+      return next();
+    }
+    logger.warn(
+      "Refused a superadmin token: the superadmin console is not fully configured " +
+        "(ADMIN_EMAILS, ADMIN_PASSWORD and SUPERADMIN_SECRET must all be set)."
+    );
+    return res.status(403).json({ error: "Administrator access required.", code: "not_admin" });
   }
 
   if (!env.isDatabaseConfigured()) {

@@ -102,7 +102,11 @@ export function issueSessionToken(user: { id: string; email: string; role: strin
 
 export function verifySessionToken(token: string): { sub: string; email: string; role: string } | null {
   try {
-    return jwt.verify(token, env.auth.jwtSecret) as any;
+    // Pin the algorithm. Without `algorithms`, jsonwebtoken accepts any
+    // algorithm named in the token header, which is the classic algorithm-
+    // confusion foothold. Tokens are issued with HS256, so only HS256 is
+    // accepted here.
+    return jwt.verify(token, env.auth.jwtSecret, { algorithms: ["HS256"] }) as any;
   } catch {
     return null;
   }
@@ -241,7 +245,25 @@ export async function signup(input: { name?: string; email: string; password: st
  */
 export async function verifyOtp(input: { email: string; code: string; purpose?: OtpPurpose }): Promise<{ user: PublicUser; token: string }> {
   const email = normalizeEmail(input.email);
-  const purpose: OtpPurpose = input.purpose === "login" ? "login" : "verify";
+
+  /*
+   * Only email-verification codes can be exchanged for a session here.
+   *
+   * No "login"-purpose OTP can exist any more (resendOtp refuses to mint one,
+   * and login() only ever creates "verify"), so this branch is already
+   * unreachable in practice. Rejecting it explicitly keeps the password-bypass
+   * path from reappearing the moment someone adds a new OTP producer.
+   * "reset" codes are exchanged by resetPassword, never for a session.
+   */
+  if (input.purpose && input.purpose !== "verify") {
+    await writeAudit("otp_verify_rejected", { data: { email, requestedPurpose: input.purpose } });
+    throw new AuthError(
+      400,
+      "unsupported_purpose",
+      "This code cannot be used to sign in."
+    );
+  }
+  const purpose: OtpPurpose = "verify";
 
   await consumeOtp(email, input.code, purpose);
 
@@ -494,15 +516,36 @@ export async function login(
 
 /**
  * Resends a verification OTP for an email (only if the account is unverified).
+ *
+ * SECURITY: this used to honour `purpose: "login"`, which issued a login OTP
+ * for ANY existing account — verified or not. Since verifyOtp accepts the
+ * "login" purpose and returns a full session, that combination was a complete
+ * password bypass: request a code for any known email, read it from the inbox,
+ * and receive a session. It also never touched bcrypt.compare, so the failed-
+ * login counter and account lockout were never consulted.
+ *
+ * Passwordless login is a legitimate feature, but it is not this one — it would
+ * need its own deliberate flow, rate limiting and audit trail. Until then the
+ * only purpose this endpoint can issue is "verify", and only for an account
+ * that has not yet verified its email address.
  */
 export async function resendOtp(input: { email: string; purpose?: OtpPurpose }): Promise<{ ok: true }> {
   const email = normalizeEmail(input.email);
-  const purpose: OtpPurpose = input.purpose === "login" ? "login" : "verify";
+
+  if (input.purpose && input.purpose !== "verify") {
+    await writeAudit("otp_resend_rejected", { data: { email, requestedPurpose: input.purpose } });
+    throw new AuthError(
+      400,
+      "unsupported_purpose",
+      "Only email-verification codes can be requested here. Use the password form to sign in, " +
+        "or 'Forgot password' to reset it."
+    );
+  }
 
   const user = await prisma.user.findUnique({ where: { email } });
   // Do not reveal whether the account exists; only send when appropriate.
-  if (user && (purpose === "login" || !user.emailVerified)) {
-    await createAndSendOtp(email, purpose, user.id);
+  if (user && !user.emailVerified) {
+    await createAndSendOtp(email, "verify", user.id);
   }
   return { ok: true };
 }

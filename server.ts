@@ -378,17 +378,30 @@ app.post(
   })
 );
 
-// ── CRM: Lead Lists & DB-backed leads ──
-app.use("/api/crm", apiRateLimiter(), crmRoutes);
-
-// ── Production features (analytics, notifications, backups) ──
-app.use("/api/production", productionRoutes);
-
-// ── Protect all remaining API routes with rate limiting + optional auth ──
+// ── Protect all remaining API routes with rate limiting + auth ──
 app.use("/api", apiRateLimiter());
 app.use("/api", apiKeyAuth());
 // Resolve the signed-in user's plan entitlements for downstream gating.
 app.use("/api", attachEntitlements);
+
+/*
+ * CRM and production routers are mounted AFTER the auth middleware above.
+ *
+ * They used to be mounted before it, which meant `req.authUser` was never
+ * populated inside them. crmRoutes read `req.authUser?.id ?? null` and treated
+ * null as "no auth, so return everything" — so every list and lead in the
+ * database was readable, editable and deletable by an unauthenticated caller,
+ * and GET /api/crm/lists/ALL/export returned every tenant's leads as CSV.
+ * productionRoutes imported requireAuth but never applied it, leaving its
+ * backup endpoints anonymous.
+ *
+ * Mount order is the fix; the routers additionally enforce their own guards.
+ */
+// ── CRM: Lead Lists & DB-backed leads ──
+app.use("/api/crm", crmRoutes);
+
+// ── Production features (analytics, notifications, backups) ──
+app.use("/api/production", productionRoutes);
 
 // API Routes
 app.get("/api/config", (req, res) => {
@@ -2027,8 +2040,26 @@ async function startServer() {
     console.log(`  Dashboard    : http://localhost:${PORT}/app`);
     console.log(`  Health check : http://localhost:${PORT}/api/health`);
 
-    const { warnings } = validateEnv();
+    const { warnings, errors } = validateEnv();
     warnings.forEach((w) => logger.warn(w));
+
+    /*
+     * Fatal configuration is fatal. Previously these were warnings, so a
+     * production deploy with a publicly-known JWT_SECRET and wildcard CORS
+     * started normally and looked healthy. Refusing to boot is noisy on
+     * purpose: a server that cannot protect its sessions should not serve
+     * traffic.
+     */
+    if (errors.length > 0) {
+      errors.forEach((e) => logger.error(e));
+      if (env.isProduction) {
+        logger.error(
+          `Refusing to start with ${errors.length} fatal configuration error(s). ` +
+            "Fix the values above, or run with NODE_ENV=development to start anyway."
+        );
+        process.exit(1);
+      }
+    }
 
     // Establish the database connection (non-blocking; auth routes guard on config).
     void connectDatabase();

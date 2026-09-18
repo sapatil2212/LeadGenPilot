@@ -15,6 +15,22 @@ import { loadFailedLeads } from "./googleSheetsWebhook";
  * Production-grade data protection with versioning.
  */
 
+/**
+ * The data files createBackup() puts into an archive AND is willing to write
+ * back on restore.
+ *
+ * Deliberately excluded from restore:
+ *   .env.masked    — a redacted copy; restoring it would be meaningless.
+ *   metadata.json  — the archive's own manifest, whose name collides with the
+ *                    application's metadata.json at the repository root.
+ *                    Restoring it would have silently clobbered a source file.
+ */
+const BACKUP_ENTRIES = [
+  "processed-leads.json",
+  "failed-leads.json",
+  "leadfinder-config.json",
+] as const;
+
 export interface BackupMetadata {
   id: string;
   timestamp: string;
@@ -22,6 +38,18 @@ export interface BackupMetadata {
   failedLeadsCount: number;
   size: number;
   path: string;
+}
+
+/**
+ * Backup ids are generated as `backup_<ISO timestamp with : and . replaced>`,
+ * so they only ever contain word characters and hyphens. Ids arrive from the
+ * URL and are interpolated into a filesystem path, so anything outside this
+ * shape is rejected rather than sanitized — `../../server` must not resolve.
+ */
+const BACKUP_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+function isValidBackupId(id: string): boolean {
+  return BACKUP_ID_RE.test(String(id ?? ""));
 }
 
 export class BackupService {
@@ -32,6 +60,26 @@ export class BackupService {
     this.backupDir = path.join(process.cwd(), backupDir);
     this.maxBackups = maxBackups;
     this.ensureBackupDir();
+  }
+
+  /**
+   * Resolves a backup id to a path inside the backup directory, or null if the
+   * id is malformed or escapes the directory. Belt and braces: the pattern
+   * check alone is sufficient, but the containment check means a future change
+   * to the pattern cannot reintroduce traversal.
+   */
+  private resolveBackupPath(backupId: string, extension: ".zip" | ".json"): string | null {
+    if (!isValidBackupId(backupId)) {
+      logger.warn(`Rejected backup id with unexpected characters: ${JSON.stringify(String(backupId).slice(0, 80))}`);
+      return null;
+    }
+    const resolved = path.resolve(this.backupDir, `${backupId}${extension}`);
+    const root = path.resolve(this.backupDir);
+    if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+      logger.warn("Rejected backup id that resolved outside the backup directory.");
+      return null;
+    }
+    return resolved;
   }
 
   private ensureBackupDir() {
@@ -152,8 +200,9 @@ export class BackupService {
    * Restore from a backup.
    */
   async restoreBackup(backupId: string): Promise<boolean> {
-    const backupPath = path.join(this.backupDir, `${backupId}.zip`);
-    
+    const backupPath = this.resolveBackupPath(backupId, ".zip");
+    if (!backupPath) return false;
+
     if (!fs.existsSync(backupPath)) {
       logger.error(`Backup not found: ${backupId}`);
       return false;
@@ -162,15 +211,44 @@ export class BackupService {
     logger.info(`Restoring backup: ${backupId}`);
 
     try {
-      // Extract backup (requires unzipper)
       const unzipper = await import("unzipper");
-      const extract = await fs
-        .createReadStream(backupPath)
-        .pipe(unzipper.Extract({ path: process.cwd() }))
-        .promise();
+      const target = path.resolve(process.cwd());
 
-      logger.success(`Backup restored: ${backupId}`);
-      return true;
+      /*
+       * Entry-by-entry extraction with an explicit containment check.
+       *
+       * unzipper.Extract() writes whatever paths the archive declares, so an
+       * archive containing "../../.ssh/authorized_keys" or an absolute path
+       * escapes the target directory ("zip slip"). Only the known backup
+       * payload filenames are restored; anything else is skipped and logged.
+       */
+      const allowed = new Set<string>(BACKUP_ENTRIES);
+      const directory = await unzipper.Open.file(backupPath);
+      let restored = 0;
+
+      for (const entry of directory.files) {
+        if (entry.type !== "File") continue;
+
+        const entryName = entry.path.replace(/\\/g, "/");
+        const base = path.posix.basename(entryName);
+
+        if (entryName !== base || !allowed.has(base)) {
+          logger.warn(`Skipped unexpected archive entry during restore: ${JSON.stringify(entryName.slice(0, 120))}`);
+          continue;
+        }
+
+        const destination = path.resolve(target, base);
+        if (!destination.startsWith(target + path.sep)) {
+          logger.warn("Skipped archive entry that resolved outside the working directory.");
+          continue;
+        }
+
+        fs.writeFileSync(destination, await entry.buffer());
+        restored++;
+      }
+
+      logger.success(`Backup restored: ${backupId} (${restored} file(s))`);
+      return restored > 0;
     } catch (error: any) {
       logger.error(`Restore failed: ${error.message}`);
       return false;
@@ -181,8 +259,9 @@ export class BackupService {
    * Delete a backup.
    */
   deleteBackup(backupId: string): boolean {
-    const backupPath = path.join(this.backupDir, `${backupId}.zip`);
-    const metadataPath = path.join(this.backupDir, `${backupId}.json`);
+    const backupPath = this.resolveBackupPath(backupId, ".zip");
+    const metadataPath = this.resolveBackupPath(backupId, ".json");
+    if (!backupPath || !metadataPath) return false;
 
     try {
       if (fs.existsSync(backupPath)) {

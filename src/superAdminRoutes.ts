@@ -18,10 +18,12 @@ import {
   issueSessionToken,
   verifySessionToken,
   sessionCookieOptions,
+  writeAudit,
   type RequestMeta,
 } from "./authService";
 import { env } from "./env";
 import { logger } from "./logger";
+import { safeEqual } from "./security";
 
 const router = Router();
 
@@ -59,12 +61,19 @@ router.post("/login", superadminLimiter, async (req: Request, res: Response) => 
     return res.status(400).json({ error: "Email, password and secret are required.", code: "missing_fields" });
   }
 
-  // 2. Read env credentials
-  const adminEmail = (process.env.ADMIN_EMAILS || "").split(",")[0].trim().toLowerCase();
-  const adminPassword = (process.env.ADMIN_PASSWORD || "").trim();
-  const expectedSecret = (process.env.SUPERADMIN_SECRET || "").trim();
+  // Reject non-string input before calling string methods on it. This handler
+  // is async with no try/catch, so `email.trim()` on a number previously threw
+  // an unhandled rejection and left the request hanging.
+  if (typeof email !== "string" || typeof password !== "string" || typeof secret !== "string") {
+    return res.status(400).json({ error: "Email, password and secret must be strings.", code: "invalid_fields" });
+  }
 
-  if (!adminEmail || !adminPassword || !expectedSecret) {
+  // 2. Read env credentials
+  const adminEmail = env.adminEmails[0] || "";
+  const adminPassword = env.adminPassword.trim();
+  const expectedSecret = env.superAdminSecret.trim();
+
+  if (!env.isSuperAdminConfigured()) {
     logger.error("Superadmin: ADMIN_EMAILS, ADMIN_PASSWORD or SUPERADMIN_SECRET not configured in .env");
     return res.status(503).json({
       error: "Superadmin login is not fully configured. Check ADMIN_EMAILS, ADMIN_PASSWORD and SUPERADMIN_SECRET in your .env.",
@@ -72,13 +81,26 @@ router.post("/login", superadminLimiter, async (req: Request, res: Response) => 
     });
   }
 
-  // 3. Validate all three credentials (constant-time-like comparison)
-  const emailMatch = email.trim().toLowerCase() === adminEmail;
-  const passwordMatch = password === adminPassword;
-  const secretMatch = secret === expectedSecret;
+  /*
+   * 3. Validate all three credentials.
+   *
+   * Every comparison is timing-safe and all three run unconditionally, so the
+   * response time does not reveal which factor was wrong. The previous code
+   * used `===` (short-circuiting on the first mismatch) while the comment
+   * claimed constant-time behaviour.
+   */
+  const emailMatch = safeEqual(email.trim().toLowerCase(), adminEmail);
+  const passwordMatch = safeEqual(password, adminPassword);
+  const secretMatch = safeEqual(secret, expectedSecret);
 
   if (!emailMatch || !passwordMatch || !secretMatch) {
-    logger.warn(`Superadmin login failed for "${email}" from ${metaOf(req).ip}`);
+    logger.warn(`Superadmin login failed from ${metaOf(req).ip}`);
+    // The file header promised an audit trail that was never written. Record
+    // the attempt without echoing the submitted email into the log or the DB.
+    await writeAudit("superadmin_login_failed", {
+      meta: metaOf(req),
+      data: { emailMatch, passwordMatch, secretMatch },
+    });
     return res.status(401).json({ error: "Invalid credentials or secret.", code: "unauthorized" });
   }
 
@@ -91,7 +113,8 @@ router.post("/login", superadminLimiter, async (req: Request, res: Response) => 
 
   res.cookie(env.auth.cookieName, token, sessionCookieOptions());
 
-  logger.info(`Superadmin login successful for "${adminEmail}" from ${metaOf(req).ip}`);
+  logger.info(`Superadmin login successful from ${metaOf(req).ip}`);
+  await writeAudit("superadmin_login_success", { meta: metaOf(req) });
 
   return res.json({
     success: true,
