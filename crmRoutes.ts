@@ -2,88 +2,39 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * CRM Routes — full lead management API backed by MySQL via Prisma.
- * Provides named lead lists, rich sorting/filtering, notes, and CSV export.
+ * CRM Routes — lead management API backed by MySQL via Prisma.
+ * Named lead lists, rich sorting/filtering, notes, and CSV export.
  *
  * TENANT ISOLATION
  * ----------------
- * Every route in this router is scoped to the signed-in user. `requireTenant`
- * runs first and refuses the request outright when there is no session, and
- * each query carries an explicit ownership predicate.
+ * `resolveTenantContext` runs before every route and refuses the request when
+ * there is no session or no workspace. Data access then goes exclusively through
+ * src/tenancy/repository.ts, which injects the tenant predicate itself — there
+ * is no repository function that accepts a bare id, so a handler here cannot
+ * express an unscoped query even by mistake.
  *
- * This router previously derived its scope from `req.authUser?.id ?? null` and
- * treated `null` as "unauthenticated, so operate globally". Because the router
+ * That structure is the point. Before Phase 1 this router derived its scope from
+ * `req.authUser?.id ?? null` and treated null as "operate globally"; because it
  * was also mounted before the middleware that populates `req.authUser`, the
- * scope was ALWAYS null in practice: any anonymous caller could read, edit and
- * delete every tenant's lists and leads, and GET /lists/ALL/export returned the
- * entire leads table as CSV. Ownership is now mandatory, never inferred.
+ * scope was always null and every tenant's data was readable, editable and
+ * deletable by an anonymous caller. Phase 1 added the predicate to all ten
+ * handlers; Phase 2 removes the possibility of forgetting it.
+ *
+ * Each route also declares the capability it needs, so a member can be given
+ * lead access without the ability to delete records or export the database.
  */
 
-import express, { type Request, type Response, type NextFunction } from "express";
+import express, { type Request, type Response } from "express";
 import { prisma } from "./src/prisma";
 import { Lead as LeadType } from "./src/types";
 import { logger } from "./src/logger";
-import { env } from "./src/env";
+import { resolveTenantContext, requirePermission, ctxOf } from "./src/tenancy/context";
+import * as repo from "./src/tenancy/repository";
 
 const router = express.Router();
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Tenant guard
-// ──────────────────────────────────────────────────────────────────────────────
-
-/** The resolved owner for the current request. */
-declare global {
-  // eslint-disable-next-line @typescript-eslint/no-namespace
-  namespace Express {
-    interface Request {
-      /** Owning user id for every CRM query in this request. Never null. */
-      tenantUserId?: string;
-    }
-  }
-}
-
-/**
- * Requires an authenticated owner. `req.authUser` is populated by
- * attachEntitlements, which runs before this router is mounted.
- */
-function requireTenant(req: Request, res: Response, next: NextFunction) {
-  if (!env.isDatabaseConfigured()) {
-    return res.status(503).json({
-      error: "The CRM requires a configured database.",
-      code: "db_unconfigured",
-    });
-  }
-
-  const userId = req.authUser?.id;
-  if (!userId) {
-    return res.status(401).json({
-      error: "Authentication required.",
-      code: "no_session",
-    });
-  }
-
-  req.tenantUserId = userId;
-  next();
-}
-
-router.use(requireTenant);
-
-/**
- * Resolves a lead list only if the current user owns it. Returning null for
- * "not yours" as well as "does not exist" is deliberate: responding 404 either
- * way stops the API confirming that another tenant's list id is real.
- */
-async function findOwnedList(listId: string, userId: string) {
-  return prisma.leadList.findFirst({ where: { id: listId, userId } });
-}
-
-/** Resolves a lead only if it sits in a list the current user owns. */
-async function findOwnedLead(leadId: string, userId: string) {
-  return prisma.lead.findFirst({
-    where: { id: leadId, list: { is: { userId } } },
-    select: { id: true },
-  });
-}
+// Establishes req.ctx (user, workspace, role, permissions) for every route.
+router.use(resolveTenantContext);
 
 const NOT_FOUND_LIST = { error: "Lead list not found.", code: "not_found" } as const;
 const NOT_FOUND_LEAD = { error: "Lead not found.", code: "not_found" } as const;
@@ -114,7 +65,7 @@ function trimTo(value: unknown, max: number): string {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Helpers
+// Row mapping
 // ──────────────────────────────────────────────────────────────────────────────
 
 /** Convert a DB lead row back to the app's Lead type */
@@ -160,7 +111,13 @@ function dbLeadToAppLead(l: any): LeadType & { id: string; listId: string; notes
   };
 }
 
-/** Convert app Lead type to DB create/update input */
+/**
+ * Convert app Lead type to DB create/update input.
+ *
+ * `userId` is still populated alongside `tenantId` (the repository adds both):
+ * the scraper persistence path and the Google Sheets sync still read it, so
+ * dropping it now would break them. It goes when those readers move over.
+ */
 function appLeadToDbInput(lead: LeadType, listId: string, userId?: string | null) {
   return {
     listId,
@@ -203,109 +160,13 @@ function appLeadToDbInput(lead: LeadType, listId: string, userId?: string | null
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// LEAD LIST ENDPOINTS
+// Query building
 // ──────────────────────────────────────────────────────────────────────────────
 
 /**
- * GET /api/crm/lists
- * Returns the current user's lead lists.
- */
-router.get("/lists", async (req: Request, res: Response) => {
-  try {
-    const lists = await prisma.leadList.findMany({
-      where: { userId: req.tenantUserId },
-      orderBy: { scrapedAt: "desc" },
-      include: { _count: { select: { leads: true } } },
-    });
-    res.json(lists.map((l: any) => ({
-      id: l.id,
-      name: l.name,
-      businessType: l.businessType,
-      location: l.location,
-      scrapedAt: l.scrapedAt,
-      createdAt: l.createdAt,
-      leadCount: l._count.leads,
-    })));
-  } catch (err: any) {
-    logger.error("CRM: Failed to fetch lead lists", err);
-    res.status(500).json({ error: "Failed to fetch lead lists." });
-  }
-});
-
-/**
- * POST /api/crm/lists
- * Create a new named lead list owned by the current user.
- * Body: { name, businessType, location }
- */
-router.post("/lists", async (req: Request, res: Response) => {
-  try {
-    const { name, businessType, location } = req.body || {};
-    if (!name || !String(name).trim()) {
-      return res.status(400).json({ error: "List name is required." });
-    }
-    const list = await prisma.leadList.create({
-      data: {
-        name: trimTo(name, LIMITS.listName),
-        businessType: trimTo(businessType || "", LIMITS.category),
-        location: trimTo(location || "", LIMITS.address),
-        // Ownership is never null: an unowned list would be invisible to its
-        // creator and readable by nobody, which is how orphan rows appear.
-        userId: req.tenantUserId!,
-      },
-    });
-    res.json({ id: list.id, name: list.name, businessType: list.businessType, location: list.location, scrapedAt: list.scrapedAt, leadCount: 0 });
-  } catch (err: any) {
-    logger.error("CRM: Failed to create lead list", err);
-    res.status(500).json({ error: "Failed to create lead list." });
-  }
-});
-
-/**
- * PATCH /api/crm/lists/:id
- * Rename one of the current user's lead lists.
- * Body: { name }
- */
-router.patch("/lists/:id", async (req: Request, res: Response) => {
-  try {
-    const { name } = req.body || {};
-    if (!name || !String(name).trim()) {
-      return res.status(400).json({ error: "List name is required." });
-    }
-
-    const owned = await findOwnedList(req.params.id, req.tenantUserId!);
-    if (!owned) return res.status(404).json(NOT_FOUND_LIST);
-
-    const list = await prisma.leadList.update({
-      where: { id: owned.id },
-      data: { name: trimTo(name, LIMITS.listName) },
-    });
-    res.json({ id: list.id, name: list.name });
-  } catch (err: any) {
-    logger.error("CRM: Failed to rename lead list", err);
-    res.status(500).json({ error: "Failed to rename lead list." });
-  }
-});
-
-/**
- * DELETE /api/crm/lists/:id
- * Delete one of the current user's lead lists and all its leads (cascade).
- */
-router.delete("/lists/:id", async (req: Request, res: Response) => {
-  try {
-    const owned = await findOwnedList(req.params.id, req.tenantUserId!);
-    if (!owned) return res.status(404).json(NOT_FOUND_LIST);
-
-    await prisma.leadList.delete({ where: { id: owned.id } });
-    res.json({ success: true });
-  } catch (err: any) {
-    logger.error("CRM: Failed to delete lead list", err);
-    res.status(500).json({ error: "Failed to delete lead list." });
-  }
-});
-
-/**
- * Build a Prisma `where` clause from the shared lead query params.
- * Callers add their own scope (listId / list-id set) to the returned object.
+ * Build a Prisma `where` fragment from the shared lead query params. The tenant
+ * predicate is NOT part of this — the repository owns that, so a caller cannot
+ * accidentally use these filters as the entire clause.
  *
  * Query params:
  *   search        — text search (name, address, phone, email)
@@ -316,7 +177,7 @@ router.delete("/lists/:id", async (req: Request, res: Response) => {
  *   dateFrom      — ISO date string
  *   dateTo        — ISO date string
  */
-function buildLeadWhere(query: Record<string, string>): any {
+function buildLeadWhere(query: Record<string, string>): Record<string, unknown> {
   const {
     search = "",
     priority = "ALL",
@@ -368,7 +229,7 @@ function buildLeadWhere(query: Record<string, string>): any {
 }
 
 /** Build a Prisma `orderBy` from the shared sort params. */
-function buildLeadOrderBy(query: Record<string, string>): any {
+function buildLeadOrderBy(query: Record<string, string>): Record<string, unknown> {
   const { sortBy = "leadScore", sortDir = "desc" } = query;
   const allowedSorts: Record<string, string> = {
     businessName: "businessName",
@@ -383,31 +244,109 @@ function buildLeadOrderBy(query: Record<string, string>): any {
   return { [orderField]: direction };
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// LEAD LIST ENDPOINTS
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** GET /api/crm/lists — the workspace's lead lists. */
+router.get("/lists", requirePermission("VIEW_LEADS"), async (req: Request, res: Response) => {
+  try {
+    const lists = await repo.listLeadLists(ctxOf(req));
+    res.json(lists.map((l: any) => ({
+      id: l.id,
+      name: l.name,
+      businessType: l.businessType,
+      location: l.location,
+      scrapedAt: l.scrapedAt,
+      createdAt: l.createdAt,
+      leadCount: l._count.leads,
+    })));
+  } catch (err: any) {
+    logger.error("CRM: Failed to fetch lead lists", err);
+    res.status(500).json({ error: "Failed to fetch lead lists." });
+  }
+});
+
+/** POST /api/crm/lists — create a list in the workspace. Body: { name, businessType, location } */
+router.post("/lists", requirePermission("MANAGE_CRM"), async (req: Request, res: Response) => {
+  try {
+    const { name, businessType, location } = req.body || {};
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: "List name is required." });
+    }
+    const list = await repo.createLeadList(ctxOf(req), {
+      name: trimTo(name, LIMITS.listName),
+      businessType: trimTo(businessType || "", LIMITS.category),
+      location: trimTo(location || "", LIMITS.address),
+    });
+    res.json({
+      id: list.id,
+      name: list.name,
+      businessType: list.businessType,
+      location: list.location,
+      scrapedAt: list.scrapedAt,
+      leadCount: 0,
+    });
+  } catch (err: any) {
+    logger.error("CRM: Failed to create lead list", err);
+    res.status(500).json({ error: "Failed to create lead list." });
+  }
+});
+
+/** PATCH /api/crm/lists/:id — rename. Body: { name } */
+router.patch("/lists/:id", requirePermission("MANAGE_CRM"), async (req: Request, res: Response) => {
+  try {
+    const { name } = req.body || {};
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: "List name is required." });
+    }
+    const list = await repo.renameLeadList(ctxOf(req), req.params.id, trimTo(name, LIMITS.listName));
+    if (!list) return res.status(404).json(NOT_FOUND_LIST);
+    res.json({ id: list.id, name: list.name });
+  } catch (err: any) {
+    logger.error("CRM: Failed to rename lead list", err);
+    res.status(500).json({ error: "Failed to rename lead list." });
+  }
+});
+
+/**
+ * DELETE /api/crm/lists/:id — delete the list and its leads (cascade).
+ *
+ * Requires DELETE_LEADS rather than MANAGE_CRM: the row being deleted is a
+ * container, but the cascade destroys every lead inside it, so the permission
+ * has to reflect the real blast radius. A member can create and rename lists —
+ * that is ordinary organising work — but cannot wipe one out.
+ */
+router.delete("/lists/:id", requirePermission("DELETE_LEADS"), async (req: Request, res: Response) => {
+  try {
+    const deleted = await repo.deleteLeadList(ctxOf(req), req.params.id);
+    if (!deleted) return res.status(404).json(NOT_FOUND_LIST);
+    res.json({ success: true });
+  } catch (err: any) {
+    logger.error("CRM: Failed to delete lead list", err);
+    res.status(500).json({ error: "Failed to delete lead list." });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// LEAD ENDPOINTS
+// ──────────────────────────────────────────────────────────────────────────────
+
 /**
  * GET /api/crm/leads
- * Aggregated view: every lead across ALL of the current user's lists, with the
- * same filtering/sorting as the per-list endpoint. Each lead is annotated with
- * its originating list name so the UI can show where it came from.
+ * Every lead across the workspace's lists, annotated with its list name.
  */
-router.get("/leads", async (req: Request, res: Response) => {
+router.get("/leads", requirePermission("VIEW_LEADS"), async (req: Request, res: Response) => {
   try {
-    const userLists = await prisma.leadList.findMany({
-      where: { userId: req.tenantUserId },
-      select: { id: true, name: true },
-    });
-    const listNameById = new Map(userLists.map((l: any) => [l.id, l.name]));
+    const ctx = ctxOf(req);
+    const lists = await repo.listLeadLists(ctx);
+    const listNameById = new Map(lists.map((l: any) => [l.id, l.name]));
 
-    // No lists means no leads. Without this guard an empty `in` array would
-    // match nothing anyway, but being explicit avoids a pointless query.
-    if (userLists.length === 0) return res.json([]);
-
-    const where = buildLeadWhere(req.query as Record<string, string>);
-    where.listId = { in: userLists.map((l: any) => l.id) };
-
-    const leads = await prisma.lead.findMany({
-      where,
-      orderBy: buildLeadOrderBy(req.query as Record<string, string>),
-    });
+    const leads = await repo.findLeadsInWorkspace(
+      ctx,
+      buildLeadWhere(req.query as Record<string, string>),
+      buildLeadOrderBy(req.query as Record<string, string>)
+    );
 
     res.json(leads.map((l: any) => ({
       ...dbLeadToAppLead(l),
@@ -419,23 +358,16 @@ router.get("/leads", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/crm/lists/:id/leads
- * Get leads in one of the current user's lists, with filtering and sorting.
- */
-router.get("/lists/:id/leads", async (req: Request, res: Response) => {
+/** GET /api/crm/lists/:id/leads — leads in one owned list. */
+router.get("/lists/:id/leads", requirePermission("VIEW_LEADS"), async (req: Request, res: Response) => {
   try {
-    const owned = await findOwnedList(req.params.id, req.tenantUserId!);
-    if (!owned) return res.status(404).json(NOT_FOUND_LIST);
-
-    const where = buildLeadWhere(req.query as Record<string, string>);
-    where.listId = owned.id;
-
-    const leads = await prisma.lead.findMany({
-      where,
-      orderBy: buildLeadOrderBy(req.query as Record<string, string>),
-    });
-
+    const leads = await repo.findLeadsInList(
+      ctxOf(req),
+      req.params.id,
+      buildLeadWhere(req.query as Record<string, string>),
+      buildLeadOrderBy(req.query as Record<string, string>)
+    );
+    if (leads === null) return res.status(404).json(NOT_FOUND_LIST);
     res.json(leads.map(dbLeadToAppLead));
   } catch (err: any) {
     logger.error("CRM: Failed to fetch leads", err);
@@ -443,12 +375,8 @@ router.get("/lists/:id/leads", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/crm/lists/:id/leads
- * Bulk save leads into one of the current user's lists.
- * Body: { leads: Lead[] }
- */
-router.post("/lists/:id/leads", async (req: Request, res: Response) => {
+/** POST /api/crm/lists/:id/leads — bulk upsert into an owned list. Body: { leads: Lead[] } */
+router.post("/lists/:id/leads", requirePermission("EDIT_LEADS"), async (req: Request, res: Response) => {
   try {
     const { leads } = req.body || {};
     if (!Array.isArray(leads)) return res.status(400).json({ error: "leads must be an array." });
@@ -459,26 +387,21 @@ router.post("/lists/:id/leads", async (req: Request, res: Response) => {
       });
     }
 
-    const owned = await findOwnedList(req.params.id, req.tenantUserId!);
+    const ctx = ctxOf(req);
+    const owned = await repo.findLeadList(ctx, req.params.id);
     if (!owned) return res.status(404).json(NOT_FOUND_LIST);
 
-    const userId = req.tenantUserId!;
-    const listId = owned.id;
-
-    // Upsert by businessName+listId to avoid duplicates on re-import
     let created = 0;
     let updated = 0;
     for (const lead of leads) {
       if (!lead || typeof lead !== "object" || !lead.businessName) continue;
-      const data = appLeadToDbInput(lead as LeadType, listId, userId);
-      const existing = await prisma.lead.findFirst({
-        where: { listId, businessName: data.businessName },
-      });
+      const data = appLeadToDbInput(lead as LeadType, owned.id, ctx.userId);
+      const existing = await repo.findLeadByName(ctx, owned.id, data.businessName);
       if (existing) {
-        await prisma.lead.update({ where: { id: existing.id }, data });
+        await repo.updateLeadById(existing.id, data);
         updated++;
       } else {
-        await prisma.lead.create({ data });
+        await repo.createLead(ctx, data);
         created++;
       }
     }
@@ -491,14 +414,10 @@ router.post("/lists/:id/leads", async (req: Request, res: Response) => {
 
 /**
  * PATCH /api/crm/leads/:id
- * Update one of the current user's leads. Supports both quick outreach-status
- * patches and full core-field edits (from the Leads table's Edit action).
+ * Quick outreach-status patches and full core-field edits.
  */
-router.patch("/leads/:id", async (req: Request, res: Response) => {
+router.patch("/leads/:id", requirePermission("EDIT_LEADS"), async (req: Request, res: Response) => {
   try {
-    const owned = await findOwnedLead(req.params.id, req.tenantUserId!);
-    if (!owned) return res.status(404).json(NOT_FOUND_LEAD);
-
     const {
       notes, emailStatus, whatsappStatus, emailSentDate, whatsappSentDate,
       businessName, phone, address, category, website, rating, reviews, leadPriority,
@@ -533,10 +452,8 @@ router.patch("/leads/:id", async (req: Request, res: Response) => {
       updateData.leadPriority = leadPriority;
     }
 
-    const lead = await prisma.lead.update({
-      where: { id: owned.id },
-      data: updateData,
-    });
+    const lead = await repo.updateLead(ctxOf(req), req.params.id, updateData);
+    if (!lead) return res.status(404).json(NOT_FOUND_LEAD);
     res.json(dbLeadToAppLead(lead));
   } catch (err: any) {
     logger.error("CRM: Failed to update lead", err);
@@ -546,14 +463,13 @@ router.patch("/leads/:id", async (req: Request, res: Response) => {
 
 /**
  * DELETE /api/crm/leads/:id
- * Delete one of the current user's leads.
+ * Requires DELETE_LEADS, which the default `member` role does not have — a
+ * teammate can correct a record but not destroy it.
  */
-router.delete("/leads/:id", async (req: Request, res: Response) => {
+router.delete("/leads/:id", requirePermission("DELETE_LEADS"), async (req: Request, res: Response) => {
   try {
-    const owned = await findOwnedLead(req.params.id, req.tenantUserId!);
-    if (!owned) return res.status(404).json(NOT_FOUND_LEAD);
-
-    await prisma.lead.delete({ where: { id: owned.id } });
+    const deleted = await repo.deleteLead(ctxOf(req), req.params.id);
+    if (!deleted) return res.status(404).json(NOT_FOUND_LEAD);
     res.json({ success: true });
   } catch (err: any) {
     logger.error("CRM: Failed to delete lead", err);
@@ -563,34 +479,14 @@ router.delete("/leads/:id", async (req: Request, res: Response) => {
 
 /**
  * GET /api/crm/lists/:id/export
- * Export leads as CSV. `:id` may be "ALL", which exports every lead across the
- * CURRENT USER'S lists only — it previously exported the entire leads table.
+ * CSV export. `:id` may be "ALL", which covers every lead in the CALLER'S
+ * workspace — this is the endpoint that used to dump the entire leads table.
  */
-router.get("/lists/:id/export", async (req: Request, res: Response) => {
+router.get("/lists/:id/export", requirePermission("EXPORT_LEADS"), async (req: Request, res: Response) => {
   try {
-    const userId = req.tenantUserId!;
-    const isAll = req.params.id === "ALL";
-
-    let listInfo: { id: string; name: string } | null = null;
-    let where: any;
-
-    if (isAll) {
-      const userLists = await prisma.leadList.findMany({
-        where: { userId },
-        select: { id: true },
-      });
-      where = { listId: { in: userLists.map((l: any) => l.id) } };
-    } else {
-      const owned = await findOwnedList(req.params.id, userId);
-      if (!owned) return res.status(404).json(NOT_FOUND_LIST);
-      listInfo = { id: owned.id, name: owned.name };
-      where = { listId: owned.id };
-    }
-
-    const leads = await prisma.lead.findMany({
-      where,
-      orderBy: { leadScore: "desc" },
-    });
+    const result = await repo.findLeadsForExport(ctxOf(req), req.params.id === "ALL" ? "ALL" : req.params.id);
+    if (result === null) return res.status(404).json(NOT_FOUND_LIST);
+    const { leads, listName } = result;
 
     const headers = [
       "Business Name","Phone","Address","Rating","Reviews","Website","Website Status",
@@ -619,7 +515,7 @@ router.get("/lists/:id/export", async (req: Request, res: Response) => {
     });
 
     const csv = [headers.join(","), ...rows].join("\n");
-    const filename = `${(listInfo?.name ?? "all_leads").replace(/[^a-zA-Z0-9-_]/g, "_")}_${Date.now()}.csv`;
+    const filename = `${(listName ?? "all_leads").replace(/[^a-zA-Z0-9-_]/g, "_")}_${Date.now()}.csv`;
 
     res.setHeader("Content-Type", "text/csv");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
@@ -631,4 +527,4 @@ router.get("/lists/:id/export", async (req: Request, res: Response) => {
 });
 
 export default router;
-export { appLeadToDbInput, dbLeadToAppLead, requireTenant };
+export { appLeadToDbInput, dbLeadToAppLead };

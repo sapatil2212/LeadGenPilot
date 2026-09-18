@@ -12,9 +12,14 @@
  *     CSV to an unauthenticated caller, and PATCH/DELETE on any list or lead id
  *     succeeded without an ownership check.
  *
+ * Phase 2 moved the router onto workspace scope: `resolveTenantContext` supplies
+ * req.ctx and all data access goes through the repository, which injects the
+ * tenant predicate itself. These tests therefore assert two things at once —
+ * that cross-workspace access is refused, and that the predicate handed to
+ * Prisma actually mentions the caller's workspace.
+ *
  * The fixture ids are the real ones from the Phase 0 backup, where 5 lists and
- * 52 leads split cleanly across two users — so these tests describe the exact
- * data that was exposed.
+ * 52 leads split cleanly across two users.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -23,9 +28,13 @@ import cookieParser from "cookie-parser";
 import request from "supertest";
 import {
   createPrismaMock,
+  membershipRow,
+  withMemberships,
   type PrismaMock,
   TENANT_A,
   TENANT_B,
+  WORKSPACE_A,
+  WORKSPACE_B,
   LIST_A,
   LIST_B,
   LEAD_B,
@@ -63,17 +72,29 @@ function sessionCookie(user: { id: string; email: string; role: string }) {
   return `${env.auth.cookieName}=${token}`;
 }
 
+/** Serializes a Prisma `where` so assertions can look for an id anywhere in it. */
+function whereJson(call: any): string {
+  return JSON.stringify(call?.[0]?.where ?? {});
+}
+
 let app: express.Express;
 
 beforeEach(() => {
   mocks.prisma = createPrismaMock();
   app = buildApp();
+
   // attachEntitlements resolves the signed-in user from the session cookie.
   mocks.prisma.user.findUnique.mockImplementation(async ({ where }: any) => {
     if (where.id === TENANT_A.id) return TENANT_A;
     if (where.id === TENANT_B.id) return TENANT_B;
     return null;
   });
+
+  // Each user owns exactly one workspace, as the backfill produces.
+  withMemberships(mocks.prisma, [
+    membershipRow({ user: TENANT_A, workspace: WORKSPACE_A }),
+    membershipRow({ user: TENANT_B, workspace: WORKSPACE_B }),
+  ]);
 });
 
 describe("authentication is mandatory", () => {
@@ -97,35 +118,57 @@ describe("authentication is mandatory", () => {
     expect(res.body.code).toBe("no_session");
   });
 
-  it("issues no database query at all when unauthenticated", async () => {
+  it("issues no lead query at all when unauthenticated", async () => {
     await request(app).get("/api/crm/lists/ALL/export");
     expect(mocks.prisma.lead.findMany).not.toHaveBeenCalled();
     expect(mocks.prisma.leadList.findMany).not.toHaveBeenCalled();
   });
+
+  it("refuses a signed-in account that has no workspace", async () => {
+    withMemberships(mocks.prisma, []);
+    const res = await request(app).get("/api/crm/lists").set("Cookie", sessionCookie(TENANT_A));
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("no_tenant");
+    expect(mocks.prisma.leadList.findMany).not.toHaveBeenCalled();
+  });
 });
 
-describe("reads are scoped to the signed-in owner", () => {
-  it("GET /lists filters by the caller's userId", async () => {
+describe("reads are scoped to the caller's workspace", () => {
+  it("GET /lists filters by the caller's workspace", async () => {
     const res = await request(app).get("/api/crm/lists").set("Cookie", sessionCookie(TENANT_A));
+
     expect(res.status).toBe(200);
-    expect(mocks.prisma.leadList.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { userId: TENANT_A.id } })
-    );
+    const where = whereJson(mocks.prisma.leadList.findMany.mock.calls[0]);
+    expect(where).toContain(WORKSPACE_A.id);
+    expect(where).not.toContain(WORKSPACE_B.id);
   });
 
-  it("GET /leads restricts the lead query to the caller's own lists", async () => {
-    mocks.prisma.leadList.findMany.mockResolvedValue([{ id: LIST_A.id, name: LIST_A.name }]);
+  it("scopes each caller to a different workspace", async () => {
+    await request(app).get("/api/crm/lists").set("Cookie", sessionCookie(TENANT_A));
+    const whereA = whereJson(mocks.prisma.leadList.findMany.mock.calls[0]);
+
+    mocks.prisma.leadList.findMany.mockClear();
+
+    await request(app).get("/api/crm/lists").set("Cookie", sessionCookie(TENANT_B));
+    const whereB = whereJson(mocks.prisma.leadList.findMany.mock.calls[0]);
+
+    expect(whereA).toContain(WORKSPACE_A.id);
+    expect(whereB).toContain(WORKSPACE_B.id);
+    expect(whereA).not.toEqual(whereB);
+  });
+
+  it("GET /leads restricts the lead query to the workspace's own lists", async () => {
+    mocks.prisma.leadList.findMany.mockResolvedValue([
+      { id: LIST_A.id, name: LIST_A.name, _count: { leads: 1 } },
+    ]);
     const res = await request(app).get("/api/crm/leads").set("Cookie", sessionCookie(TENANT_A));
 
     expect(res.status).toBe(200);
-    expect(mocks.prisma.leadList.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { userId: TENANT_A.id } })
-    );
     const where = mocks.prisma.lead.findMany.mock.calls[0][0].where;
     expect(where.listId).toEqual({ in: [LIST_A.id] });
   });
 
-  it("GET /leads returns an empty array without querying leads when the caller owns no lists", async () => {
+  it("GET /leads returns an empty array without querying leads when there are no lists", async () => {
     mocks.prisma.leadList.findMany.mockResolvedValue([]);
     const res = await request(app).get("/api/crm/leads").set("Cookie", sessionCookie(TENANT_A));
     expect(res.status).toBe(200);
@@ -136,14 +179,15 @@ describe("reads are scoped to the signed-in owner", () => {
 
 describe("tenant A cannot reach tenant B's data", () => {
   beforeEach(() => {
-    // Ownership lookups only ever match a list/lead the caller owns.
-    mocks.prisma.leadList.findFirst.mockImplementation(async ({ where }: any) =>
-      where.id === LIST_A.id && where.userId === TENANT_A.id ? LIST_A : null
-    );
+    // Ownership lookups only ever match a list the caller's workspace owns.
+    mocks.prisma.leadList.findFirst.mockImplementation(async ({ where }: any) => {
+      const json = JSON.stringify(where);
+      return json.includes(LIST_A.id) && json.includes(WORKSPACE_A.id) ? LIST_A : null;
+    });
     mocks.prisma.lead.findFirst.mockResolvedValue(null);
   });
 
-  it("PATCH /lists/:id on another tenant's list returns 404 and performs no update", async () => {
+  it("PATCH /lists/:id on another workspace's list returns 404 and performs no update", async () => {
     const res = await request(app)
       .patch(`/api/crm/lists/${LIST_B.id}`)
       .set("Cookie", sessionCookie(TENANT_A))
@@ -153,7 +197,7 @@ describe("tenant A cannot reach tenant B's data", () => {
     expect(mocks.prisma.leadList.update).not.toHaveBeenCalled();
   });
 
-  it("DELETE /lists/:id on another tenant's list returns 404 and deletes nothing", async () => {
+  it("DELETE /lists/:id on another workspace's list returns 404 and deletes nothing", async () => {
     const res = await request(app)
       .delete(`/api/crm/lists/${LIST_B.id}`)
       .set("Cookie", sessionCookie(TENANT_A));
@@ -162,7 +206,7 @@ describe("tenant A cannot reach tenant B's data", () => {
     expect(mocks.prisma.leadList.delete).not.toHaveBeenCalled();
   });
 
-  it("GET /lists/:id/leads on another tenant's list returns 404 and reads no leads", async () => {
+  it("GET /lists/:id/leads on another workspace's list returns 404 and reads no leads", async () => {
     const res = await request(app)
       .get(`/api/crm/lists/${LIST_B.id}/leads`)
       .set("Cookie", sessionCookie(TENANT_A));
@@ -171,7 +215,7 @@ describe("tenant A cannot reach tenant B's data", () => {
     expect(mocks.prisma.lead.findMany).not.toHaveBeenCalled();
   });
 
-  it("POST /lists/:id/leads cannot inject leads into another tenant's list", async () => {
+  it("POST /lists/:id/leads cannot inject leads into another workspace's list", async () => {
     const res = await request(app)
       .post(`/api/crm/lists/${LIST_B.id}/leads`)
       .set("Cookie", sessionCookie(TENANT_A))
@@ -181,7 +225,7 @@ describe("tenant A cannot reach tenant B's data", () => {
     expect(mocks.prisma.lead.create).not.toHaveBeenCalled();
   });
 
-  it("PATCH /leads/:id on another tenant's lead returns 404 and performs no update", async () => {
+  it("PATCH /leads/:id on another workspace's lead returns 404 and performs no update", async () => {
     const res = await request(app)
       .patch(`/api/crm/leads/${LEAD_B.id}`)
       .set("Cookie", sessionCookie(TENANT_A))
@@ -191,7 +235,7 @@ describe("tenant A cannot reach tenant B's data", () => {
     expect(mocks.prisma.lead.update).not.toHaveBeenCalled();
   });
 
-  it("DELETE /leads/:id on another tenant's lead returns 404 and deletes nothing", async () => {
+  it("DELETE /leads/:id on another workspace's lead returns 404 and deletes nothing", async () => {
     const res = await request(app)
       .delete(`/api/crm/leads/${LEAD_B.id}`)
       .set("Cookie", sessionCookie(TENANT_A))
@@ -201,7 +245,7 @@ describe("tenant A cannot reach tenant B's data", () => {
     expect(mocks.prisma.lead.delete).not.toHaveBeenCalled();
   });
 
-  it("GET /lists/:id/export on another tenant's list returns 404", async () => {
+  it("GET /lists/:id/export on another workspace's list returns 404", async () => {
     const res = await request(app)
       .get(`/api/crm/lists/${LIST_B.id}/export`)
       .set("Cookie", sessionCookie(TENANT_A));
@@ -210,15 +254,28 @@ describe("tenant A cannot reach tenant B's data", () => {
     expect(mocks.prisma.lead.findMany).not.toHaveBeenCalled();
   });
 
-  it("scopes ownership lookups by BOTH id and userId, never id alone", async () => {
+  it("names the caller's workspace in the ownership lookup, never the id alone", async () => {
     await request(app)
       .patch(`/api/crm/lists/${LIST_B.id}`)
       .set("Cookie", sessionCookie(TENANT_A))
       .send({ name: "x" });
 
-    expect(mocks.prisma.leadList.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: LIST_B.id, userId: TENANT_A.id } })
-    );
+    const where = whereJson(mocks.prisma.leadList.findFirst.mock.calls[0]);
+    expect(where).toContain(LIST_B.id);
+    expect(where).toContain(WORKSPACE_A.id);
+  });
+
+  it("resolves a lead through its parent list rather than the lead's own columns", async () => {
+    await request(app)
+      .patch(`/api/crm/leads/${LEAD_B.id}`)
+      .set("Cookie", sessionCookie(TENANT_A))
+      .send({ notes: "x" });
+
+    // Ownership must be decided by the list, because a lead's own tenant_id and
+    // user_id are nullable and were historically left unset by some writers.
+    const where = whereJson(mocks.prisma.lead.findFirst.mock.calls[0]);
+    expect(where).toContain("list");
+    expect(where).toContain(WORKSPACE_A.id);
   });
 });
 
@@ -232,9 +289,7 @@ describe("GET /lists/ALL/export — the full-database dump", () => {
       .set("Cookie", sessionCookie(TENANT_A));
 
     expect(res.status).toBe(200);
-    expect(mocks.prisma.leadList.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { userId: TENANT_A.id } })
-    );
+    expect(whereJson(mocks.prisma.leadList.findMany.mock.calls[0])).toContain(WORKSPACE_A.id);
 
     // The regression: an unscoped `where: {}` would dump every tenant's leads.
     const where = mocks.prisma.lead.findMany.mock.calls[0][0].where;
@@ -242,9 +297,8 @@ describe("GET /lists/ALL/export — the full-database dump", () => {
     expect(where).not.toEqual({});
   });
 
-  it("returns only headers when the caller owns nothing", async () => {
+  it("returns only headers when the caller owns nothing, without querying leads", async () => {
     mocks.prisma.leadList.findMany.mockResolvedValue([]);
-    mocks.prisma.lead.findMany.mockResolvedValue([]);
 
     const res = await request(app)
       .get("/api/crm/lists/ALL/export")
@@ -252,14 +306,12 @@ describe("GET /lists/ALL/export — the full-database dump", () => {
 
     expect(res.status).toBe(200);
     expect(res.text.split("\n")).toHaveLength(1);
-    expect(mocks.prisma.lead.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { listId: { in: [] } } })
-    );
+    expect(mocks.prisma.lead.findMany).not.toHaveBeenCalled();
   });
 });
 
 describe("writes always record an owner", () => {
-  it("POST /lists stamps the creating user, never null", async () => {
+  it("POST /lists stamps both the workspace and the creating user", async () => {
     mocks.prisma.leadList.create.mockResolvedValue({
       id: "new_list",
       name: "New",
@@ -275,8 +327,9 @@ describe("writes always record an owner", () => {
 
     expect(res.status).toBe(200);
     const data = mocks.prisma.leadList.create.mock.calls[0][0].data;
+    expect(data.tenantId).toBe(WORKSPACE_A.id);
+    // userId is dual-written for the code paths that still read it.
     expect(data.userId).toBe(TENANT_A.id);
-    expect(data.userId).not.toBeNull();
   });
 
   it("rejects a blank list name", async () => {
@@ -290,9 +343,111 @@ describe("writes always record an owner", () => {
   });
 });
 
+describe("role permissions", () => {
+  /** A member may correct a lead but not destroy it, nor export the database. */
+  it("refuses a member DELETE /leads/:id", async () => {
+    withMemberships(mocks.prisma, [
+      membershipRow({ user: TENANT_A, workspace: WORKSPACE_A, role: "member" }),
+    ]);
+
+    const res = await request(app)
+      .delete("/api/crm/leads/some_lead")
+      .set("Cookie", sessionCookie(TENANT_A));
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("permission_denied");
+    expect(mocks.prisma.lead.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("allows a member to edit a lead", async () => {
+    withMemberships(mocks.prisma, [
+      membershipRow({ user: TENANT_A, workspace: WORKSPACE_A, role: "member" }),
+    ]);
+    mocks.prisma.lead.findFirst.mockResolvedValue({ id: "lead_a", listId: LIST_A.id });
+    mocks.prisma.lead.update.mockResolvedValue({ id: "lead_a", listId: LIST_A.id, businessName: "x" });
+
+    const res = await request(app)
+      .patch("/api/crm/leads/lead_a")
+      .set("Cookie", sessionCookie(TENANT_A))
+      .send({ notes: "a note" });
+
+    expect(res.status).toBe(200);
+  });
+
+  /**
+   * Creating and renaming a list is ordinary organising work, so a member may
+   * do it. Deleting one cascades to every lead inside, so it needs DELETE_LEADS.
+   */
+  it("lets a member create a list but not delete one", async () => {
+    withMemberships(mocks.prisma, [
+      membershipRow({ user: TENANT_A, workspace: WORKSPACE_A, role: "member" }),
+    ]);
+    mocks.prisma.leadList.create.mockResolvedValue({
+      id: "new_list",
+      name: "New",
+      businessType: "",
+      location: "",
+      scrapedAt: new Date(),
+    });
+
+    const create = await request(app)
+      .post("/api/crm/lists")
+      .set("Cookie", sessionCookie(TENANT_A))
+      .send({ name: "New" });
+    expect(create.status).toBe(200);
+
+    const remove = await request(app)
+      .delete(`/api/crm/lists/${LIST_A.id}`)
+      .set("Cookie", sessionCookie(TENANT_A));
+    expect(remove.status).toBe(403);
+    expect(remove.body.code).toBe("permission_denied");
+    expect(mocks.prisma.leadList.delete).not.toHaveBeenCalled();
+  });
+
+  it("honours a permission override that restores an owner's missing capability", async () => {
+    withMemberships(mocks.prisma, [
+      membershipRow({
+        user: TENANT_A,
+        workspace: WORKSPACE_A,
+        role: "member",
+        permissions: JSON.stringify(["VIEW_LEADS", "DELETE_LEADS"]),
+      }),
+    ]);
+    mocks.prisma.lead.findFirst.mockResolvedValue({ id: "lead_a", listId: LIST_A.id });
+
+    const res = await request(app)
+      .delete("/api/crm/leads/lead_a")
+      .set("Cookie", sessionCookie(TENANT_A));
+
+    expect(res.status).toBe(200);
+    expect(mocks.prisma.lead.delete).toHaveBeenCalled();
+  });
+
+  it("refuses an owner-stripped export", async () => {
+    withMemberships(mocks.prisma, [
+      membershipRow({
+        user: TENANT_A,
+        workspace: WORKSPACE_A,
+        role: "owner",
+        permissions: JSON.stringify(["VIEW_LEADS"]),
+      }),
+    ]);
+
+    const res = await request(app)
+      .get("/api/crm/lists/ALL/export")
+      .set("Cookie", sessionCookie(TENANT_A));
+
+    expect(res.status).toBe(403);
+    expect(mocks.prisma.lead.findMany).not.toHaveBeenCalled();
+  });
+});
+
 describe("input limits", () => {
-  it("rejects an oversized bulk import instead of issuing 2N queries", async () => {
+  beforeEach(() => {
     mocks.prisma.leadList.findFirst.mockResolvedValue(LIST_A);
+  });
+
+  it("rejects an oversized bulk import instead of issuing 2N queries", async () => {
     const leads = Array.from({ length: 5001 }, (_, i) => ({ businessName: `Lead ${i}` }));
 
     const res = await request(app)
@@ -306,7 +461,7 @@ describe("input limits", () => {
   });
 
   it("caps unbounded note text rather than storing it whole", async () => {
-    mocks.prisma.lead.findFirst.mockResolvedValue({ id: "lead_a" });
+    mocks.prisma.lead.findFirst.mockResolvedValue({ id: "lead_a", listId: LIST_A.id });
     mocks.prisma.lead.update.mockResolvedValue({ id: "lead_a", listId: LIST_A.id, businessName: "x" });
 
     await request(app)
@@ -319,7 +474,7 @@ describe("input limits", () => {
   });
 
   it("rejects an unknown outreach status", async () => {
-    mocks.prisma.lead.findFirst.mockResolvedValue({ id: "lead_a" });
+    mocks.prisma.lead.findFirst.mockResolvedValue({ id: "lead_a", listId: LIST_A.id });
 
     const res = await request(app)
       .patch("/api/crm/leads/lead_a")

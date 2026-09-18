@@ -10,6 +10,7 @@ import { prisma } from "./prisma";
 import { env } from "./env";
 import { sendOtpEmail } from "./mailer";
 import { logger } from "./logger";
+import { ensureTenantForUser } from "./tenancy/tenantService";
 
 export type OtpPurpose = "verify" | "login" | "reset";
 
@@ -276,6 +277,13 @@ export async function verifyOtp(input: { email: string; code: string; purpose?: 
     data: { emailVerified: true, lastLoginAt: new Date(), failedLoginAttempts: 0, lockedUntil: null, role },
   });
 
+  // The account is usable from here, so it needs a workspace to act on.
+  // Idempotent, and failure is non-fatal: the tenant guard reports a missing
+  // workspace clearly rather than letting a sign-in fail over provisioning.
+  await ensureTenantForUser(updated.id).catch((err) =>
+    logger.error(`Could not provision a workspace for ${updated.id}`, err)
+  );
+
   await writeAudit("email_verified", { userId: updated.id });
   const token = issueSessionToken(updated);
   return { user: toPublicUser(updated), token };
@@ -509,6 +517,15 @@ export async function login(
     where: { id: user.id },
     data: { lastLoginAt: new Date(), failedLoginAttempts: 0, lockedUntil: null, role },
   });
+
+  // Also here, not just on verification: an account created before tenancy
+  // existed (or restored from a backup without running the backfill) would
+  // otherwise sign in successfully and then be refused by every tenant-scoped
+  // route. Cheap, idempotent, and logins are infrequent.
+  await ensureTenantForUser(updated.id).catch((err) =>
+    logger.error(`Could not provision a workspace for ${updated.id}`, err)
+  );
+
   await writeAudit("login_success", { userId: user.id, meta });
   const token = issueSessionToken(updated);
   return { user: toPublicUser(updated), token };

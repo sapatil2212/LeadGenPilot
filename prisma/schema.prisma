@@ -39,7 +39,144 @@ model User {
   integrations UserIntegration[]
   leadLists  LeadList[]
 
+  memberships TenantMember[]
+  jobs        Job[]
+
   @@map("users")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TENANCY
+//
+// A Tenant is the unit of data ownership and billing. Users are people; a
+// Tenant is the workspace whose data they act on. One user can belong to
+// several tenants (an agency operator managing two businesses), and a tenant
+// can have several users (a team) — so membership is a join table rather than a
+// column on either side.
+//
+// Every tenant-owned table carries `tenantId`. The pre-existing `userId`
+// columns are deliberately kept and still written: they remain the fallback
+// scope for any code path not yet migrated, so the two schemes can coexist
+// while the application moves over table by table. `tenantId` is nullable for
+// exactly the same reason — it is backfilled by
+// scripts/backfill-tenants.mjs, and only becomes required once every row has
+// one and every read path uses it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A workspace. Owns leads, campaigns, integrations and (later) billing.
+model Tenant {
+  id   String @id @default(cuid())
+  name String
+
+  /// URL-safe unique handle, derived from the name at creation.
+  slug String @unique
+
+  /// "active" | "suspended". Suspended tenants are refused at the context guard.
+  status String @default("active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  members      TenantMember[]
+  leadLists    LeadList[]
+  leads        Lead[]
+  integrations UserIntegration[]
+  auditLogs    AuditLog[]
+  jobs         Job[]
+
+  @@index([status])
+  @@map("tenants")
+}
+
+/// Membership of a user in a tenant, carrying that user's role there.
+model TenantMember {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+  userId   String @map("user_id")
+
+  /// "owner" | "admin" | "member". Default permission sets live in src/tenancy/permissions.ts.
+  role String @default("member")
+
+  /// Optional JSON array of permission strings that REPLACES the role defaults
+  /// for this member. Null means "use the role defaults", which is the norm.
+  permissions String? @db.Text
+
+  /// "active" | "invited" | "suspended".
+  status String @default("active")
+
+  invitedById String?   @map("invited_by_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // One membership row per user per tenant.
+  @@unique([tenantId, userId])
+  @@index([userId])
+  @@index([tenantId, role])
+  @@index([tenantId, status])
+  @@map("tenant_members")
+}
+
+/// Durable state for long-running work (lead discovery, campaigns).
+///
+/// Replaces the process-global booleans that used to track whether a scrape or
+/// campaign was running (`isScrapingRunning`, `isCampaignRunning`,
+/// `campaignProgress`, `stopRequested`, …). Those were single-slot and
+/// process-wide: the second tenant to start anything was refused, could observe
+/// the first tenant's progress, and could cancel it. Holding this per tenant in
+/// the database also means a run survives a restart being observable, and that
+/// cancellation is an owned, auditable act rather than a flipped global.
+model Job {
+  id       String  @id @default(cuid())
+  tenantId String  @map("tenant_id")
+  /// The member who started the job. Kept for attribution and audit.
+  userId   String? @map("user_id")
+
+  /// "lead_discovery" | "campaign". Open-ended so later phases can add kinds
+  /// (document ingestion, embeddings, follow-ups) without a migration.
+  kind String
+
+  /// "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled".
+  status String @default("queued")
+
+  /// Input parameters as JSON. For lead discovery this is the search criteria
+  /// that used to live in the shared mutable CONFIG singleton.
+  params String? @db.Text
+
+  /// Progress counters and stage label as JSON.
+  progress String? @db.Text
+
+  /// Terminal result summary as JSON.
+  result String? @db.Text
+
+  /// User-facing failure reason. Never a raw stack trace.
+  error String? @db.Text
+
+  /// Set when cancellation is requested. Workers poll it; only the owning
+  /// tenant can set it.
+  cancelRequestedAt DateTime? @map("cancel_requested_at")
+
+  startedAt  DateTime? @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // The hot query is "does this tenant already have an active job of this kind?"
+  @@index([tenantId, kind, status])
+  @@index([tenantId, createdAt])
+  @@index([status])
+  // MySQL requires an index behind every foreign key and creates one silently
+  // if the schema does not declare it, which then shows up as drift. Every
+  // other FK column in this schema is already covered by an explicit index
+  // whose leading column matches; user_id was not, so it is declared here with
+  // the name MySQL chose. See docs/DATABASE.md.
+  @@index([userId], map: "jobs_user_id_fkey")
+  @@map("jobs")
 }
 
 /// User-specific integration settings (SMTP, Google Sheets, WhatsApp, etc.)
@@ -63,8 +200,14 @@ model UserIntegration {
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
 
+  // Integrations belong to the workspace, not the individual: a teammate must
+  // be able to use the tenant's SMTP account. Nullable until backfilled.
+  tenantId String? @map("tenant_id")
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
   @@index([userId])
   @@index([type])
+  @@index([tenantId, type])
   @@map("user_integrations")
 }
 
@@ -80,9 +223,15 @@ model AuditLog {
   userId String? @map("user_id")
   user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
+  // Null for platform-level events that belong to no workspace (superadmin
+  // sign-in, boot-time configuration problems).
+  tenantId String? @map("tenant_id")
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+
   @@index([userId])
   @@index([action])
   @@index([createdAt])
+  @@index([tenantId, createdAt])
   @@map("audit_logs")
 }
 
@@ -124,10 +273,15 @@ model LeadList {
   userId String? @map("user_id")
   user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
+  tenantId String? @map("tenant_id")
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
   leads Lead[]
 
   @@index([userId])
   @@index([scrapedAt])
+  @@index([tenantId])
+  @@index([tenantId, scrapedAt])
   @@map("lead_lists")
 }
 
@@ -189,6 +343,9 @@ model Lead {
 
   userId String? @map("user_id")
 
+  tenantId String? @map("tenant_id")
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -197,6 +354,13 @@ model Lead {
   @@index([leadPriority])
   @@index([leadScore])
   @@index([dateAdded])
+  // The lead table is the one that grows without bound, so its tenant-scoped
+  // access patterns get dedicated composite indexes: the CRM table sorts by
+  // score, filters by priority, and pages by recency, always within a tenant.
+  @@index([tenantId])
+  @@index([tenantId, leadScore])
+  @@index([tenantId, leadPriority])
+  @@index([tenantId, createdAt])
   @@map("leads")
 }
 

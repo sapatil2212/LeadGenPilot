@@ -34,18 +34,104 @@ need it, `npx prisma db push` still works and the refusal is only on the script.
 
 ## Making a schema change
 
-1. Edit `prisma/schema.prisma`.
-2. `npm run prisma:migrate:dev -- --name describe_the_change`
-   Review the generated SQL in `prisma/migrations/<timestamp>_.../migration.sql`
-   before it is applied.
-3. `npm run prisma:generate` if the client needs regenerating.
-4. `npm run verify`.
-5. Commit the migration directory together with the schema change. A schema
-   change without its migration will fail on the next deploy.
+**`prisma migrate dev` does not work against this database.** It needs to create
+a temporary "shadow database" to verify migrations, and the MySQL user has no
+`CREATE DATABASE` grant on this shared host:
+
+```
+Error: P3014  Prisma Migrate could not create the shadow database.
+Original error: P1010  User was denied access on the database
+                       `prisma_migrate_shadow_db_...`
+```
+
+Use the supported no-shadow-database workaround instead. `migrate diff` compares
+the live schema against `schema.prisma` and needs no extra privileges:
+
+```bash
+# 1. Edit prisma/schema.prisma, then:
+$stamp = Get-Date -Format "yyyyMMddHHmmss"
+$dir = "prisma/migrations/${stamp}_describe_the_change"
+New-Item -ItemType Directory -Force -Path $dir
+npx prisma migrate diff `
+  --from-schema-datasource prisma/schema.prisma `
+  --to-schema-datamodel  prisma/schema.prisma `
+  --script > "$dir/migration.sql"
+
+# 2. READ THE SQL. Reject anything with DROP that you did not intend.
+# 3. Apply and regenerate:
+npm run prisma:migrate
+npm run prisma:generate
+npm run verify
+```
+
+PowerShell's `>` writes UTF-16. Re-save `migration.sql` as UTF-8 without a BOM,
+or Prisma may fail to parse it.
+
+Commit the migration directory together with the schema change. A schema change
+without its migration will fail on the next deploy.
 
 Additive changes only, wherever there is a choice: add a nullable column,
 backfill it, verify, and only then make it required. Dropping or renaming a
 column in the same migration that reads it will lose data.
+
+### Always declare an index behind a foreign key
+
+MySQL requires an index on every foreign key column and **creates one silently**
+if the schema does not declare it. Prisma then reports that index as drift,
+because `schema.prisma` never asked for it. This has bitten twice:
+
+| Column | Index MySQL created |
+|---|---|
+| `email_otps.user_id` | `email_otps_user_id_fkey` |
+| `jobs.user_id` | `jobs_user_id_fkey` |
+
+The fix is to declare it with the name MySQL already chose, so schema and
+database agree and nothing is created or dropped:
+
+```prisma
+@@index([userId], map: "jobs_user_id_fkey")
+```
+
+A composite index counts as long as the FK column is its **leading** column —
+`@@index([tenantId, kind, status])` covers a foreign key on `tenant_id`, which is
+why the other eight FK columns in this schema never drifted.
+
+Run the drift check after every migration:
+
+```bash
+npx prisma migrate diff --from-schema-datamodel prisma/schema.prisma `
+                        --to-schema-datasource prisma/schema.prisma --script
+# expected output: "-- This is an empty migration."
+```
+
+## Tenancy
+
+The tenancy tables (`tenants`, `tenant_members`, `jobs`) and the `tenant_id`
+columns arrived in `20260918210049_add_tenancy_and_jobs`. Two things to know
+when working with them:
+
+**`tenant_id` is nullable, deliberately and temporarily.** The pre-existing
+`user_id` columns are still written alongside it, because some code paths (the
+scraper's lead persistence, the Google Sheets sync) still read `user_id`. Reads
+go through `src/tenancy/repository.ts`, whose predicate accepts either — matching
+`tenant_id`, or `tenant_id IS NULL` **together with** the caller's own `user_id`.
+Once every reader has moved over, the `user_id` half of that predicate is deleted
+and `tenant_id` becomes required.
+
+**Restored data needs the backfill.** A backup taken before tenancy has no
+`tenant_id` values and no workspaces:
+
+```bash
+node scripts/import-backup-data.mjs <dir> --confirm
+node scripts/backfill-tenants.mjs               # dry run
+node scripts/backfill-tenants.mjs --confirm     # creates one workspace per user
+node scripts/verify-tenant-ownership.mjs
+```
+
+The backfill is idempotent and reports anything it cannot attribute rather than
+guessing. Rehearsed against the real Phase 0 backup: 2 workspaces, 5 lists, 52
+leads and 30 audit entries attributed, 9 audit entries correctly left
+platform-level because they have no owning user (failed sign-in attempts).
 
 ## Backups
 
@@ -85,12 +171,16 @@ node scripts/import-backup-data.mjs backups/phase0-20260918-133348 --confirm
 
 ## Operational notes
 
-**The database is remote and occasionally refuses connections.** A
-`prisma migrate status` call returned `P1001 Can't reach database server` while
-TCP 3306 was demonstrably reachable, and the immediately following call
-succeeded. Treat single connection failures as transient. Anything that runs
-unattended — the campaign worker and job queue in Phase 6 — needs connect-level
-retry with backoff, not just query-level error handling.
+**The database is remote and intermittently refuses connections.** Observed
+twice in one session: a Prisma command returned `P1001 Can't reach database
+server` while TCP 3306 was demonstrably reachable, and the immediately following
+identical command succeeded both times. Treat single connection failures as
+transient and retry once before believing them.
+
+This is not a curiosity, it is a design constraint. Anything running unattended —
+the campaign worker and job queue in Phase 6 — needs **connect-level** retry with
+backoff, not just query-level error handling, or a two-hour campaign will die on
+a one-second network blip and mark its remaining recipients failed.
 
 **There is no automated backup.** `scheduleAutomaticBackups()` exists in
 `src/backup.ts` but is imported and never called, and the backup archive covers
