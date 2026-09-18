@@ -19,8 +19,8 @@ leadfinder-landing/out/
 .env*
 
 # Only the sanitized, placeholder-only template is tracked.
-# NOTE: .env.example is intentionally NOT whitelisted — the copy currently
-# on disk contains real credential values (see PHASE0-SECURITY.md). Use
+# NOTE: .env.example is intentionally NOT whitelisted — the copy currently on
+# disk contains real credential values (see docs/PHASE0-SECURITY.md). Use
 # .env.template as the documented config contract instead.
 !.env.template
 

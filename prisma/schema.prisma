@@ -103,6 +103,11 @@ model EmailOtp {
 
   @@index([email])
   @@index([expiresAt])
+  // MySQL auto-created this index to back the user_id foreign key when the
+  // schema was applied with `db push`. Declared here with its existing name so
+  // schema.prisma matches the live database exactly and `prisma migrate`
+  // reports no drift. This creates nothing new — the index already exists.
+  @@index([userId], map: "email_otps_user_id_fkey")
   @@map("email_otps")
 }
 
