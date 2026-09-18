@@ -1,0 +1,212 @@
+// Prisma schema for NexaLeadAi authentication + CRM
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  passwordHash  String    @map("password_hash")
+  emailVerified Boolean   @default(false) @map("email_verified")
+  role          String    @default("user")
+
+  // Subscription plan: "free" | "pro" | "custom"
+  plan          String    @default("free")
+
+  // Monthly lead-usage tracking. usagePeriod is "YYYY-MM"; leadsUsed resets
+  // when a new period begins.
+  leadsUsed     Int       @default(0) @map("leads_used")
+  usagePeriod   String?   @map("usage_period")
+
+  // Brute-force protection.
+  failedLoginAttempts Int      @default(0) @map("failed_login_attempts")
+  lockedUntil         DateTime? @map("locked_until")
+
+  lastLoginAt   DateTime? @map("last_login_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  otps       EmailOtp[]
+  auditLogs  AuditLog[]
+  integrations UserIntegration[]
+  leadLists  LeadList[]
+
+  @@map("users")
+}
+
+/// User-specific integration settings (SMTP, Google Sheets, WhatsApp, etc.)
+model UserIntegration {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Integration type: "smtp" | "google_sheet" | "whatsapp"
+  type      String
+
+  // Integration configuration (encrypted JSON)
+  config    String   @db.Text
+
+  // Is this integration active/enabled?
+  enabled   Boolean  @default(true)
+
+  // Metadata for tracking
+  label     String?  // User-friendly name like "Gmail SMTP" or "Leads Sheet"
+  lastUsedAt DateTime? @map("last_used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([type])
+  @@map("user_integrations")
+}
+
+/// Security & activity audit trail.
+model AuditLog {
+  id        String   @id @default(cuid())
+  action    String
+  ip        String?
+  userAgent String?  @map("user_agent")
+  metadata  String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  userId String? @map("user_id")
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+/// One-time passwords sent to an email address for verification / login.
+/// The code itself is stored hashed; only the hash is persisted.
+model EmailOtp {
+  id        String   @id @default(cuid())
+  email     String
+  codeHash  String   @map("code_hash")
+  purpose   String   @default("verify") // "verify" | "login" | "reset"
+  attempts  Int      @default(0)
+  consumed  Boolean  @default(false)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  userId String? @map("user_id")
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([email])
+  @@index([expiresAt])
+  @@map("email_otps")
+}
+
+/// A named collection of leads from one scrape session (e.g. "Dental Clinic - Nashik - 10:00 17 Jul 2026")
+model LeadList {
+  id           String   @id @default(cuid())
+  name         String
+  businessType String   @map("business_type")
+  location     String
+  scrapedAt    DateTime @default(now()) @map("scraped_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  userId String? @map("user_id")
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  leads Lead[]
+
+  @@index([userId])
+  @@index([scrapedAt])
+  @@map("lead_lists")
+}
+
+/// A scraped business lead stored in the CRM database
+model Lead {
+  id String @id @default(cuid())
+
+  businessName   String  @map("business_name")
+  phone          String  @default("")
+  address        String  @db.Text
+  rating         Float   @default(0)
+  reviews        Int     @default(0)
+  website        String  @db.Text
+  mapsUrl        String  @map("maps_url") @db.Text
+  category       String  @default("")
+  websiteMissing Boolean @default(false) @map("website_missing")
+  leadScore      Int     @default(0) @map("lead_score")
+  dateAdded      String  @map("date_added")
+
+  // Digital presence
+  websiteStatus     String @default("MISSING") @map("website_status")
+  instagramUrl      String @map("instagram_url") @db.Text
+  instagramStatus   String @default("NOT_FOUND") @map("instagram_status")
+  instagramLastPost String @default("") @map("instagram_last_post")
+  facebookUrl       String @map("facebook_url") @db.Text
+  facebookStatus    String @default("NOT_FOUND") @map("facebook_status")
+  facebookLastPost  String @default("") @map("facebook_last_post")
+  whatsappPresent   Boolean @default(false) @map("whatsapp_present")
+  appointmentSystem Boolean @default(false) @map("appointment_system")
+  leadPriority      String  @default("COLD") @map("lead_priority")
+  aiInsight         String  @map("ai_insight") @db.Text
+
+  // Extended audit
+  emails                String  @db.Text  // JSON array stored as string
+  linkedinUrl           String  @map("linkedin_url") @db.Text
+  linkedinStatus        String  @default("NOT_FOUND") @map("linkedin_status")
+  googleAnalyticsPresent Boolean @default(false) @map("google_analytics_present")
+  metaPixelPresent      Boolean @default(false) @map("meta_pixel_present")
+
+  // Outreach tracking
+  emailStatus      String? @map("email_status")
+  emailSentDate    String? @map("email_sent_date")
+  whatsappStatus   String? @map("whatsapp_status")
+  whatsappSentDate String? @map("whatsapp_sent_date")
+
+  // Conversation lifecycle: REPLIED once the lead responds to outreach.
+  conversationStatus String? @map("conversation_status")
+
+  // Geo coords
+  lat Float?
+  lng Float?
+
+  // CRM notes (editable by user)
+  notes String? @db.Text
+
+  // Relations
+  listId String @map("list_id")
+  list   LeadList @relation(fields: [listId], references: [id], onDelete: Cascade)
+
+  userId String? @map("user_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([listId])
+  @@index([userId])
+  @@index([leadPriority])
+  @@index([leadScore])
+  @@index([dateAdded])
+  @@map("leads")
+}
+
+/// Tracks individual page views for website visitor analytics.
+model PageView {
+  id        String   @id @default(cuid())
+  path      String                         // e.g. "/", "/app", "/superadmin"
+  ip        String?                        // visitor IP (for unique visitor counting)
+  userAgent String?  @map("user_agent") @db.Text
+  referrer  String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([path])
+  @@index([createdAt])
+  @@index([ip])
+  @@map("page_views")
+}
+

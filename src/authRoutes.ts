@@ -1,0 +1,250 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { Router, type Request, type Response, type NextFunction } from "express";
+import rateLimit from "express-rate-limit";
+import { env } from "./env";
+import { logger } from "./logger";
+import {
+  signup,
+  login,
+  verifyOtp,
+  resendOtp,
+  requestPasswordReset,
+  resetPassword,
+  getUserById,
+  verifySessionToken,
+  sessionCookieOptions,
+  AuthError,
+  type RequestMeta,
+} from "./authService";
+import { prisma } from "./prisma";
+import { getEntitlements } from "./plans";
+import { computeUsage } from "./entitlements";
+
+/** Extracts client metadata for audit logging. */
+function metaOf(req: Request): RequestMeta {
+  return {
+    ip: (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip,
+    userAgent: req.headers["user-agent"],
+  };
+}
+
+const router = Router();
+
+// Stricter rate limiting for auth endpoints to resist brute force / abuse.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many authentication attempts. Please try again later." },
+});
+
+const otpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many code requests. Please try again later." },
+});
+
+// Guard: 503 if the database isn't configured yet.
+function requireDatabase(req: Request, res: Response, next: NextFunction) {
+  if (!env.isDatabaseConfigured()) {
+    return res.status(503).json({
+      error: "Authentication is not available yet. The database is not configured.",
+      code: "db_unconfigured",
+    });
+  }
+  next();
+}
+
+function handleError(res: Response, err: unknown) {
+  if (err instanceof AuthError) {
+    return res.status(err.status).json({ error: err.message, code: err.code, ...(err.extra || {}) });
+  }
+  logger.error("Auth route error", err);
+  return res.status(500).json({ error: "Something went wrong. Please try again.", code: "internal" });
+}
+
+router.use(requireDatabase);
+
+// ── Sign up ──
+router.post("/signup", authLimiter, async (req: Request, res: Response) => {
+  try {
+    const { name, email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required.", code: "missing_fields" });
+    }
+    const result = await signup({ name, email, password });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+// ── Verify OTP (completes signup or login) ──
+router.post("/verify-otp", otpLimiter, async (req: Request, res: Response) => {
+  try {
+    const { email, code, purpose } = req.body || {};
+    if (!email || !code) {
+      return res.status(400).json({ error: "Email and code are required.", code: "missing_fields" });
+    }
+    const { user, token } = await verifyOtp({ email, code, purpose });
+    res.cookie(env.auth.cookieName, token, sessionCookieOptions());
+    res.json({ success: true, user });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+// ── Resend OTP ──
+router.post("/resend-otp", otpLimiter, async (req: Request, res: Response) => {
+  try {
+    const { email, purpose } = req.body || {};
+    if (!email) return res.status(400).json({ error: "Email is required.", code: "missing_fields" });
+    await resendOtp({ email, purpose });
+    res.json({ success: true, message: "If an account requires verification, a new code has been sent." });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+// ── Log in ──
+router.post("/login", authLimiter, async (req: Request, res: Response) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required.", code: "missing_fields" });
+    }
+    const result = await login({ email, password }, metaOf(req));
+    if ("requiresVerification" in result) {
+      return res.json({ success: true, requiresVerification: true, email: result.email });
+    }
+    res.cookie(env.auth.cookieName, result.token, sessionCookieOptions());
+    res.json({ success: true, user: result.user });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+// ── Forgot password: send reset code ──
+router.post("/forgot-password", otpLimiter, async (req: Request, res: Response) => {
+  try {
+    const { email } = req.body || {};
+    if (!email) return res.status(400).json({ error: "Email is required.", code: "missing_fields" });
+    await requestPasswordReset(email, metaOf(req));
+    res.json({ success: true, message: "If an account exists for that email, a reset code has been sent." });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+// ── Reset password with code ──
+router.post("/reset-password", authLimiter, async (req: Request, res: Response) => {
+  try {
+    const { email, code, password } = req.body || {};
+    if (!email || !code || !password) {
+      return res.status(400).json({ error: "Email, code and new password are required.", code: "missing_fields" });
+    }
+    await resetPassword({ email, code, password }, metaOf(req));
+    res.json({ success: true, message: "Password updated. You can now sign in." });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+// ── Current session ──
+router.get("/me", async (req: Request, res: Response) => {
+  try {
+    const token = req.cookies?.[env.auth.cookieName];
+    if (!token) return res.status(401).json({ error: "Not authenticated.", code: "no_session" });
+    const payload = verifySessionToken(token);
+    if (!payload) return res.status(401).json({ error: "Session expired.", code: "invalid_session" });
+    const dbUser = await prisma.user.findUnique({ where: { id: payload.sub } });
+    if (!dbUser) return res.status(401).json({ error: "Account not found.", code: "no_user" });
+    const user = await getUserById(payload.sub);
+    const entitlements = getEntitlements(dbUser.plan);
+    const usageInfo = computeUsage(dbUser, entitlements);
+    // Serialize Infinity as null so JSON stays valid; frontend treats null as unlimited.
+    res.json({
+      user,
+      plan: dbUser.plan,
+      entitlements: {
+        ...entitlements,
+        monthlyLeadLimit: Number.isFinite(entitlements.monthlyLeadLimit) ? entitlements.monthlyLeadLimit : null,
+      },
+      usage: {
+        used: usageInfo.used,
+        limit: usageInfo.unlimited ? null : usageInfo.limit,
+        remaining: usageInfo.unlimited ? null : usageInfo.remaining,
+        period: usageInfo.period,
+        unlimited: usageInfo.unlimited,
+      },
+    });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+// ── Log out ──
+router.post("/logout", (req: Request, res: Response) => {
+  res.clearCookie(env.auth.cookieName, { ...sessionCookieOptions(), maxAge: undefined });
+  res.json({ success: true });
+});
+
+export default router;
+
+/**
+ * Express middleware that requires a valid session. Attaches `req.user`.
+ * Use to protect any route that must only be reachable by signed-in users.
+ */
+export function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const token = req.cookies?.[env.auth.cookieName];
+  if (!token) return res.status(401).json({ error: "Authentication required.", code: "no_session" });
+  const payload = verifySessionToken(token);
+  if (!payload) return res.status(401).json({ error: "Session expired.", code: "invalid_session" });
+  (req as any).user = payload;
+  next();
+}
+
+/**
+ * Requires an authenticated admin. Verifies the role against the database
+ * (not just the token) so revoked admins lose access immediately.
+ *
+ * Special case: if the token was issued for the env-based superadmin
+ * (id = "superadmin", role = "admin"), we skip the DB lookup and allow
+ * access directly — this account has no DB row.
+ */
+export async function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  const token = req.cookies?.[env.auth.cookieName];
+  if (!token) return res.status(401).json({ error: "Authentication required.", code: "no_session" });
+  const payload = verifySessionToken(token);
+  if (!payload) return res.status(401).json({ error: "Session expired.", code: "invalid_session" });
+
+  // ── Superadmin bypass (env-based, no DB row) ──
+  if (payload.sub === "superadmin" && payload.role === "admin") {
+    (req as any).user = payload;
+    (req as any).adminUser = { id: "superadmin", email: payload.email, role: "admin" };
+    return next();
+  }
+
+  if (!env.isDatabaseConfigured()) {
+    return res.status(503).json({ error: "Admin features require a configured database.", code: "db_unconfigured" });
+  }
+
+  try {
+    const user = await prisma.user.findUnique({ where: { id: payload.sub } });
+    if (!user || user.role !== "admin") {
+      return res.status(403).json({ error: "Administrator access required.", code: "not_admin" });
+    }
+    (req as any).user = payload;
+    (req as any).adminUser = user;
+    next();
+  } catch (err) {
+    res.status(500).json({ error: "Authorization check failed.", code: "internal" });
+  }
+}

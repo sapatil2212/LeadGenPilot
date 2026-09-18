@@ -1,0 +1,6 @@
+{
+  "name": "NexaLeadAi",
+  "description": "Automatically find local businesses on Google Maps that do not have websites, score them, and save them in Google Sheets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
