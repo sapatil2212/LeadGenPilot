@@ -4,8 +4,8 @@
  */
 
 import { chromium, Browser, Page } from "playwright";
-import { CONFIG } from "./config";
-import { Lead } from "./types";
+import { CONFIG as DEFAULT_CRITERIA } from "./config";
+import { Config, Lead } from "./types";
 import { logger } from "./logger";
 import { duplicateChecker } from "./duplicateChecker";
 import { sendLeadToWebhook } from "./googleSheetsWebhook";
@@ -19,7 +19,75 @@ import { runGrowthIntelligence } from "./analysis/growthIntelligenceAgent";
 import { growthIntelligenceToLeadFields } from "./analysis/leadFields";
 import { buildSnapshot, recordScan } from "./analysis/monitoringEngine";
 
-let stopRequested = false;
+/**
+ * Search parameters for one discovery run.
+ *
+ * Previously the scraper read these from the shared mutable `CONFIG` singleton,
+ * which made a run's parameters process-global: a second tenant saving their
+ * search redirected a scrape already in flight, and the plan-quota capper
+ * permanently lowered `maxResults` for everybody. Criteria now arrive as an
+ * argument, so a run is described entirely by the job that started it.
+ */
+export type ScrapeCriteria = Config;
+
+/** Progress snapshot for the job row backing this run. */
+export interface ScrapeProgress {
+  stage: string;
+  current: number;
+  total: number;
+  added?: number;
+  failed?: number;
+  currentBusiness?: string;
+}
+
+export type ProgressReporter = (progress: ScrapeProgress) => void;
+
+/**
+ * Per-run cancellation.
+ *
+ * Replaces the module-level `stopRequested` boolean, which was one flag for the
+ * whole process — POST /api/stop-scraper aborted whichever tenant's scrape
+ * happened to be running, with no ownership check. A token belongs to a single
+ * run, so cancelling one cannot touch another.
+ *
+ * The scraper checks this synchronously at ~15 points; the caller is responsible
+ * for deciding when to flip it (server.ts polls the job row, so cancellation
+ * survives being requested by a different HTTP request or process).
+ */
+export class CancellationToken {
+  private cancelled = false;
+  private reason = "";
+
+  cancel(reason = "cancelled"): void {
+    if (this.cancelled) return;
+    this.cancelled = true;
+    this.reason = reason;
+    logger.warn(`Cancellation requested: ${reason}`);
+  }
+
+  get isCancelled(): boolean {
+    return this.cancelled;
+  }
+
+  get cancellationReason(): string {
+    return this.reason;
+  }
+}
+
+/**
+ * Tokens for runs currently in flight, so process shutdown can stop all of them.
+ *
+ * This is the one legitimate global: SIGTERM must halt every run regardless of
+ * which tenant owns it. Everything else addresses a specific token.
+ */
+const activeTokens = new Set<CancellationToken>();
+
+/** Cancels every in-flight run. For shutdown only. Returns how many were signalled. */
+export function cancelAllScrapes(reason = "server is shutting down"): number {
+  const count = activeTokens.size;
+  for (const token of activeTokens) token.cancel(reason);
+  return count;
+}
 
 /**
  * A visible (non-headless) browser needs a real X server. On Linux servers there
@@ -27,13 +95,13 @@ let stopRequested = false;
  * force headless on Linux regardless of the UI toggle.
  * Set PLAYWRIGHT_HEADLESS=false (e.g. when running under xvfb-run) to override.
  */
-function resolveHeadless(): boolean {
+function resolveHeadless(criteria: ScrapeCriteria): boolean {
   const envOverride = process.env.PLAYWRIGHT_HEADLESS;
   if (envOverride !== undefined) {
     return envOverride.toLowerCase() !== "false" && envOverride !== "0";
   }
 
-  if (process.platform === "linux" && !CONFIG.headless) {
+  if (process.platform === "linux" && !criteria.headless) {
     logger.warn(
       "Headed mode requested on a Linux host - forcing headless because no X server is expected. " +
       "Set PLAYWRIGHT_HEADLESS=false and run under xvfb-run to keep headed mode."
@@ -41,7 +109,7 @@ function resolveHeadless(): boolean {
     return true;
   }
 
-  return CONFIG.headless;
+  return criteria.headless;
 }
 
 /**
@@ -88,15 +156,6 @@ async function launchChromium(isHeadless: boolean): Promise<Browser> {
     }
     throw err;
   }
-}
-
-export function requestStopScraping(): void {
-  logger.warn("Cancellation requested: setting stopRequested flag.");
-  stopRequested = true;
-}
-
-export function resetStopScraping(): void {
-  stopRequested = false;
 }
 
 export function parseSearchQueries(businessType: string, location: string): string[] {
@@ -301,41 +360,76 @@ function parseReviews(text: string | null): number {
   return isNaN(num) ? 0 : num;
 }
 
-function generateSheetName(): string {
-  let type = CONFIG.businessType.trim();
+function generateSheetName(criteria: ScrapeCriteria): string {
+  let type = criteria.businessType.trim();
   // Clean special characters invalid in sheet names
   type = type.replace(/[\\/\?\*:\[\]]/g, "");
   // Limit to 31 characters for Google Sheets tab compatibility
   return type.substring(0, 31).trim();
 }
 
-export async function runScraper(customWebhookUrl?: string): Promise<ScrapingResult> {
-  resetStopScraping();
-  const query = `${CONFIG.businessType} in ${CONFIG.location}`;
+/**
+ * Runs one lead-discovery pass.
+ *
+ * @param criteria  Search parameters for THIS run. Defaults to the compile-time
+ *                  CONFIG so the CLI entry point (src/main.ts) keeps working
+ *                  unchanged; the server always passes per-job criteria.
+ * @param token     Per-run cancellation. A fresh token means "never cancelled".
+ * @param customWebhookUrl  Tenant's Google Sheets webhook, when configured.
+ */
+export async function runScraper(
+  criteria: ScrapeCriteria = DEFAULT_CRITERIA,
+  token: CancellationToken = new CancellationToken(),
+  customWebhookUrl?: string,
+  onProgress?: ProgressReporter
+): Promise<ScrapingResult> {
+  activeTokens.add(token);
+  try {
+    return await executeScrape(criteria, token, customWebhookUrl, onProgress);
+  } finally {
+    activeTokens.delete(token);
+  }
+}
+
+async function executeScrape(
+  criteria: ScrapeCriteria,
+  token: CancellationToken,
+  customWebhookUrl?: string,
+  onProgress?: ProgressReporter
+): Promise<ScrapingResult> {
+  /** Reports progress without ever letting a reporting failure break the run. */
+  const report = (progress: ScrapeProgress) => {
+    try {
+      onProgress?.(progress);
+    } catch {
+      /* progress reporting is best-effort */
+    }
+  };
+  const query = `${criteria.businessType} in ${criteria.location}`;
   logger.info(`Starting lead search for: '${query}'`);
   
-  // Auto-geocode CONFIG.location to align search center coordinates
+  // Auto-geocode criteria.location to align search center coordinates
   try {
-    logger.info(`Geocoding search location '${CONFIG.location}' to align search center coordinates...`);
+    logger.info(`Geocoding search location '${criteria.location}' to align search center coordinates...`);
     const axios = (await import("axios")).default;
-    const geoResponse = await axios.get(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(CONFIG.location)}&format=json&limit=1`, {
+    const geoResponse = await axios.get(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(criteria.location)}&format=json&limit=1`, {
       headers: {
         "User-Agent": "NexaLeadAi-Agent/1.0"
       },
       timeout: 5000
     });
     if (geoResponse.data && geoResponse.data.length > 0) {
-      CONFIG.lat = parseFloat(geoResponse.data[0].lat);
-      CONFIG.lng = parseFloat(geoResponse.data[0].lon);
-      logger.info(`Aligned search center coordinates to Lat: ${CONFIG.lat}, Lng: ${CONFIG.lng}`);
+      criteria.lat = parseFloat(geoResponse.data[0].lat);
+      criteria.lng = parseFloat(geoResponse.data[0].lon);
+      logger.info(`Aligned search center coordinates to Lat: ${criteria.lat}, Lng: ${criteria.lng}`);
     } else {
-      logger.warn(`Could not geocode location '${CONFIG.location}'. Proceeding with existing coordinates.`);
+      logger.warn(`Could not geocode location '${criteria.location}'. Proceeding with existing coordinates.`);
     }
   } catch (e: any) {
-    logger.warn(`Failed to geocode location '${CONFIG.location}': ${e.message || e}. Proceeding with existing coordinates.`);
+    logger.warn(`Failed to geocode location '${criteria.location}': ${e.message || e}. Proceeding with existing coordinates.`);
   }
 
-  const sheetName = generateSheetName();
+  const sheetName = generateSheetName(criteria);
   
   const startTime = Date.now();
   let browser: Browser | null = null;
@@ -346,7 +440,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
   let failedCount = 0;
 
   try {
-    const isHeadless = resolveHeadless();
+    const isHeadless = resolveHeadless(criteria);
     logger.info(`Launching Chromium browser (headless: ${isHeadless}) with Playwright...`);
     browser = await launchChromium(isHeadless);
 
@@ -358,16 +452,16 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
 
     const page = await context.newPage();
     
-    const queries = parseSearchQueries(CONFIG.businessType, CONFIG.location);
+    const queries = parseSearchQueries(criteria.businessType, criteria.location);
     logger.info(`Generated ${queries.length} search queries to execute sequentially.`);
     const placeLinks = new Set<string>();
 
     for (const queryToRun of queries) {
-      if (stopRequested) {
+      if (token.isCancelled) {
         logger.warn("Scraping cancelled by user during query sequence.");
         break;
       }
-      if (placeLinks.size >= CONFIG.maxResults) {
+      if (placeLinks.size >= criteria.maxResults) {
         break;
       }
 
@@ -418,8 +512,8 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
       let scrollAttempts = 0;
       const maxScrollAttempts = 15; // Limit per query scroll to prevent taking too long
 
-      while (placeLinks.size < CONFIG.maxResults && scrollAttempts < maxScrollAttempts) {
-        if (stopRequested) {
+      while (placeLinks.size < criteria.maxResults && scrollAttempts < maxScrollAttempts) {
+        if (token.isCancelled) {
           logger.warn("Scraping cancelled by user during scrolling.");
           break;
         }
@@ -437,7 +531,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
 
         logger.info(`Scrolling... Found ${placeLinks.size} business URLs so far...`);
 
-        if (placeLinks.size >= CONFIG.maxResults) {
+        if (placeLinks.size >= criteria.maxResults) {
           logger.info(`Reached goal: extracted ${placeLinks.size} links.`);
           break;
         }
@@ -493,18 +587,19 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
       }
     }
 
-    const targetUrls = Array.from(placeLinks).slice(0, CONFIG.maxResults);
+    const targetUrls = Array.from(placeLinks).slice(0, criteria.maxResults);
     logger.success(`Extraction complete! Found ${targetUrls.length} total target URLs.`);
+    report({ stage: "discovered", current: 0, total: targetUrls.length });
 
     if (targetUrls.length === 0) {
       logger.warn("No business listings extracted directly from Google Maps page.");
-      if (CONFIG.enableSimulation) {
+      if (criteria.enableSimulation) {
         logger.info("Piping fallback to high-fidelity AI simulation scanner to produce realistic local leads...");
         if (browser) {
           await browser.close();
           browser = null;
         }
-        return await runSimulationScanner(customWebhookUrl);
+        return await runSimulationScanner(criteria, token, customWebhookUrl);
       } else {
         throw new Error("No businesses extracted. Headless mode might be blocked by Google Maps bot protection, or no results were found for the query.");
       }
@@ -512,12 +607,19 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
 
     // Step 2: Query details for each target business
     for (const url of targetUrls) {
-      if (stopRequested) {
+      if (token.isCancelled) {
         logger.warn("Scraping cancelled by user during details extraction loop.");
         break;
       }
       scannedCount++;
       logger.info(`--- Processing [${scannedCount}/${targetUrls.length}] ---`);
+      report({
+        stage: "analysing",
+        current: scannedCount,
+        total: targetUrls.length,
+        added: addedCount,
+        failed: failedCount,
+      });
 
       try {
         await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
@@ -542,7 +644,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
         let website = details.website;
         let phone = details.phone;
         let address = details.address;
-        let category = details.category || CONFIG.businessType;
+        let category = details.category || criteria.businessType;
 
         if (!businessName) {
           logger.warn("Skipping place: Missing business name.");
@@ -581,10 +683,10 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
         if (coords) {
           leadLat = coords.lat;
           leadLng = coords.lng;
-          if (CONFIG.lat && CONFIG.lng && CONFIG.radius) {
-            const distance = calculateDistance(CONFIG.lat, CONFIG.lng, coords.lat, coords.lng);
-            if (distance > CONFIG.radius) {
-              logger.warn(`Skipped: '${businessName}' (Out of search radius: ${distance.toFixed(2)} km, limit is ${CONFIG.radius} km)`);
+          if (criteria.lat && criteria.lng && criteria.radius) {
+            const distance = calculateDistance(criteria.lat, criteria.lng, coords.lat, coords.lng);
+            if (distance > criteria.radius) {
+              logger.warn(`Skipped: '${businessName}' (Out of search radius: ${distance.toFixed(2)} km, limit is ${criteria.radius} km)`);
               continue;
             } else {
               logger.info(`Within search radius: ${distance.toFixed(2)} km from search center.`);
@@ -593,7 +695,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
         }
 
         // Run website, Instagram, Facebook, and LinkedIn analyzers
-        if (stopRequested) {
+        if (token.isCancelled) {
           logger.warn("Scraping cancelled by user before website analysis.");
           break;
         }
@@ -601,7 +703,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
         logger.info(`Analyzing website indicators for '${businessName}'...`);
         const webAnalysis = await analyzeWebsite(browser!, website);
 
-        if (stopRequested) {
+        if (token.isCancelled) {
           logger.warn("Scraping cancelled by user before Instagram analysis.");
           break;
         }
@@ -609,7 +711,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
         logger.info(`Analyzing Instagram presence for '${businessName}'...`);
         const instaAnalysis = await analyzeInstagram(browser!, businessName);
 
-        if (stopRequested) {
+        if (token.isCancelled) {
           logger.warn("Scraping cancelled by user before Facebook analysis.");
           break;
         }
@@ -617,7 +719,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
         logger.info(`Analyzing Facebook presence for '${businessName}'...`);
         const fbAnalysis = await analyzeFacebook(browser!, businessName);
 
-        if (stopRequested) {
+        if (token.isCancelled) {
           logger.warn("Scraping cancelled by user before LinkedIn analysis.");
           break;
         }
@@ -629,7 +731,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
           withoutWebsiteCount++;
         }
 
-        if (stopRequested) {
+        if (token.isCancelled) {
           logger.warn("Scraping cancelled by user before scoring and AI insight generation.");
           break;
         }
@@ -638,7 +740,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
         const partialLead = {
           businessName,
           phone,
-          address: address || CONFIG.location,
+          address: address || criteria.location,
           rating,
           reviews,
           website: website || "",
@@ -683,7 +785,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
         // ── AI Growth Intelligence (opt-in, fully isolated) ──
         // Runs the deep multi-dimensional analysis pipeline, reusing the same
         // browser. Wrapped so any failure never affects the core scrape.
-        if (CONFIG.enableDeepAnalysis && browser) {
+        if (criteria.enableDeepAnalysis && browser) {
           try {
             logger.info(`Running AI Growth Intelligence for '${businessName}'...`);
             const intel = await runGrowthIntelligence(
@@ -695,7 +797,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
                 rating,
                 reviews,
                 phone,
-                address: address || CONFIG.location,
+                address: address || criteria.location,
                 lat: leadLat,
                 lng: leadLng,
                 instagramUrl: instaAnalysis.url,
@@ -707,7 +809,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
                 linkedinUrl: liAnalysis.url,
                 linkedinStatus: liAnalysis.status,
               },
-              { discoverExtraSocial: CONFIG.deepAnalysisExtraSocial }
+              { discoverExtraSocial: criteria.deepAnalysisExtraSocial }
             );
 
             Object.assign(fullLead, growthIntelligenceToLeadFields(intel));
@@ -748,7 +850,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
 
         leadsFound.push(fullLead);
 
-        if (stopRequested) {
+        if (token.isCancelled) {
           logger.warn("Scraping cancelled by user before webhook submission.");
           break;
         }
@@ -771,9 +873,9 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
 
   } catch (error: any) {
     logger.error("Scraper encountered a critical error during execution:", error);
-    if (CONFIG.enableSimulation) {
+    if (criteria.enableSimulation) {
       logger.warn("Piping fallback to high-fidelity AI simulation scanner...");
-      return await runSimulationScanner(customWebhookUrl);
+      return await runSimulationScanner(criteria, token, customWebhookUrl);
     } else {
       throw error;
     }
@@ -794,7 +896,7 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
     addedCount,
     failedCount,
     executionTime: executionTimeString
-  });
+  }, criteria);
 
   return {
     scannedCount,
@@ -809,14 +911,17 @@ export async function runScraper(customWebhookUrl?: string): Promise<ScrapingRes
  * Runs a high-fidelity simulation in case Playwright is restricted, blocked by CAPTCHAs, 
  * or runs inside a headless docker environment without display drivers.
  */
-export async function runSimulationScanner(customWebhookUrl?: string): Promise<ScrapingResult> {
-  resetStopScraping();
-  const query = `${CONFIG.businessType} in ${CONFIG.location}`;
+export async function runSimulationScanner(
+  criteria: ScrapeCriteria = DEFAULT_CRITERIA,
+  token: CancellationToken = new CancellationToken(),
+  customWebhookUrl?: string
+): Promise<ScrapingResult> {
+  const query = `${criteria.businessType} in ${criteria.location}`;
   logger.warn(`--- Running High-Fidelity Simulation Mode for '${query}' ---`);
-  const sheetName = generateSheetName();
+  const sheetName = generateSheetName(criteria);
   
   const startTime = Date.now();
-  const simulatedLeads: Partial<Lead>[] = getMockLeadsPool(CONFIG.businessType, CONFIG.location);
+  const simulatedLeads: Partial<Lead>[] = getMockLeadsPool(criteria.businessType, criteria.location);
   
   let scannedCount = 0;
   let withoutWebsiteCount = 0;
@@ -826,11 +931,11 @@ export async function runSimulationScanner(customWebhookUrl?: string): Promise<S
 
   // Simulate scanning in increments (1.5s delay per log)
   for (const mock of simulatedLeads) {
-    if (stopRequested) {
+    if (token.isCancelled) {
       logger.warn("Simulated scraping cancelled by user.");
       break;
     }
-    if (scannedCount >= CONFIG.maxResults) break;
+    if (scannedCount >= criteria.maxResults) break;
     scannedCount++;
     
     logger.info(`Scanning: Google Maps place listing [${scannedCount}/${simulatedLeads.length}]`);
@@ -855,9 +960,9 @@ export async function runSimulationScanner(customWebhookUrl?: string): Promise<S
     }
 
     // Generate simulated coordinate within search radius
-    const centerLat = CONFIG.lat || 19.9975;
-    const centerLng = CONFIG.lng || 73.7898;
-    const radius = CONFIG.radius || 10;
+    const centerLat = criteria.lat || 19.9975;
+    const centerLng = criteria.lng || 73.7898;
+    const radius = criteria.radius || 10;
     const angle = Math.random() * Math.PI * 2;
     const distance = Math.random() * radius; // in km
     const latOffset = (distance / 111) * Math.sin(angle);
@@ -954,7 +1059,7 @@ export async function runSimulationScanner(customWebhookUrl?: string): Promise<S
 
     leadsFound.push(fullLead);
 
-    if (stopRequested) {
+    if (token.isCancelled) {
       logger.warn("Simulated scraping cancelled by user before webhook submission.");
       break;
     }
@@ -983,7 +1088,7 @@ export async function runSimulationScanner(customWebhookUrl?: string): Promise<S
     addedCount,
     failedCount,
     executionTime: executionTimeString
-  });
+  }, criteria);
 
   return {
     scannedCount,
@@ -994,11 +1099,11 @@ export async function runSimulationScanner(customWebhookUrl?: string): Promise<S
   };
 }
 
-function displaySummaryTable(data: any) {
+function displaySummaryTable(data: any, criteria: ScrapeCriteria) {
   logger.log("\n================================\n");
   logger.log("SEARCH COMPLETE\n");
-  logger.log(`Business Type:\n${CONFIG.businessType}\n`);
-  logger.log(`Location:\n${CONFIG.location}\n`);
+  logger.log(`Business Type:\n${criteria.businessType}\n`);
+  logger.log(`Location:\n${criteria.location}\n`);
   logger.log(`Businesses Scanned:\n${data.scannedCount}\n`);
   logger.log(`Without Website:\n${data.withoutWebsiteCount}\n`);
   logger.log(`Added To Sheet:\n${data.addedCount}\n`);
@@ -1243,7 +1348,7 @@ function getMockLeadsPool(type: string, location: string): Partial<Lead>[] {
         mapsUrl: "https://maps.google.com/?cid=metro"
       },
       {
-        businessName: `${CONFIG.location} Elite ${type}`,
+        businessName: `${location} Elite ${type}`,
         phone: "+91 99933 44556",
         address: `Prime Arcade Suite 10, ${location}`,
         rating: 4.7,

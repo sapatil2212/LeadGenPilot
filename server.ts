@@ -9,7 +9,12 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { CONFIG } from "./src/config";
 import { Lead } from "./src/types";
-import { runScraper, requestStopScraping } from "./src/mapsScraper";
+import {
+  runScraper,
+  cancelAllScrapes,
+  CancellationToken,
+  type ScrapeCriteria,
+} from "./src/mapsScraper";
 import { logger } from "./src/logger";
 import { duplicateChecker } from "./src/duplicateChecker";
 import { loadFailedLeads, retryFailedLeads, sendLeadToWebhook, fetchLeadsFromGoogleSheet, fetchSheetNamesFromGoogleSheet } from "./src/googleSheetsWebhook";
@@ -90,6 +95,19 @@ import {
   heavyActionRateLimiter,
   apiKeyAuth,
 } from "./src/security";
+import { resolveTenantContext, requirePermission, ctxOf } from "./src/tenancy/context";
+import {
+  startJob,
+  finishJob,
+  updateJobProgress,
+  requestJobCancellation,
+  isCancellationRequested,
+  getJob,
+  getLatestJob,
+  listJobs,
+  isTerminal,
+  reclaimAbandonedJobs,
+} from "./src/tenancy/jobService";
 import { performanceMiddleware } from "./src/analytics";
 import { scheduleAutomaticBackups } from "./src/backup";
 import { notificationService } from "./src/notifications";
@@ -132,12 +150,45 @@ const asyncHandler =
   (req: express.Request, res: express.Response, next: express.NextFunction) =>
     Promise.resolve(fn(req, res, next)).catch(next);
 
-// Scraper runtime state
-let isScrapingRunning = false;
-let scraperResult: any = null;
+/**
+ * Extracts per-run search criteria from a request body.
+ *
+ * A discovery run's parameters used to come from the shared mutable CONFIG
+ * singleton, so they were process-global. They now travel with the request and
+ * are stored on the Job row. CONFIG survives only as the default for fields the
+ * caller omits and for the CLI entry point (src/main.ts).
+ */
+function readTenantCriteria(body: any): Partial<ScrapeCriteria> {
+  const out: Partial<ScrapeCriteria> = {};
+  if (!body || typeof body !== "object") return out;
+
+  if (typeof body.businessType === "string" && body.businessType.trim()) {
+    out.businessType = body.businessType.trim().slice(0, 300);
+  }
+  if (typeof body.location === "string" && body.location.trim()) {
+    out.location = body.location.trim().slice(0, 300);
+  }
+  const max = parseInt(String(body.maxResults ?? ""), 10);
+  if (Number.isFinite(max) && max >= 1 && max <= 5000) out.maxResults = max;
+  if (body.enableSimulation !== undefined) out.enableSimulation = Boolean(body.enableSimulation);
+  if (body.headless !== undefined) out.headless = Boolean(body.headless);
+  const lat = parseFloat(String(body.lat ?? ""));
+  const lng = parseFloat(String(body.lng ?? ""));
+  const radius = parseFloat(String(body.radius ?? ""));
+  if (Number.isFinite(lat)) out.lat = lat;
+  if (Number.isFinite(lng)) out.lng = lng;
+  if (Number.isFinite(radius)) out.radius = radius;
+
+  return out;
+}
 
 // Persisted runtime config override (survives restarts, works on read-only
 // source trees where writing src/config.ts is not possible).
+//
+// NOTE: this remains a single deployment-wide default, NOT per-tenant state.
+// It seeds the form in the dashboard; a run's actual criteria come from the
+// request and are recorded on the job. Per-tenant saved searches are a
+// later phase.
 const configOverridePath = path.join(process.cwd(), "leadfinder-config.json");
 
 function persistConfigOverride() {
@@ -181,7 +232,9 @@ app.get("/api/ready", (req, res) => {
     geminiConfigured: env.isGeminiConfigured(),
     databaseConfigured: env.isDatabaseConfigured(),
     whatsapp: getWhatsAppStatus().status,
-    scraperRunning: isScrapingRunning,
+    // Deliberately no longer reported here: whether a scrape is running is
+    // per-workspace state, and this endpoint is public and unauthenticated.
+    // Ask GET /api/status with a session instead.
     campaignRunning: isCampaignRunning,
     authEnabled: env.isAuthEnabled(),
   });
@@ -496,117 +549,230 @@ app.get("/api/logs", (req, res) => {
   res.json({ logs });
 });
 
-app.post("/api/run-scraper", heavyActionRateLimiter(), async (req, res) => {
-  if (isScrapingRunning) {
-    return res.status(400).json({ error: "Scraping session is already active." });
-  }
+/**
+ * POST /api/run-scraper
+ *
+ * Starts a lead-discovery run for the caller's workspace.
+ *
+ * Rewritten in Phase 2 to hold state in a per-tenant Job row. Previously this
+ * handler used a process-global `isScrapingRunning` boolean and read its search
+ * parameters from the shared mutable `CONFIG` singleton, which meant:
+ *   - the second workspace in the entire deployment to press Start was refused;
+ *   - saving a search in one workspace redirected a run already in flight in
+ *     another;
+ *   - the plan-quota capper wrote `CONFIG.maxResults = remaining`, permanently
+ *     lowering the cap for every workspace that scraped afterwards.
+ *
+ * Criteria are now resolved per request and passed by argument, and admission is
+ * per workspace, so two tenants can discover leads at the same time.
+ */
+app.post(
+  "/api/run-scraper",
+  heavyActionRateLimiter(),
+  resolveTenantContext,
+  requirePermission("RUN_LEAD_DISCOVERY"),
+  asyncHandler(async (req, res) => {
+    const ctx = ctxOf(req);
 
-  // ── Plan enforcement: monthly lead quota ──
-  const ent = entOf(req);
-  const authUser = req.authUser;
-  if (!req.authDisabled && authUser && Number.isFinite(ent.monthlyLeadLimit)) {
-    const usage = computeUsage(authUser, ent);
-    if (usage.remaining <= 0) {
-      return res.status(403).json({
-        error: `You've reached your ${ent.planName} plan limit of ${ent.monthlyLeadLimit} leads this month. Upgrade to Pro for unlimited leads.`,
-        code: "quota_exceeded",
-        usage: { used: usage.used, limit: usage.limit },
+    // Per-run copy of the search criteria. Mutating this cannot affect any other
+    // workspace, which is the whole point of taking a copy.
+    const criteria: ScrapeCriteria = { ...CONFIG, ...readTenantCriteria(req.body) };
+
+    // ── Plan enforcement: monthly lead quota ──
+    const ent = entOf(req);
+    const authUser = req.authUser;
+    if (!req.authDisabled && authUser && Number.isFinite(ent.monthlyLeadLimit)) {
+      const usage = computeUsage(authUser, ent);
+      if (usage.remaining <= 0) {
+        return res.status(403).json({
+          error: `You've reached your ${ent.planName} plan limit of ${ent.monthlyLeadLimit} leads this month. Upgrade to Pro for unlimited leads.`,
+          code: "quota_exceeded",
+          usage: { used: usage.used, limit: usage.limit },
+        });
+      }
+      if (criteria.maxResults > usage.remaining) {
+        logger.warn(
+          `Capping this run to ${usage.remaining} lead(s) to respect the ${ent.planName} monthly limit (${usage.used}/${ent.monthlyLeadLimit} used).`
+        );
+        criteria.maxResults = usage.remaining;
+      }
+    }
+
+    // Claims this workspace's discovery slot. Another workspace running a scrape
+    // is irrelevant here; the same workspace running one is a conflict.
+    const { job, conflict } = await startJob(ctx, "lead_discovery", criteria as any);
+    if (!job) {
+      return res.status(409).json({
+        error: "A lead search is already running for this workspace.",
+        code: "job_in_progress",
+        jobId: conflict?.id,
+        startedAt: conflict?.startedAt,
       });
     }
-    // Cap this run so cumulative monthly usage cannot exceed the plan limit.
-    if (CONFIG.maxResults > usage.remaining) {
-      logger.warn(
-        `Capping scrape to ${usage.remaining} lead(s) to respect the ${ent.planName} monthly limit (${usage.used}/${ent.monthlyLeadLimit} used).`
-      );
-      CONFIG.maxResults = usage.remaining;
-    }
-  }
 
-  const scrapingUserId: string | null = authUser?.id ?? null;
+    res.json({
+      success: true,
+      message: "Lead search started.",
+      jobId: job.id,
+    });
 
-  isScrapingRunning = true;
-  res.json({ success: true, message: "Scraper launched in background." });
+    // ── Background execution ──
+    const scrapingUserId = ctx.userId;
+    const token = new CancellationToken();
 
-  // Run scraper asynchronously
-  try {
-    logger.clear();
-    let customWebhookUrl: string | undefined;
-    if (scrapingUserId) {
-      const sheetConfig = await getUserIntegration(scrapingUserId, "google_sheet") as any;
+    /*
+     * Cancellation arrives as a database write from a different request (and
+     * potentially a different process), so it is polled into the token rather
+     * than read from a shared variable. 3s is frequent enough to abort between
+     * leads — each takes several seconds — without adding meaningful load.
+     */
+    const cancelPoll = setInterval(() => {
+      void isCancellationRequested(job.id)
+        .then((requested) => {
+          if (requested) token.cancel("cancelled by the workspace");
+        })
+        .catch(() => {
+          /* a transient DB error must not abort the run */
+        });
+    }, 3000);
+
+    try {
+      logger.clear();
+      let customWebhookUrl: string | undefined;
+      const sheetConfig = (await getUserIntegration(scrapingUserId, "google_sheet")) as any;
       if (sheetConfig && sheetConfig.webhookUrl) {
         customWebhookUrl = sheetConfig.webhookUrl;
       }
-    }
-    const result = await runScraper(customWebhookUrl);
-    scraperResult = result;
-    // Persist harvested leads, then charge the user's monthly quota against
-    // what was actually stored so the CRM count and quota never diverge.
-    if (result && Array.isArray(result.leads) && result.leads.length > 0) {
+
+      /*
+       * Progress is written to the job row so any request (or a future worker
+       * process) can read it. Throttled to one write every 2s: the scraper
+       * reports per lead, and each write is a round trip to a remote database.
+       */
+      let lastProgressWrite = 0;
+      const result = await runScraper(criteria, token, customWebhookUrl, (progress) => {
+        const now = Date.now();
+        const isFinalStage = progress.current >= progress.total && progress.total > 0;
+        if (now - lastProgressWrite < 2000 && !isFinalStage) return;
+        lastProgressWrite = now;
+        void updateJobProgress(job.id, progress as any);
+      });
+
+      // Persist harvested leads, then charge the monthly quota against what was
+      // actually stored so the CRM count and quota never diverge.
       let persistedCount = 0;
       let listCreated = false;
-      // ── CRM: Persist leads to MySQL DB ──
-      try {
-        const now = new Date();
-        const timeStr = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
-        const dateStr = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-        const listName = `${CONFIG.businessType} — ${CONFIG.location} — ${timeStr} ${dateStr}`;
-        const leadList = await prisma.leadList.create({
-          data: {
-            name: listName,
-            businessType: CONFIG.businessType,
-            location: CONFIG.location,
-            userId: scrapingUserId,
-          },
-        });
-        listCreated = true;
-        // Insert leads one-by-one so a single bad row can't drop the batch.
-        for (const lead of result.leads) {
-          try {
-            await prisma.lead.create({ data: appLeadToDbInput(lead, leadList.id, scrapingUserId) });
-            persistedCount++;
-          } catch (leadErr: any) {
-            logger.warn(`CRM: Skipped lead "${lead.businessName}" — ${leadErr.message}`);
-          }
-        }
-        if (persistedCount === 0) {
-          // Nothing stored: drop the empty list so it doesn't show as "0 leads".
-          await prisma.leadList.delete({ where: { id: leadList.id } }).catch(() => {});
-          listCreated = false;
-        } else {
-          logger.success(`CRM: Saved ${persistedCount}/${result.leads.length} leads to list "${listName}" (id: ${leadList.id})`);
-        }
-      } catch (dbErr: any) {
-        logger.error(`CRM: Failed to persist leads to DB: ${dbErr.message}`);
-      }
 
-      // Charge quota against stored leads. If the DB was entirely unavailable
-      // (list never created), fall back to the harvested count so usage still
-      // reflects the leads delivered to the sheet/webhook.
-      const chargeCount = listCreated ? persistedCount : result.leads.length;
-      if (scrapingUserId) {
+      if (result && Array.isArray(result.leads) && result.leads.length > 0) {
+        try {
+          const now = new Date();
+          const timeStr = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
+          const dateStr = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+          const listName = `${criteria.businessType} — ${criteria.location} — ${timeStr} ${dateStr}`;
+          const leadList = await prisma.leadList.create({
+            data: {
+              name: listName,
+              businessType: criteria.businessType,
+              location: criteria.location,
+              // Both stamped: tenantId is the new scope, userId is still read by
+              // code paths that have not migrated yet.
+              tenantId: ctx.tenantId,
+              userId: scrapingUserId,
+            },
+          });
+          listCreated = true;
+
+          // Insert leads one-by-one so a single bad row can't drop the batch.
+          for (const lead of result.leads) {
+            try {
+              await prisma.lead.create({
+                data: { ...appLeadToDbInput(lead, leadList.id, scrapingUserId), tenantId: ctx.tenantId },
+              });
+              persistedCount++;
+            } catch (leadErr: any) {
+              logger.warn(`CRM: Skipped lead "${lead.businessName}" — ${leadErr.message}`);
+            }
+          }
+
+          if (persistedCount === 0) {
+            // Nothing stored: drop the empty list so it doesn't show as "0 leads".
+            await prisma.leadList.delete({ where: { id: leadList.id } }).catch(() => {});
+            listCreated = false;
+          } else {
+            logger.success(
+              `CRM: Saved ${persistedCount}/${result.leads.length} leads to list "${listName}" (id: ${leadList.id})`
+            );
+          }
+        } catch (dbErr: any) {
+          logger.error(`CRM: Failed to persist leads to DB: ${dbErr.message}`);
+        }
+
+        // If the DB was entirely unavailable, fall back to the harvested count
+        // so usage still reflects the leads delivered to the sheet/webhook.
+        const chargeCount = listCreated ? persistedCount : result.leads.length;
         if (chargeCount > 0) await consumeLeads(scrapingUserId, chargeCount);
         await notificationService.notifyScraperComplete(scrapingUserId, result.leads.length);
+      } else if (result) {
+        await notificationService.notifyScraperComplete(scrapingUserId, 0);
       }
-    } else if (scrapingUserId && result) {
-      await notificationService.notifyScraperComplete(scrapingUserId, 0);
-    }
-  } catch (error) {
-    logger.error("Scraper crash in server-runner execution thread", error);
-    if (scrapingUserId) {
-      await notificationService.notifyScraperError(scrapingUserId, (error as Error).message || "Unknown error");
-    }
-  } finally {
-    isScrapingRunning = false;
-  }
-});
 
-app.post("/api/stop-scraper", (req, res) => {
-  if (!isScrapingRunning) {
-    return res.status(400).json({ error: "Scraping session is not active." });
-  }
-  requestStopScraping();
-  res.json({ success: true, message: "Stop requested." });
-});
+      await finishJob(job.id, token.isCancelled ? "cancelled" : "completed", {
+        result: {
+          scannedCount: result.scannedCount,
+          withoutWebsiteCount: result.withoutWebsiteCount,
+          addedCount: result.addedCount,
+          failedCount: result.failedCount,
+          leadsFound: result.leads.length,
+          leadsPersisted: persistedCount,
+        },
+      });
+    } catch (error) {
+      logger.error("Scraper crash in server-runner execution thread", error);
+      await notificationService.notifyScraperError(
+        scrapingUserId,
+        (error as Error).message || "Unknown error"
+      );
+      await finishJob(job.id, "failed", { error: (error as Error).message || "Unknown error" });
+    } finally {
+      clearInterval(cancelPoll);
+    }
+  })
+);
+
+/**
+ * POST /api/stop-scraper
+ *
+ * Cancels the caller's own run. Previously this flipped a process-global flag
+ * and aborted whichever workspace's scrape happened to be in flight, with no
+ * ownership check at all.
+ */
+app.post(
+  "/api/stop-scraper",
+  resolveTenantContext,
+  requirePermission("RUN_LEAD_DISCOVERY"),
+  asyncHandler(async (req, res) => {
+    const ctx = ctxOf(req);
+    const jobId = typeof req.body?.jobId === "string" ? req.body.jobId : null;
+
+    const target = jobId
+      ? await getJob(ctx, jobId)
+      : await getLatestJob(ctx, "lead_discovery");
+
+    if (!target || isTerminal(target.status)) {
+      return res.status(400).json({
+        error: "No lead search is currently running for this workspace.",
+        code: "no_active_job",
+      });
+    }
+
+    const outcome = await requestJobCancellation(ctx, target.id);
+    if (!outcome.ok) {
+      return res.status(400).json({ error: "That run has already finished.", code: outcome.reason });
+    }
+
+    res.json({ success: true, message: "Stop requested.", jobId: target.id });
+  })
+);
 
 app.post("/api/retry-failed", async (req, res) => {
   try {
@@ -1935,15 +2101,57 @@ app.post("/api/campaign/stop", (req, res) => {
   res.json({ success: true, message: "Campaign cancellation requested." });
 });
 
-app.get("/api/status", (req, res) => {
-  res.json({
-    isRunning: isScrapingRunning,
-    lastResult: scraperResult,
-    webhookUrlConfigured: !!process.env.GOOGLE_SHEET_WEBHOOK_URL && process.env.GOOGLE_SHEET_WEBHOOK_URL !== "YOUR_WEBHOOK_URL",
-    whatsappConnected: getWhatsAppStatus().status === "CONNECTED",
-    campaignRunning: isCampaignRunning
-  });
-});
+/**
+ * GET /api/status
+ *
+ * Discovery status for the CALLER'S workspace, read from their most recent job
+ * row rather than from process globals. Previously every caller saw the same
+ * `isScrapingRunning` / `scraperResult` pair, so one workspace's progress and
+ * final counts were visible to all of them.
+ *
+ * The response keeps its original shape so the existing dashboard polling keeps
+ * working, with `jobId` and `progress` added.
+ */
+app.get(
+  "/api/status",
+  resolveTenantContext,
+  asyncHandler(async (req, res) => {
+    const ctx = ctxOf(req);
+    const job = await getLatestJob(ctx, "lead_discovery");
+    const running = !!job && !isTerminal(job.status);
+
+    res.json({
+      isRunning: running,
+      lastResult: job && isTerminal(job.status) ? job.result : null,
+      jobId: job?.id ?? null,
+      jobStatus: job?.status ?? null,
+      progress: job?.progress ?? null,
+      cancelRequested: job?.cancelRequested ?? false,
+      webhookUrlConfigured:
+        !!process.env.GOOGLE_SHEET_WEBHOOK_URL &&
+        process.env.GOOGLE_SHEET_WEBHOOK_URL !== "YOUR_WEBHOOK_URL",
+      whatsappConnected: getWhatsAppStatus().status === "CONNECTED",
+      campaignRunning: isCampaignRunning,
+    });
+  })
+);
+
+/**
+ * GET /api/jobs — recent jobs for the caller's workspace.
+ * Gives the dashboard a history rather than only "what is happening now",
+ * which the single global slot could never express.
+ */
+app.get(
+  "/api/jobs",
+  resolveTenantContext,
+  asyncHandler(async (req, res) => {
+    const kind = req.query.kind === "campaign" || req.query.kind === "lead_discovery"
+      ? (req.query.kind as "campaign" | "lead_discovery")
+      : undefined;
+    const limit = parseInt(String(req.query.limit ?? "20"), 10);
+    res.json(await listJobs(ctxOf(req), kind, Number.isFinite(limit) ? limit : 20));
+  })
+);
 
 async function startServer() {
   const nextOutPath = path.join(process.cwd(), "leadfinder-landing", "out");
@@ -2062,7 +2270,21 @@ async function startServer() {
     }
 
     // Establish the database connection (non-blocking; auth routes guard on config).
-    void connectDatabase();
+    void connectDatabase().then((connected) => {
+      /*
+       * A job left "running" by a process that died would occupy its workspace's
+       * slot forever, so no new run could ever start there. Marking them failed
+       * at boot is safe because nothing is executing them any more.
+       *
+       * Startup-only on purpose: with several replicas this would also reclaim
+       * another instance's live jobs. Worker heartbeats replace it in Phase 6.
+       */
+      if (connected) {
+        void reclaimAbandonedJobs().catch((err) =>
+          logger.warn(`Could not reclaim interrupted jobs: ${err?.message || err}`)
+        );
+      }
+    });
     
     // Start cleanup job for unverified users (removes accounts after 10 minutes)
     cleanupJobInterval = startUnverifiedUserCleanup();
@@ -2084,9 +2306,12 @@ async function startServer() {
       cleanupJobInterval = null;
     }
 
-    // Cancel any in-flight campaign and release the WhatsApp browser session.
+    // Cancel any in-flight work and release the WhatsApp browser session.
+    // cancelAllScrapes is the one place a process-wide signal is correct:
+    // shutdown must halt every workspace's run, not just one.
     campaignCancelRequested = true;
-    requestStopScraping();
+    const halted = cancelAllScrapes("server is shutting down");
+    if (halted > 0) logger.warn(`Signalled ${halted} in-flight lead search(es) to stop.`);
     try {
       await Promise.race([
         disconnectWhatsApp(),
