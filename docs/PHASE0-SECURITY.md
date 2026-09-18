@@ -28,18 +28,21 @@ copied, or pasted somewhere outside the machine.
 | 9 | `GOOGLE_SHEET_WEBHOOK_URL` | `.env`, `.env.example` (one value), `utils/.env` (a **different** value) | Apps Script → new deployment URL | **Medium** |
 | 10 | `SMTP_USER`, `ADMIN_EMAILS` | `.env`, `.env.example` | Not secrets, but they identify real mailboxes — expect targeted phishing | Low |
 
-### `ENCRYPTION_KEY` — rotate with care
+### `ENCRYPTION_KEY` — rotate now, while it is free
 
 `src/userIntegrationService.ts` uses this key to AES-encrypt every stored
 per-tenant integration credential (SMTP passwords, WhatsApp Cloud access
-tokens). Rotating it makes existing rows **undecryptable**, and the failure is
-silent: `getUserIntegration()` catches the error and returns `null`, after which
-campaigns quietly fall back to the platform's own SMTP mailbox.
+tokens). Rotating it normally makes existing rows **undecryptable**, and the
+failure is silent: `getUserIntegration()` catches the error and returns `null`,
+after which campaigns quietly fall back to the platform's own SMTP mailbox.
 
-Current exposure is low because `user_integrations` has **0 rows** (confirmed in
-the Phase 0 backup manifest), so there is nothing to lose *right now*. Rotate it
-before any tenant configures an integration. After that point, rotation requires
-a decrypt-with-old-key / re-encrypt-with-new-key migration.
+The application now points at a fresh, empty database (see `docs/DATABASE.md`),
+so `user_integrations` holds **0 rows** and there is nothing to lose. This is the
+cheapest possible moment to rotate it. Once a tenant saves an integration,
+rotation requires a decrypt-with-old-key / re-encrypt-with-new-key migration.
+
+As of Phase 1, an unset or default `ENCRYPTION_KEY` is a **fatal boot error in
+production** (`validateEnv`), so this has to be set before deploying anyway.
 
 ---
 
