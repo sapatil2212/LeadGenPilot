@@ -8,7 +8,14 @@ import { Loader2 } from "lucide-react";
 import App from "./App";
 import AuthPage, { type AuthedUser } from "./AuthPage";
 
-type Status = "loading" | "authed" | "guest" | "disabled";
+type Status = "loading" | "authed" | "guest" | "workspace" | "unavailable";
+
+export interface WorkspaceSummary {
+  id: string;
+  name: string;
+  slug: string;
+  role: string;
+}
 
 export interface Entitlements {
   planName: string;
@@ -41,6 +48,9 @@ export default function AuthGate() {
   const [user, setUser] = useState<AuthedUser | null>(null);
   const [entitlements, setEntitlements] = useState<Entitlements | null>(null);
   const [usage, setUsage] = useState<UsageInfo | null>(null);
+  const [workspace, setWorkspace] = useState<WorkspaceSummary | null>(null);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [workspaceError, setWorkspaceError] = useState("");
 
   const checkSession = useCallback(async () => {
     try {
@@ -50,10 +60,11 @@ export default function AuthGate() {
         setUser(data.user);
         setEntitlements(data.entitlements ?? null);
         setUsage(data.usage ?? null);
-        setStatus("authed");
-      } else if (res.status === 503) {
-        // Database/auth not configured — do not block usage.
-        setStatus("disabled");
+        setWorkspace(data.workspace ?? null);
+        setWorkspaces(Array.isArray(data.workspaces) ? data.workspaces : []);
+        setStatus(data.requiresWorkspaceSelection ? "workspace" : "authed");
+      } else if (res.status === 503 || res.status === 403) {
+        setStatus("unavailable");
       } else {
         setStatus("guest");
       }
@@ -74,8 +85,31 @@ export default function AuthGate() {
       /* ignore */
     }
     setUser(null);
+    setWorkspace(null);
+    setWorkspaces([]);
     setStatus("guest");
   }, []);
+
+  const handleWorkspaceSelect = useCallback(async (tenantId: string) => {
+    setWorkspaceError("");
+    try {
+      const res = await fetch("/api/auth/select-workspace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ tenantId }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setWorkspaceError(data.error || "Could not open that workspace.");
+        return;
+      }
+      setStatus("loading");
+      await checkSession();
+    } catch {
+      setWorkspaceError("Could not connect to the server. Please try again.");
+    }
+  }, [checkSession]);
 
   if (status === "loading") {
     return (
@@ -98,13 +132,47 @@ export default function AuthGate() {
     );
   }
 
-  // authed or disabled → render the dashboard
+  if (status === "unavailable") {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6 font-sans">
+        <div className="max-w-md rounded-2xl border border-amber-200 bg-white p-6 text-center shadow-sm">
+          <h1 className="text-lg font-bold text-slate-900">Authentication is unavailable</h1>
+          <p className="mt-2 text-sm text-slate-600">The database is not configured or cannot be reached. The dashboard remains locked to prevent unscoped data access.</p>
+          <button onClick={checkSession} className="mt-5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500">Try again</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (status === "workspace") {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6 font-sans">
+        <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <h1 className="text-xl font-bold text-slate-900">Choose a workspace</h1>
+          <p className="mt-1 text-sm text-slate-500">Select the dashboard you want to open.</p>
+          <div className="mt-5 space-y-2">
+            {workspaces.map((item) => (
+              <button key={item.id} onClick={() => handleWorkspaceSelect(item.id)} className="w-full rounded-xl border border-slate-200 p-3 text-left hover:border-indigo-400 hover:bg-indigo-50">
+                <div className="font-semibold text-slate-900">{item.name}</div>
+                <div className="text-xs capitalize text-slate-500">{item.role}</div>
+              </button>
+            ))}
+          </div>
+          {workspaceError && <p className="mt-3 text-sm text-rose-600">{workspaceError}</p>}
+          <button onClick={handleLogout} className="mt-5 text-sm font-semibold text-slate-500 hover:text-slate-800">Sign out</button>
+        </div>
+      </div>
+    );
+  }
+
+  // Only an authenticated user with a validated workspace reaches the app.
   return (
     <App
       currentUser={user}
+      currentWorkspace={workspace}
       entitlements={entitlements}
       usage={usage}
-      onLogout={status === "authed" ? handleLogout : undefined}
+      onLogout={handleLogout}
       onRefreshAccount={checkSession}
     />
   );

@@ -157,8 +157,11 @@ describe("Content-Security-Policy", () => {
     expect(csp["font-src"]).toContain("https://fonts.gstatic.com");
     // Map tiles
     expect(csp["img-src"]).toContain("https://*.basemaps.cartocdn.com");
-    // Nothing may be fetched from an arbitrary origin.
-    expect(csp["connect-src"]).toEqual(["'self'"]);
+    // External connections are restricted to the one CDN asset source. Vite
+    // websocket origins are allowed only in development.
+    expect(csp["connect-src"]).toContain("'self'");
+    expect(csp["connect-src"]).toContain("https://unpkg.com");
+    expect(csp["connect-src"]).toContain("ws://localhost:*");
     expect(csp["default-src"]).toEqual(["'self'"]);
     expect(csp["script-src"]).not.toContain("*");
     expect(csp["script-src"]).not.toContain("https:");

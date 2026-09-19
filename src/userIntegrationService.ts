@@ -101,14 +101,15 @@ export async function saveUserIntegration(
   userId: string,
   type: IntegrationType,
   config: IntegrationConfig,
-  label?: string
+  label?: string,
+  tenantId?: string
 ) {
   const encryptedConfig = encrypt(JSON.stringify(config));
 
-  // Check if integration already exists
-  const existing = await prisma.userIntegration.findFirst({
-    where: { userId, type },
-  });
+  // Tenant routes always pass tenantId. The legacy user-only branch remains
+  // only for inbound provider discovery while old rows are migrated.
+  const scope = tenantId ? { tenantId, type } : { userId, type, tenantId: null };
+  const existing = await prisma.userIntegration.findFirst({ where: scope });
 
   if (existing) {
     return await prisma.userIntegration.update({
@@ -124,6 +125,7 @@ export async function saveUserIntegration(
   return await prisma.userIntegration.create({
     data: {
       userId,
+      tenantId: tenantId ?? null,
       type,
       config: encryptedConfig,
       label,
@@ -137,10 +139,11 @@ export async function saveUserIntegration(
  */
 export async function getUserIntegration(
   userId: string,
-  type: IntegrationType
+  type: IntegrationType,
+  tenantId?: string
 ): Promise<IntegrationConfig | null> {
   const integration = await prisma.userIntegration.findFirst({
-    where: { userId, type, enabled: true },
+    where: tenantId ? { tenantId, type, enabled: true } : { userId, type, tenantId: null, enabled: true },
   });
 
   if (!integration) return null;
@@ -158,16 +161,16 @@ export async function getUserIntegration(
  * List every enabled SMTP integration across all users, with decrypted
  * credentials. Used by the email-reply poller to know which mailboxes to watch.
  */
-export async function getAllEnabledSmtpConfigs(): Promise<(SMTPConfig & { userId: string | null })[]> {
+export async function getAllEnabledSmtpConfigs(): Promise<(SMTPConfig & { userId: string | null; tenantId: string | null })[]> {
   const integrations = await prisma.userIntegration.findMany({
     where: { type: "smtp", enabled: true },
   });
-  const results: (SMTPConfig & { userId: string | null })[] = [];
+  const results: (SMTPConfig & { userId: string | null; tenantId: string | null })[] = [];
   for (const integ of integrations) {
     try {
       const cfg = JSON.parse(decrypt(integ.config)) as SMTPConfig;
       if (cfg && cfg.host && cfg.user && cfg.password) {
-        results.push({ ...cfg, userId: integ.userId });
+        results.push({ ...cfg, userId: integ.userId, tenantId: integ.tenantId });
       }
     } catch {
       // skip undecryptable configs
@@ -179,9 +182,9 @@ export async function getAllEnabledSmtpConfigs(): Promise<(SMTPConfig & { userId
 /**
  * Get all user integrations
  */
-export async function getAllUserIntegrations(userId: string) {
+export async function getAllUserIntegrations(userId: string, tenantId?: string) {
   const integrations = await prisma.userIntegration.findMany({
-    where: { userId },
+    where: tenantId ? { tenantId } : { userId, tenantId: null },
     select: {
       id: true,
       type: true,
@@ -200,18 +203,18 @@ export async function getAllUserIntegrations(userId: string) {
 /**
  * Delete user integration
  */
-export async function deleteUserIntegration(userId: string, integrationId: string) {
+export async function deleteUserIntegration(userId: string, integrationId: string, tenantId?: string) {
   return await prisma.userIntegration.deleteMany({
-    where: { id: integrationId, userId },
+    where: tenantId ? { id: integrationId, tenantId } : { id: integrationId, userId, tenantId: null },
   });
 }
 
 /**
  * Toggle integration enabled status
  */
-export async function toggleUserIntegration(userId: string, integrationId: string, enabled: boolean) {
+export async function toggleUserIntegration(userId: string, integrationId: string, enabled: boolean, tenantId?: string) {
   return await prisma.userIntegration.updateMany({
-    where: { id: integrationId, userId },
+    where: tenantId ? { id: integrationId, tenantId } : { id: integrationId, userId, tenantId: null },
     data: { enabled },
   });
 }
@@ -278,8 +281,8 @@ export async function testGoogleSheetWebhook(config: GoogleSheetConfig): Promise
  * Fetch the decrypted Meta Cloud API credentials for a user, or null when the
  * integration is missing/disabled/undecryptable.
  */
-export async function getWhatsAppCloudConfig(userId: string): Promise<WhatsAppCloudConfig | null> {
-  const config = (await getUserIntegration(userId, "whatsapp_cloud")) as WhatsAppCloudConfig | null;
+export async function getWhatsAppCloudConfig(userId: string, tenantId?: string): Promise<WhatsAppCloudConfig | null> {
+  const config = (await getUserIntegration(userId, "whatsapp_cloud", tenantId)) as WhatsAppCloudConfig | null;
   if (!config || !config.phoneNumberId || !config.accessToken) return null;
   return config;
 }
@@ -288,13 +291,13 @@ export async function getWhatsAppCloudConfig(userId: string): Promise<WhatsAppCl
  * Which WhatsApp transport this user has selected. Defaults to the legacy QR
  * web gateway so existing users keep their current behaviour untouched.
  */
-export async function getWhatsAppProvider(userId: string): Promise<"web" | "cloud"> {
-  const pref = (await getUserIntegration(userId, "whatsapp_provider")) as WhatsAppProviderPref | null;
+export async function getWhatsAppProvider(userId: string, tenantId?: string): Promise<"web" | "cloud"> {
+  const pref = (await getUserIntegration(userId, "whatsapp_provider", tenantId)) as WhatsAppProviderPref | null;
   return pref?.provider === "cloud" ? "cloud" : "web";
 }
 
-export async function setWhatsAppProvider(userId: string, provider: "web" | "cloud") {
-  return await saveUserIntegration(userId, "whatsapp_provider", { provider }, "WhatsApp Provider");
+export async function setWhatsAppProvider(userId: string, provider: "web" | "cloud", tenantId?: string) {
+  return await saveUserIntegration(userId, "whatsapp_provider", { provider }, "WhatsApp Provider", tenantId);
 }
 
 /**
@@ -302,17 +305,17 @@ export async function setWhatsAppProvider(userId: string, provider: "web" | "clo
  * The webhook needs this because Meta calls one shared callback URL for all
  * tenants; the owning user is identified by the phone_number_id in the payload.
  */
-export async function getAllCloudConfigs(): Promise<(WhatsAppCloudConfig & { userId: string | null })[]> {
+export async function getAllCloudConfigs(): Promise<(WhatsAppCloudConfig & { userId: string | null; tenantId: string | null })[]> {
   const integrations = await prisma.userIntegration.findMany({
     where: { type: "whatsapp_cloud", enabled: true },
   });
 
-  const results: (WhatsAppCloudConfig & { userId: string | null })[] = [];
+  const results: (WhatsAppCloudConfig & { userId: string | null; tenantId: string | null })[] = [];
   for (const integ of integrations) {
     try {
       const cfg = JSON.parse(decrypt(integ.config)) as WhatsAppCloudConfig;
       if (cfg?.phoneNumberId && cfg?.accessToken) {
-        results.push({ ...cfg, userId: integ.userId });
+        results.push({ ...cfg, userId: integ.userId, tenantId: integ.tenantId });
       }
     } catch {
       // skip undecryptable configs
@@ -326,7 +329,7 @@ export async function getAllCloudConfigs(): Promise<(WhatsAppCloudConfig & { use
  */
 export async function findCloudConfigByPhoneNumberId(
   phoneNumberId: string
-): Promise<(WhatsAppCloudConfig & { userId: string | null }) | null> {
+): Promise<(WhatsAppCloudConfig & { userId: string | null; tenantId: string | null }) | null> {
   if (!phoneNumberId) return null;
   const all = await getAllCloudConfigs();
   return all.find((c) => c.phoneNumberId === phoneNumberId) || null;
@@ -339,7 +342,7 @@ export async function findCloudConfigByPhoneNumberId(
  */
 export async function findCloudConfigByVerifyToken(
   verifyToken: string
-): Promise<(WhatsAppCloudConfig & { userId: string | null }) | null> {
+): Promise<(WhatsAppCloudConfig & { userId: string | null; tenantId: string | null }) | null> {
   if (!verifyToken) return null;
   const all = await getAllCloudConfigs();
   return all.find((c) => c.verifyToken && c.verifyToken === verifyToken) || null;

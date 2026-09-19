@@ -39,15 +39,16 @@ export interface UnifiedSendResult {
  * half-finished setup degrades instead of silently dropping every message.
  */
 export async function resolveProvider(
-  userId?: string
+  userId?: string,
+  tenantId?: string
 ): Promise<{ provider: WhatsAppProvider; cloudConfig?: MetaCloudConfig }> {
   if (!userId) return { provider: "web" };
 
   try {
-    const preferred = await getWhatsAppProvider(userId);
+    const preferred = await getWhatsAppProvider(userId, tenantId);
     if (preferred !== "cloud") return { provider: "web" };
 
-    const cloudConfig = await getWhatsAppCloudConfig(userId);
+    const cloudConfig = await getWhatsAppCloudConfig(userId, tenantId);
     if (!cloudConfig) {
       logger.warn(
         "Cloud API is selected as the WhatsApp provider but no valid credentials are saved. Falling back to the WhatsApp Web gateway."
@@ -73,10 +74,10 @@ export async function resolveProvider(
 export async function sendWhatsAppUnified(
   phone: string,
   text: string,
-  options: { userId?: string; allowTemplateFallback?: boolean } = {}
+  options: { userId?: string; tenantId?: string; allowTemplateFallback?: boolean } = {}
 ): Promise<UnifiedSendResult> {
-  const { userId, allowTemplateFallback = true } = options;
-  const { provider, cloudConfig } = await resolveProvider(userId);
+  const { userId, tenantId, allowTemplateFallback = true } = options;
+  const { provider, cloudConfig } = await resolveProvider(userId, tenantId);
 
   if (provider === "cloud" && cloudConfig) {
     const result = await sendCloudText(cloudConfig, phone, text);
@@ -126,7 +127,7 @@ export async function sendWhatsAppUnified(
  * Connection status for whichever provider is active, normalised to the shape
  * the dashboard already consumes ({ status, qr }) plus cloud-specific detail.
  */
-export async function getUnifiedWhatsAppStatus(userId?: string): Promise<{
+export async function getUnifiedWhatsAppStatus(userId?: string, tenantId?: string): Promise<{
   provider: WhatsAppProvider;
   status: string;
   qr: string;
@@ -138,7 +139,7 @@ export async function getUnifiedWhatsAppStatus(userId?: string): Promise<{
     error?: string;
   };
 }> {
-  const { provider, cloudConfig } = await resolveProvider(userId);
+  const { provider, cloudConfig } = await resolveProvider(userId, tenantId);
 
   if (provider === "cloud" && cloudConfig) {
     const status = await verifyCloudCredentials(cloudConfig);

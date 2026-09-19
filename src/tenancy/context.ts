@@ -85,7 +85,8 @@ export async function resolveTenantContext(req: Request, res: Response, next: Ne
 
     const requested =
       (req.get(TENANT_HEADER) || "").trim() ||
-      (typeof req.query.tenantId === "string" ? req.query.tenantId.trim() : "");
+      (typeof req.query.tenantId === "string" ? req.query.tenantId.trim() : "") ||
+      String(req.cookies?.[env.auth.tenantCookieName] || "").trim();
 
     if (requested) {
       const membership = await findMembership(userId, requested);

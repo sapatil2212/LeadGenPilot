@@ -19,10 +19,14 @@ import {
   sessionCookieOptions,
   AuthError,
   type RequestMeta,
+  sendPhoneVerificationOtp,
+  verifyPhoneOtp,
+  resendPhoneOtp,
 } from "./authService";
 import { prisma } from "./prisma";
 import { getEntitlements } from "./plans";
 import { computeUsage } from "./entitlements";
+import { ensureTenantForUser, findMembership, listMemberships } from "./tenancy/tenantService";
 
 /** Extracts client metadata for audit logging. */
 function metaOf(req: Request): RequestMeta {
@@ -75,11 +79,11 @@ router.use(requireDatabase);
 // ── Sign up ──
 router.post("/signup", authLimiter, async (req: Request, res: Response) => {
   try {
-    const { name, email, password } = req.body || {};
+    const { name, email, password, phone } = req.body || {};
     if (!email || !password) {
       return res.status(400).json({ error: "Email and password are required.", code: "missing_fields" });
     }
-    const result = await signup({ name, email, password });
+    const result = await signup({ name, email, password, phone });
     res.json({ success: true, ...result });
   } catch (err) {
     handleError(res, err);
@@ -93,9 +97,11 @@ router.post("/verify-otp", otpLimiter, async (req: Request, res: Response) => {
     if (!email || !code) {
       return res.status(400).json({ error: "Email and code are required.", code: "missing_fields" });
     }
-    const { user, token } = await verifyOtp({ email, code, purpose });
-    res.cookie(env.auth.cookieName, token, sessionCookieOptions());
-    res.json({ success: true, user });
+    const { user } = await verifyOtp({ email, code, purpose });
+    const clearOptions = { ...sessionCookieOptions(), maxAge: undefined };
+    res.clearCookie(env.auth.cookieName, clearOptions);
+    res.clearCookie(env.auth.tenantCookieName, clearOptions);
+    res.json({ success: true, user, requiresLogin: true });
   } catch (err) {
     handleError(res, err);
   }
@@ -157,7 +163,7 @@ router.post("/reset-password", authLimiter, async (req: Request, res: Response) 
   }
 });
 
-// ── Current session ──
+// ── Current session and workspace context ──
 router.get("/me", async (req: Request, res: Response) => {
   try {
     const token = req.cookies?.[env.auth.cookieName];
@@ -166,12 +172,43 @@ router.get("/me", async (req: Request, res: Response) => {
     if (!payload) return res.status(401).json({ error: "Session expired.", code: "invalid_session" });
     const dbUser = await prisma.user.findUnique({ where: { id: payload.sub } });
     if (!dbUser) return res.status(401).json({ error: "Account not found.", code: "no_user" });
+
+    // Repair legacy accounts before the dashboard is rendered. A successful
+    // auth response always has at least one usable workspace.
+    await ensureTenantForUser(dbUser.id);
+    const memberships = (await listMemberships(dbUser.id)).filter((m) => m.tenantStatus === "active");
+    const workspaces = memberships.map((m) => ({
+      id: m.tenantId,
+      name: m.tenantName,
+      slug: m.tenantSlug,
+      role: m.role,
+    }));
+    if (workspaces.length === 0) {
+      return res.status(403).json({
+        error: "No active workspace is available for this account.",
+        code: "no_active_workspace",
+      });
+    }
+
+    const requestedTenantId = String(req.cookies?.[env.auth.tenantCookieName] || "").trim();
+    const activeWorkspace =
+      workspaces.find((workspace) => workspace.id === requestedTenantId) ||
+      (workspaces.length === 1 ? workspaces[0] : null);
+
+    if (activeWorkspace) {
+      res.cookie(env.auth.tenantCookieName, activeWorkspace.id, sessionCookieOptions());
+    } else {
+      res.clearCookie(env.auth.tenantCookieName, { ...sessionCookieOptions(), maxAge: undefined });
+    }
+
     const user = await getUserById(payload.sub);
     const entitlements = getEntitlements(dbUser.plan);
     const usageInfo = computeUsage(dbUser, entitlements);
-    // Serialize Infinity as null so JSON stays valid; frontend treats null as unlimited.
     res.json({
       user,
+      workspace: activeWorkspace,
+      workspaces,
+      requiresWorkspaceSelection: workspaces.length > 1 && !activeWorkspace,
       plan: dbUser.plan,
       entitlements: {
         ...entitlements,
@@ -190,10 +227,97 @@ router.get("/me", async (req: Request, res: Response) => {
   }
 });
 
+// ── Select an active workspace ──
+router.post("/select-workspace", authLimiter, async (req: Request, res: Response) => {
+  try {
+    const token = req.cookies?.[env.auth.cookieName];
+    const payload = token ? verifySessionToken(token) : null;
+    if (!payload) return res.status(401).json({ error: "Authentication required.", code: "no_session" });
+
+    const tenantId = String(req.body?.tenantId || "").trim();
+    if (!tenantId) return res.status(400).json({ error: "Workspace is required.", code: "missing_tenant" });
+
+    const membership = await findMembership(payload.sub, tenantId);
+    if (!membership || membership.tenantStatus !== "active") {
+      return res.status(403).json({ error: "You do not have access to that workspace.", code: "tenant_forbidden" });
+    }
+
+    res.cookie(env.auth.tenantCookieName, tenantId, sessionCookieOptions());
+    res.json({
+      success: true,
+      workspace: { id: membership.tenantId, name: membership.tenantName, slug: membership.tenantSlug, role: membership.role },
+    });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
 // ── Log out ──
 router.post("/logout", (req: Request, res: Response) => {
-  res.clearCookie(env.auth.cookieName, { ...sessionCookieOptions(), maxAge: undefined });
+  const clearOptions = { ...sessionCookieOptions(), maxAge: undefined };
+  res.clearCookie(env.auth.cookieName, clearOptions);
+  res.clearCookie(env.auth.tenantCookieName, clearOptions);
   res.json({ success: true });
+});
+
+// ── Phone verification routes ──
+
+// Send phone verification OTP
+router.post("/phone/send-otp", otpLimiter, async (req: Request, res: Response) => {
+  try {
+    const token = req.cookies?.[env.auth.cookieName];
+    if (!token) return res.status(401).json({ error: "Authentication required.", code: "no_session" });
+
+    const payload = verifySessionToken(token);
+    if (!payload) return res.status(401).json({ error: "Session expired.", code: "invalid_session" });
+
+    const { phone } = req.body || {};
+    if (!phone) {
+      return res.status(400).json({ error: "Phone number is required.", code: "missing_fields" });
+    }
+
+    await sendPhoneVerificationOtp(payload.sub, phone);
+    res.json({ success: true, message: "Verification code sent to your phone." });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+// Verify phone OTP
+router.post("/phone/verify-otp", otpLimiter, async (req: Request, res: Response) => {
+  try {
+    const token = req.cookies?.[env.auth.cookieName];
+    if (!token) return res.status(401).json({ error: "Authentication required.", code: "no_session" });
+
+    const payload = verifySessionToken(token);
+    if (!payload) return res.status(401).json({ error: "Session expired.", code: "invalid_session" });
+
+    const { code } = req.body || {};
+    if (!code) {
+      return res.status(400).json({ error: "Verification code is required.", code: "missing_fields" });
+    }
+
+    await verifyPhoneOtp(payload.sub, code);
+    res.json({ success: true, message: "Phone number verified successfully." });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+// Resend phone OTP
+router.post("/phone/resend-otp", otpLimiter, async (req: Request, res: Response) => {
+  try {
+    const token = req.cookies?.[env.auth.cookieName];
+    if (!token) return res.status(401).json({ error: "Authentication required.", code: "no_session" });
+
+    const payload = verifySessionToken(token);
+    if (!payload) return res.status(401).json({ error: "Session expired.", code: "invalid_session" });
+
+    await resendPhoneOtp(payload.sub);
+    res.json({ success: true, message: "A new verification code has been sent." });
+  } catch (err) {
+    handleError(res, err);
+  }
 });
 
 export default router;

@@ -613,7 +613,8 @@ describe("the routes Phase 4 locked down", () => {
     // list: business names, addresses and phone numbers harvested by others.
     const block = registration("get", "/api/processed");
     expect(block).not.toContain("duplicateChecker.loadLeads");
-    expect(block).toContain("listDiscovered");
+    expect(block).toContain("tenantRepo.findLeadsInWorkspace");
+    expect(block).toContain("dbLeadToAppLead");
   });
 
   it("mounts the new routers after the auth middleware", () => {

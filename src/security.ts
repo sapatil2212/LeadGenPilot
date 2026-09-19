@@ -66,7 +66,7 @@ export function corsMiddleware(): RequestHandler {
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
     res.header(
       "Access-Control-Allow-Headers",
-      "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-API-Key"
+      "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-API-Key, X-Tenant-Id"
     );
     res.header("Access-Control-Max-Age", "600");
 
@@ -98,6 +98,13 @@ export function corsMiddleware(): RequestHandler {
  * an origin outside the list above, and the app can no longer be framed.
  */
 export function buildContentSecurityPolicy(): Record<string, string[]> {
+  const connectSources = ["'self'", "https://unpkg.com"];
+  if (!env.isProduction) {
+    // Vite's development client uses a websocket, sometimes on a dedicated
+    // client port. Keep this development-only; production remains restricted.
+    connectSources.push("ws://localhost:*", "ws://127.0.0.1:*", "ws://[::1]:*");
+  }
+
   return {
     "default-src": ["'self'"],
     "script-src": ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://unpkg.com"],
@@ -105,7 +112,7 @@ export function buildContentSecurityPolicy(): Record<string, string[]> {
     "font-src": ["'self'", "data:", "https://fonts.gstatic.com"],
     // blob: and data: cover the QR image, logo blob fetch and PDF generation.
     "img-src": ["'self'", "data:", "blob:", "https://*.basemaps.cartocdn.com", "https://unpkg.com"],
-    "connect-src": ["'self'"],
+    "connect-src": connectSources,
     "worker-src": ["'self'", "blob:"],
     "object-src": ["'none'"],
     "base-uri": ["'self'"],

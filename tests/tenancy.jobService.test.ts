@@ -117,7 +117,10 @@ function useFakeJobsTable() {
   });
 
   mocks.prisma.job.updateMany.mockImplementation(async ({ where, data }: any) => {
-    const targets = rows.filter((r) => !where.status?.in || where.status.in.includes(r.status));
+    const targets = rows.filter((r) => {
+      if (where.kind?.not && r.kind === where.kind.not) return false;
+      return !where.status?.in || where.status.in.includes(r.status);
+    });
     for (const row of targets) Object.assign(row, data);
     return { count: targets.length };
   });
@@ -326,7 +329,7 @@ describe("recovery after a crash", () => {
     await startJob(CTX_B, "campaign", {});
 
     const reclaimed = await reclaimAbandonedJobs();
-    expect(reclaimed).toBe(2);
+    expect(reclaimed).toBe(1);
 
     expect(await findActiveJob(WORKSPACE_A.id, "lead_discovery")).toBeNull();
 

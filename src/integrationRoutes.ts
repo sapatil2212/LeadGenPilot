@@ -5,6 +5,8 @@
 
 import express, { Request, Response } from "express";
 import { requireAuth } from "./authRoutes.js";
+import { attachEntitlements } from "./entitlements.js";
+import { resolveTenantContext, ctxOf } from "./tenancy/context.js";
 import {
   saveUserIntegration,
   getUserIntegration,
@@ -53,6 +55,8 @@ router.use((req: AuthRequest, _res, next) => {
   }
   next();
 });
+router.use(attachEntitlements);
+router.use(resolveTenantContext);
 
 /**
  * GET /api/integrations
@@ -61,7 +65,7 @@ router.use((req: AuthRequest, _res, next) => {
 router.get("/", async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const integrations = await getAllUserIntegrations(userId);
+    const integrations = await getAllUserIntegrations(userId, ctxOf(req).tenantId);
     res.json({ ok: true, integrations });
   } catch (error: any) {
     console.error("Get integrations error:", error);
@@ -91,8 +95,8 @@ function buildWebhookUrl(req: AuthRequest): string {
 router.get("/whatsapp-cloud", async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const config = await getWhatsAppCloudConfig(userId);
-    const provider = await getWhatsAppProvider(userId);
+    const config = await getWhatsAppCloudConfig(userId, ctxOf(req).tenantId);
+    const provider = await getWhatsAppProvider(userId, ctxOf(req).tenantId);
 
     if (!config) {
       return res.json({
@@ -132,7 +136,7 @@ router.get("/whatsapp-cloud", async (req: AuthRequest, res: Response) => {
 router.get("/whatsapp-cloud/status", async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const config = await getWhatsAppCloudConfig(userId);
+    const config = await getWhatsAppCloudConfig(userId, ctxOf(req).tenantId);
     if (!config) {
       return res.json({ ok: true, connected: false, configured: false });
     }
@@ -172,7 +176,7 @@ router.post("/whatsapp-cloud", async (req: AuthRequest, res: Response) => {
 
     // Masked values mean "keep what is stored" — the UI never receives the real
     // secret, so echoing the mask back must not overwrite it with dots.
-    const existing = await getWhatsAppCloudConfig(userId);
+    const existing = await getWhatsAppCloudConfig(userId, ctxOf(req).tenantId);
     if ((!accessToken || accessToken === MASK) && existing?.accessToken) {
       accessToken = existing.accessToken;
     }
@@ -198,7 +202,8 @@ router.post("/whatsapp-cloud", async (req: AuthRequest, res: Response) => {
       userId,
       "whatsapp_cloud",
       config,
-      label || "WhatsApp Cloud API"
+      label || "WhatsApp Cloud API",
+      ctxOf(req).tenantId
     );
 
     // Validate immediately so the user gets real feedback on save rather than
@@ -234,7 +239,7 @@ router.post("/whatsapp-cloud/test", async (req: AuthRequest, res: Response) => {
     const userId = req.user!.userId;
     let { phoneNumberId, accessToken, wabaId } = req.body;
 
-    const existing = await getWhatsAppCloudConfig(userId);
+    const existing = await getWhatsAppCloudConfig(userId, ctxOf(req).tenantId);
     if ((!accessToken || accessToken === MASK) && existing?.accessToken) {
       accessToken = existing.accessToken;
     }
@@ -283,7 +288,7 @@ router.post("/whatsapp-cloud/send-test", async (req: AuthRequest, res: Response)
       return res.status(400).json({ ok: false, error: "A destination phone number is required" });
     }
 
-    const config = await getWhatsAppCloudConfig(userId);
+    const config = await getWhatsAppCloudConfig(userId, ctxOf(req).tenantId);
     if (!config) {
       return res.status(400).json({ ok: false, error: "Save your Cloud API credentials first" });
     }
@@ -322,7 +327,7 @@ router.post("/whatsapp-cloud/send-test", async (req: AuthRequest, res: Response)
 router.get("/whatsapp-cloud/templates", async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const config = await getWhatsAppCloudConfig(userId);
+    const config = await getWhatsAppCloudConfig(userId, ctxOf(req).tenantId);
     if (!config) {
       return res.status(400).json({ ok: false, error: "Save your Cloud API credentials first" });
     }
@@ -348,7 +353,7 @@ router.put("/whatsapp-provider", async (req: AuthRequest, res: Response) => {
     }
 
     if (provider === "cloud") {
-      const config = await getWhatsAppCloudConfig(userId);
+      const config = await getWhatsAppCloudConfig(userId, ctxOf(req).tenantId);
       if (!config) {
         return res.status(400).json({
           ok: false,
@@ -357,7 +362,7 @@ router.put("/whatsapp-provider", async (req: AuthRequest, res: Response) => {
       }
     }
 
-    await setWhatsAppProvider(userId, provider);
+    await setWhatsAppProvider(userId, provider, ctxOf(req).tenantId);
     res.json({ ok: true, provider, message: `WhatsApp provider set to ${provider}` });
   } catch (error: any) {
     console.error("Set WhatsApp provider error:", error);
@@ -378,7 +383,7 @@ router.get("/:type", async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ ok: false, error: "Invalid integration type" });
     }
 
-    const config = await getUserIntegration(userId, type);
+    const config = await getUserIntegration(userId, type, ctxOf(req).tenantId);
     
     if (!config) {
       return res.json({ ok: true, configured: false });
@@ -407,7 +412,7 @@ router.post("/smtp", async (req: AuthRequest, res: Response) => {
     }
 
     if (password === "••••••••") {
-      const existing = await getUserIntegration(userId, "smtp");
+      const existing = await getUserIntegration(userId, "smtp", ctxOf(req).tenantId);
       if (existing && (existing as any).password) {
         password = (existing as any).password;
       }
@@ -415,7 +420,7 @@ router.post("/smtp", async (req: AuthRequest, res: Response) => {
 
     const config = { host, port: Number(port), secure: Boolean(secure), user, password, fromEmail, fromName };
 
-    const integration = await saveUserIntegration(userId, "smtp", config, label || "SMTP Email");
+    const integration = await saveUserIntegration(userId, "smtp", config, label || "SMTP Email", ctxOf(req).tenantId);
     res.json({ ok: true, message: "SMTP configuration saved", id: integration.id });
   } catch (error: any) {
     console.error("Save SMTP error:", error);
@@ -437,7 +442,7 @@ router.post("/smtp/test", async (req: AuthRequest, res: Response) => {
     }
 
     if (password === "••••••••") {
-      const existing = await getUserIntegration(userId, "smtp");
+      const existing = await getUserIntegration(userId, "smtp", ctxOf(req).tenantId);
       if (existing && (existing as any).password) {
         password = (existing as any).password;
       }
@@ -471,7 +476,7 @@ router.post("/google-sheet", async (req: AuthRequest, res: Response) => {
     }
 
     const config = { webhookUrl, sheetName };
-    const integration = await saveUserIntegration(userId, "google_sheet", config, label || "Google Sheet");
+    const integration = await saveUserIntegration(userId, "google_sheet", config, label || "Google Sheet", ctxOf(req).tenantId);
     
     res.json({ ok: true, message: "Google Sheet configuration saved", id: integration.id });
   } catch (error: any) {
@@ -516,7 +521,7 @@ router.post("/whatsapp", async (req: AuthRequest, res: Response) => {
     const { apiUrl, apiKey, phoneNumber, label } = req.body;
 
     const config = { apiUrl, apiKey, phoneNumber };
-    const integration = await saveUserIntegration(userId, "whatsapp", config, label || "WhatsApp");
+    const integration = await saveUserIntegration(userId, "whatsapp", config, label || "WhatsApp", ctxOf(req).tenantId);
     
     res.json({ ok: true, message: "WhatsApp configuration saved", id: integration.id });
   } catch (error: any) {
@@ -534,7 +539,7 @@ router.delete("/:id", async (req: AuthRequest, res: Response) => {
     const userId = req.user!.userId;
     const integrationId = req.params.id;
 
-    await deleteUserIntegration(userId, integrationId);
+    await deleteUserIntegration(userId, integrationId, ctxOf(req).tenantId);
     res.json({ ok: true, message: "Integration deleted" });
   } catch (error: any) {
     console.error("Delete integration error:", error);
@@ -556,7 +561,7 @@ router.patch("/:id/toggle", async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ ok: false, error: "enabled must be a boolean" });
     }
 
-    await toggleUserIntegration(userId, integrationId, enabled);
+    await toggleUserIntegration(userId, integrationId, enabled, ctxOf(req).tenantId);
     res.json({ ok: true, message: `Integration ${enabled ? "enabled" : "disabled"}` });
   } catch (error: any) {
     console.error("Toggle integration error:", error);

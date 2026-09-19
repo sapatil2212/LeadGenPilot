@@ -10,6 +10,8 @@
 
 import { Router, type Request, type Response } from "express";
 import { requirePermission, resolveTenantContext, ctxOf } from "../tenancy/context";
+import { entOf } from "../entitlements";
+import { heavyActionRateLimiter } from "../security";
 import {
   generateCampaign,
   listCampaigns,
@@ -21,9 +23,16 @@ import {
   deleteCampaign,
   type GenerateCampaignRequest,
 } from "./campaignService";
-import { executeCampaign } from "./campaignExecutor";
+import { enqueueCampaignExecution, cancelCampaignExecution } from "./campaignExecutor";
 
 const router = Router();
+
+function assertCampaignFeatures(req: Request) {
+  const channels = req.body?.channels;
+  if (channels?.whatsapp && !entOf(req).whatsappOutreach) {
+    throw new Error(`WhatsApp outreach is not included in your ${entOf(req).planName} plan. Upgrade to Pro to unlock it.`);
+  }
+}
 
 /**
  * POST /api/campaigns
@@ -32,11 +41,13 @@ const router = Router();
  */
 router.post(
   "/",
+  heavyActionRateLimiter(),
   resolveTenantContext,
   requirePermission("SEND_CAMPAIGN"),
   async (req: Request, res: Response) => {
     try {
       const ctx = ctxOf(req);
+      assertCampaignFeatures(req);
       const request = req.body as GenerateCampaignRequest;
 
       const result = await generateCampaign(ctx, request);
@@ -137,18 +148,36 @@ router.post(
  */
 router.post(
   "/:id/execute",
+  heavyActionRateLimiter(),
   resolveTenantContext,
   requirePermission("SEND_CAMPAIGN"),
   async (req: Request, res: Response) => {
     try {
       const ctx = ctxOf(req);
-      const result = await executeCampaign(ctx, req.params.id, {
-        delayMs: req.body.delayMs || 5000,
-        batchSize: req.body.batchSize,
+      const result = await enqueueCampaignExecution(ctx, req.params.id, {
+        // `undefined` deliberately selects the service default; zero is valid.
+        delayMs: req.body?.delayMs,
+        batchSize: req.body?.batchSize,
       });
-      res.json(result);
+      res.status(202).json(result);
     } catch (error: any) {
       res.status(400).json({ error: error.message || "Failed to execute campaign." });
+    }
+  }
+);
+
+/** Request cooperative cancellation of this workspace's queued/running campaign. */
+router.post(
+  "/:id/cancel",
+  resolveTenantContext,
+  requirePermission("SEND_CAMPAIGN"),
+  async (req: Request, res: Response) => {
+    try {
+      const result = await cancelCampaignExecution(ctxOf(req), req.params.id);
+      if (!result.ok) return res.status(404).json({ error: "No active campaign execution found." });
+      res.status(202).json({ ...result, status: "cancelling" });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || "Failed to cancel campaign." });
     }
   }
 );

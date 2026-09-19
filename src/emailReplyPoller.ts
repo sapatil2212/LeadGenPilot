@@ -19,7 +19,8 @@ import { readJson, writeJsonAtomic } from "./storage";
 import { logger } from "./logger";
 
 export interface ImapMailbox {
-  id: string; // stable key, use the mailbox address
+  id: string; // stable key, namespaced by tenant
+  tenantId?: string;
   host: string;
   port: number;
   secure: boolean;
@@ -29,6 +30,9 @@ export interface ImapMailbox {
 
 export interface InboundEmail {
   mailboxId: string;
+  /** Stable mailbox-local UID, used to make polling retries idempotent. */
+  messageId: string;
+  tenantId?: string;
   from: string;
   fromName?: string;
   subject: string;
@@ -106,7 +110,15 @@ async function pollMailbox(mb: ImapMailbox, onReply: EmailReplyHandler): Promise
 
           // Skip our own sent copies / empty senders.
           if (from && from !== mb.user.toLowerCase()) {
-            await onReply({ mailboxId: mb.id, from, fromName, subject, text });
+            await onReply({
+              mailboxId: mb.id,
+              messageId: `${mb.id}:${msg.uid}`,
+              tenantId: mb.tenantId,
+              from,
+              fromName,
+              subject,
+              text,
+            });
           }
         } catch (parseErr: any) {
           logger.warn(`Email poller: failed to parse a message in ${mb.user}: ${parseErr?.message || parseErr}`);

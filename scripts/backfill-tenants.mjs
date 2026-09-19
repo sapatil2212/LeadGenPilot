@@ -20,13 +20,10 @@
  *   node scripts/backfill-tenants.mjs             # dry run
  *   node scripts/backfill-tenants.mjs --confirm   # apply
  */
-
 import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
-
 const prisma = new PrismaClient();
 const confirm = process.argv.includes("--confirm");
-
 function slugify(input) {
   const base = String(input || "")
     .toLowerCase()
@@ -37,7 +34,6 @@ function slugify(input) {
     .slice(0, 40);
   return base || "workspace";
 }
-
 async function allocateSlug(desired) {
   const base = slugify(desired);
   for (let i = 0; i < 50; i++) {
@@ -47,13 +43,11 @@ async function allocateSlug(desired) {
   }
   return `${base}-${Date.now().toString(36)}`;
 }
-
 function tenantName(user) {
   if (user.name && user.name.trim()) return `${user.name.trim()}'s Workspace`;
   const local = String(user.email || "").split("@")[0] || "My";
   return `${local}'s Workspace`;
 }
-
 const summary = {
   users: 0,
   tenantsCreated: 0,
@@ -64,30 +58,23 @@ const summary = {
   integrations: 0,
   auditLogs: 0,
 };
-
 try {
   console.log(`Mode: ${confirm ? "APPLY" : "DRY RUN (pass --confirm to write)"}\n`);
-
   const users = await prisma.user.findMany({
     select: { id: true, email: true, name: true, createdAt: true },
     orderBy: { createdAt: "asc" },
   });
   summary.users = users.length;
-
   if (users.length === 0) {
     console.log("No users found. Nothing to backfill.");
   }
-
   for (const user of users) {
-    // ── workspace ──
     let membership = await prisma.tenantMember.findFirst({
       where: { userId: user.id },
       select: { tenantId: true },
       orderBy: { createdAt: "asc" },
     });
-
     let tenantId = membership?.tenantId ?? null;
-
     if (!tenantId) {
       const name = tenantName(user);
       if (confirm) {
@@ -108,40 +95,28 @@ try {
     } else {
       console.log(`  user ${user.id}: already in workspace ${tenantId}`);
     }
-
     if (!confirm) continue;
-
-    // ── owned rows ──
     const lists = await prisma.leadList.updateMany({
       where: { userId: user.id, tenantId: null },
       data: { tenantId },
     });
     summary.leadLists += lists.count;
-
     const leads = await prisma.lead.updateMany({
       where: { userId: user.id, tenantId: null },
       data: { tenantId },
     });
     summary.leads += leads.count;
-
     const integrations = await prisma.userIntegration.updateMany({
       where: { userId: user.id, tenantId: null },
       data: { tenantId },
     });
     summary.integrations += integrations.count;
-
     const audit = await prisma.auditLog.updateMany({
       where: { userId: user.id, tenantId: null },
       data: { tenantId },
     });
     summary.auditLogs += audit.count;
   }
-
-  /*
-   * Leads whose own user_id was never set still belong to a workspace through
-   * their list, which is the authoritative parent. Attribute them from the list
-   * so nothing is left unreachable.
-   */
   if (confirm) {
     const orphanLeadLists = await prisma.leadList.findMany({
       where: { tenantId: { not: null } },
@@ -155,15 +130,12 @@ try {
       summary.leadsViaList += res.count;
     }
   }
-
-  // ── report what remains unattributable ──
   const remaining = {
     leadLists: await prisma.leadList.count({ where: { tenantId: null } }),
     leads: await prisma.lead.count({ where: { tenantId: null } }),
     integrations: await prisma.userIntegration.count({ where: { tenantId: null } }),
     usersWithoutWorkspace: await prisma.user.count({ where: { memberships: { none: {} } } }),
   };
-
   console.log("\nSummary");
   console.log(`  users seen              ${summary.users}`);
   console.log(`  workspaces created      ${summary.tenantsCreated}`);
@@ -173,13 +145,11 @@ try {
   console.log(`  leads stamped by list   ${summary.leadsViaList}`);
   console.log(`  integrations stamped    ${summary.integrations}`);
   console.log(`  audit entries stamped   ${summary.auditLogs}`);
-
   console.log("\nRemaining without a workspace");
   console.log(`  lead lists              ${remaining.leadLists}`);
   console.log(`  leads                   ${remaining.leads}`);
   console.log(`  integrations            ${remaining.integrations}`);
   console.log(`  users                   ${remaining.usersWithoutWorkspace}`);
-
   if (!confirm) {
     console.log("\nDry run only. Re-run with --confirm to write.");
   } else {
@@ -188,8 +158,6 @@ try {
     if (stranded === 0) {
       console.log("\nOK: every row is attributed to a workspace.");
     } else {
-      // A lead list with a null user_id predates ownership tracking and cannot
-      // be attributed automatically. Reported rather than guessed.
       console.log(
         "\nWARNING: the rows above could not be attributed automatically — they have no owning user. " +
           "Assign them manually, or leave them: tenant-scoped reads will not return them."

@@ -110,6 +110,9 @@ model Tenant {
   discoveredBusinesses DiscoveredBusiness[]
   campaigns            Campaign[]
   campaignMessages     CampaignMessage[]
+  conversationThreads  ConversationThread[]
+  conversationMessages ConversationMessage[]
+  campaignDispatches   CampaignDispatch[]
 
   @@index([status])
   @@map("tenants")
@@ -185,6 +188,14 @@ model Job {
   /// tenant can set it.
   cancelRequestedAt DateTime? @map("cancel_requested_at")
 
+  /// Worker ownership lease. Only the matching worker/token can mutate a
+  /// running job, preventing stale workers from writing after recovery.
+  workerId       String?   @map("worker_id")
+  leaseToken     String?   @map("lease_token")
+  leaseExpiresAt DateTime? @map("lease_expires_at")
+  heartbeatAt    DateTime? @map("heartbeat_at")
+  attempt        Int       @default(0)
+
   startedAt  DateTime? @map("started_at")
   finishedAt DateTime? @map("finished_at")
   createdAt  DateTime  @default(now()) @map("created_at")
@@ -197,6 +208,7 @@ model Job {
   @@index([tenantId, kind, status])
   @@index([tenantId, createdAt])
   @@index([status])
+  @@index([status, leaseExpiresAt, createdAt])
   // MySQL requires an index behind every foreign key and creates one silently
   // if the schema does not declare it, which then shows up as drift. Every
   // other FK column in this schema is already covered by an explicit index
@@ -407,7 +419,9 @@ model Lead {
   tenantId String? @map("tenant_id")
   tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  campaignMessages CampaignMessage[]
+  campaignMessages    CampaignMessage[]
+  conversationThreads ConversationThread[]
+  campaignDispatches  CampaignDispatch[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -1016,13 +1030,15 @@ model Campaign {
   completedAt DateTime? @map("completed_at")
 
   tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  messages CampaignMessage[]
-  user     User?             @relation(fields: [userId], references: [id])
+  messages   CampaignMessage[]
+  dispatches CampaignDispatch[]
+  user       User?             @relation(fields: [userId], references: [id])
   userId   String?
 
   @@index([tenantId, status])
   @@index([tenantId, createdAt])
   @@index([createdById])
+  @@index([userId], map: "campaigns_userId_fkey")
   @@map("campaigns")
 }
 
@@ -1069,6 +1085,15 @@ model CampaignMessage {
   tokensUsed    Int?    @map("tokens_used")
   latencyMs     Int?    @map("latency_ms")
 
+  /// Worker-attempt state. `sending` rows are leased by one worker and are
+  /// recovered only after lease expiry; retry_wait rows wait until nextAttemptAt.
+  attemptCount   Int       @default(0) @map("attempt_count")
+  nextAttemptAt  DateTime? @map("next_attempt_at")
+  lastAttemptAt  DateTime? @map("last_attempt_at")
+  leaseOwner     String?   @map("lease_owner")
+  leaseToken     String?   @map("lease_token")
+  leaseExpiresAt DateTime? @map("lease_expires_at")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -1078,12 +1103,117 @@ model CampaignMessage {
   /// Timestamp when the send attempt started.
   sentAt DateTime? @map("sent_at")
 
+  /// Provider message ID when a delivery gateway returns one (for example the
+  /// Meta Cloud API or SMTP Message-ID). Null for transports that do not expose
+  /// a durable external ID.
+  externalMessageId String? @map("external_message_id")
+
   campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   lead     Lead?    @relation(fields: [leadId], references: [id], onDelete: SetNull)
   tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  dispatches CampaignDispatch[]
 
   @@index([campaignId, status])
   @@index([tenantId, status])
   @@index([leadId])
+  @@index([campaignId, status, nextAttemptAt, leaseExpiresAt, createdAt], map: "camp_msg_worker_claim_idx")
   @@map("campaign_messages")
+}
+
+/// A tenant-owned two-way conversation with one outreach contact.
+model ConversationThread {
+  id         String @id @default(cuid())
+  tenantId   String @map("tenant_id")
+  /// "email" | "whatsapp"
+  channel    String
+  /// Canonical lowercased email or normalized phone digits, unique per tenant/channel.
+  contactKey String @map("contact_key")
+
+  leadId       String? @map("lead_id")
+  businessName String  @map("business_name")
+  phone        String?
+  email        String?
+  /// "AWAITING_REPLY" | "REPLIED" | "CLOSED"
+  status       String  @default("AWAITING_REPLY")
+  unreadCount  Int     @default(0) @map("unread_count")
+  lastMessageAt DateTime @map("last_message_at")
+  lastMessagePreview String @map("last_message_preview") @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  lead     Lead?                 @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  messages ConversationMessage[]
+
+  @@unique([tenantId, channel, contactKey])
+  @@index([tenantId, lastMessageAt])
+  @@index([tenantId, status, lastMessageAt])
+  @@index([leadId])
+  @@map("conversation_threads")
+}
+
+/// An immutable inbound or outbound entry in a tenant-owned conversation.
+model ConversationMessage {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+  threadId String @map("thread_id")
+  /// "in" | "out"
+  direction String
+  /// "email" | "whatsapp"
+  channel   String
+  text      String @db.Text
+  source    String? // "cloud" | "imap" | "manual" | "campaign"
+  provider  String?
+  providerMessageId String? @map("provider_message_id")
+  occurredAt DateTime @map("occurred_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  thread ConversationThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, providerMessageId])
+  @@index([threadId, occurredAt])
+  @@index([tenantId, occurredAt])
+  @@map("conversation_messages")
+}
+
+/// Immutable delivery-attempt record used by tenant campaign reports.
+model CampaignDispatch {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+  campaignId String? @map("campaign_id")
+  campaignMessageId String? @map("campaign_message_id")
+  leadId String? @map("lead_id")
+
+  businessName String @map("business_name")
+  recipient    String
+  /// "email" | "whatsapp"
+  channel      String
+  /// "SENT" | "FAILED"
+  status       String
+  sourceType   String @map("source_type")
+  sourceLabel  String @map("source_label")
+  dryRun       Boolean @default(false) @map("dry_run")
+  subject      String? @db.Text
+  messageSnippet String? @map("message_snippet") @db.Text
+  errorMessage String? @map("error_message") @db.Text
+  externalMessageId String? @map("external_message_id")
+  occurredAt DateTime @map("occurred_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  campaignMessage CampaignMessage? @relation(fields: [campaignMessageId], references: [id], onDelete: SetNull)
+  lead Lead? @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, occurredAt])
+  @@index([tenantId, channel, status, occurredAt])
+  @@index([campaignId, occurredAt])
+  @@index([leadId])
+  // A final campaign-message report is idempotent across retries/recovery. MySQL
+  // permits many NULLs here, so manual dispatches remain append-only.
+  @@unique([campaignMessageId])
+  @@index([tenantId, externalMessageId])
+  @@map("campaign_dispatches")
 }

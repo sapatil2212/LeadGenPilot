@@ -269,16 +269,15 @@ export async function listJobs(ctx: TenantContext, kind?: JobKind, limit = 20): 
 }
 
 /**
- * Marks jobs left "running" by a process that died as failed.
+ * Marks non-campaign jobs left by a dead web process as failed.
  *
- * Without this, a crash mid-scrape leaves a row that occupies the tenant's slot
- * forever and no new run can start. Called once at boot, before traffic is
- * accepted. It is safe across replicas only because it runs at startup; a
- * multi-replica deployment needs worker heartbeats instead, which is Phase 6.
+ * Campaign jobs are deliberately excluded: their dedicated worker owns leases,
+ * retries, and stale-lease recovery. Reclaiming them when a web replica restarts
+ * would destroy durable work that a healthy worker is still processing.
  */
 export async function reclaimAbandonedJobs(): Promise<number> {
   const { count } = await prisma.job.updateMany({
-    where: { status: { in: ["running", "cancelling", "queued"] } },
+    where: { kind: { not: "campaign" }, status: { in: ["running", "cancelling", "queued"] } },
     data: {
       status: "failed",
       error: "Interrupted: the server restarted while this job was in progress.",

@@ -51,6 +51,9 @@ export const env = {
   get isProduction() {
     return this.nodeEnv === "production";
   },
+  get isDevelopment() {
+    return this.nodeEnv !== "production";
+  },
 
   // Render/most PaaS inject PORT. Fall back to 3000 for local dev.
   port: toInt(process.env.PORT, 3000),
@@ -99,8 +102,9 @@ export const env = {
     jwtSecret: process.env.JWT_SECRET || DEV_FALLBACK_JWT_SECRET,
     // Session lifetime in days.
     sessionDays: toInt(process.env.AUTH_SESSION_DAYS, 7),
-    // Cookie name for the session token.
+    // Cookie name for the session token and the validated active workspace.
     cookieName: process.env.AUTH_COOKIE_NAME || "nexaleadai_session",
+    tenantCookieName: process.env.AUTH_TENANT_COOKIE_NAME || "nexaleadai_tenant",
     // OTP configuration.
     otpLength: 6,
     otpTtlMinutes: toInt(process.env.OTP_TTL_MINUTES, 10),

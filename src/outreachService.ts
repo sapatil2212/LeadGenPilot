@@ -13,6 +13,7 @@ import fs from "fs";
 // SMTP Outreach Sending
 export interface EmailSendResult {
   success: boolean;
+  messageId?: string;
   error?: string;
 }
 
@@ -55,9 +56,8 @@ export async function sendEmailOutreach(
       : {
           host,
           port,
-          secure: port === 465,
+          secure: smtpConfig ? smtpConfig.secure : port === 465,
           auth: { user, pass },
-          tls: { rejectUnauthorized: false },
         };
 
     const transporter = nodemailer.createTransport(transportConfig);
@@ -76,10 +76,10 @@ export async function sendEmailOutreach(
     } else {
       mailOptions.text = body;
     }
-    await transporter.sendMail(mailOptions);
+    const info = await transporter.sendMail(mailOptions);
 
     logger.success(`Email outreach successfully sent to ${to}!`);
-    return { success: true };
+    return { success: true, messageId: info.messageId || undefined };
   } catch (error: any) {
     logger.error(`Failed to send email to ${to}: ${error}`);
     return { success: false, error: classifyEmailError(error) };

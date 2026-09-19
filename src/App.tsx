@@ -143,7 +143,9 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   // Navigation
   const [activeTab, setActiveTab] = useState<"dashboard" | "finder" | "leads" | "outreach" | "templates" | "reports" | "conversations" | "settings" | "business" | "knowledge" | "assistant" | "targeting" | "campaigns">(() => {
     const saved = typeof window !== "undefined" ? localStorage.getItem("nexaleadai_activeTab") : null;
-    return (saved as any) || "dashboard";
+    // The legacy campaign tab bypassed review/approval. Redirect existing
+    // browser preferences so every operator lands on the reviewed workflow.
+    return saved === "outreach" ? "campaigns" : ((saved as any) || "dashboard");
   });
 
   useEffect(() => {
@@ -1261,26 +1263,15 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     setCampaignPreviewError("");
   };
 
-  const handleStartCampaign = async () => {
-    setIsStartingCampaign(true);
-    try {
-      const res = await fetch("/api/campaign/start", { 
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildCampaignRequestBody())
-      });
-      if (res.ok) {
-        setCampaignRunning(true);
-        resetCampaignWizard();
-      } else {
-        const err = await res.json();
-        alert(`Failed to start campaign: ${err.error || "Unknown error"}`);
-      }
-    } catch (e) {
-      alert("Error starting campaign.");
-    } finally {
-      setIsStartingCampaign(false);
-    }
+  const handleStartCampaign = () => {
+    // Retained only while the legacy panel is removed incrementally. It must
+    // never invoke the retired immediate-send endpoint.
+    setActiveTab("campaigns");
+    showAppModal(
+      "success",
+      "Use reviewed campaigns",
+      "Campaign delivery now requires generation, review, and approval in the Campaigns tab."
+    );
   };
 
   const handleSelectPreviewLead = async (lead: Lead) => {
@@ -2299,7 +2290,6 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
               { tab: "finder", icon: MapPin, label: "Lead Finder", pulse: isRunning, badge: undefined },
               { tab: "leads", icon: Database, label: "Leads", pulse: false, badge: totalProcessed as number | undefined },
               { tab: "campaigns", icon: Send, label: "Campaigns", pulse: campaignRunning, badge: undefined },
-              { tab: "outreach", icon: Send, label: "Legacy Campaigns", pulse: campaignRunning, badge: undefined },
               { tab: "conversations", icon: MessageSquare, label: "Inbox", pulse: conversationsUnread > 0, badge: conversationsUnread > 0 ? conversationsUnread : undefined },
               { tab: "templates", icon: Layout, label: "Templates", pulse: false, badge: undefined },
               { tab: "reports", icon: BarChart3, label: "Reports", pulse: campaignRunning, badge: undefined },

@@ -26,6 +26,15 @@ import {
   setIncomingWhatsAppHandler
 } from "./src/outreachService";
 import { normalizePhoneKey } from "./src/conversationStore";
+import {
+  recordInbound,
+  recordOutbound,
+  listConversations,
+  getConversation,
+  markConversationRead,
+  setConversationStatus,
+  deleteConversation,
+} from "./src/conversations/conversationService";
 import { generateOutreachCopy } from "./src/outreachCopy";
 import { generateAICopy } from "./src/aiCopyGenerator";
 import { env, validateEnv } from "./src/env";
@@ -384,6 +393,19 @@ app.post(
             .catch(() => {});
           logger.success(`Cloud API reply matched inside workspace ${tenant.tenantId}.`);
         }
+
+        await recordInbound({
+          tenantId: tenant.tenantId,
+          channel: "whatsapp",
+          phone: msg.from,
+          leadId: lead?.id,
+          businessName: lead?.businessName || msg.from,
+          text: msg.text || "",
+          occurredAt: new Date((msg.timestamp || Math.floor(Date.now() / 1000)) * 1000),
+          source: "cloud",
+          provider: "meta_cloud",
+          providerMessageId: msg.messageId,
+        });
       }
 
       /*
@@ -485,6 +507,7 @@ app.use("/api/scoring", scoringRoutes);
  * campaign loop with a durable review workflow.
  */
 import campaignRoutes from "./src/campaign/campaignRoutes";
+import { recordDispatch } from "./src/campaign/dispatchService";
 app.use("/api/campaigns", campaignRoutes);
 
 /*
@@ -1407,6 +1430,11 @@ async function trackManualOutreach(
     leadId: string;
     channel: "email" | "whatsapp";
     status: "SENT" | "FAILED";
+    recipient: string;
+    subject?: string;
+    body: string;
+    externalMessageId?: string;
+    errorMessage?: string;
   }
 ) {
   const data: Record<string, unknown> = {};
@@ -1418,10 +1446,42 @@ async function trackManualOutreach(
     data.whatsappSentDate = new Date().toISOString().split("T")[0];
   }
 
-  // updateLead verifies ownership through the lead's tenant-owned parent list
-  // before issuing the update. Legacy global history/conversation files are not
-  // written from tenant requests because they have no tenant dimension.
   await tenantRepo.updateLead(ctx, params.leadId, data);
+  const lead = await prisma.lead.findFirst({
+    where: { id: params.leadId, tenantId: ctx.tenantId },
+    select: { businessName: true, phone: true, emails: true },
+  });
+  const businessName = lead?.businessName || "Manual outreach";
+
+  await recordDispatch({
+    tenantId: ctx.tenantId,
+    leadId: params.leadId,
+    businessName,
+    recipient: params.recipient,
+    channel: params.channel,
+    status: params.status,
+    sourceType: "manual",
+    sourceLabel: "Manual outreach",
+    subject: params.subject,
+    messageSnippet: params.body,
+    externalMessageId: params.externalMessageId,
+    errorMessage: params.errorMessage,
+  });
+
+  if (params.status === "SENT") {
+    await recordOutbound({
+      tenantId: ctx.tenantId,
+      channel: params.channel,
+      email: params.channel === "email" ? params.recipient : undefined,
+      phone: params.channel === "whatsapp" ? params.recipient : undefined,
+      leadId: params.leadId,
+      businessName,
+      text: params.body,
+      source: "manual",
+      provider: params.channel === "email" ? "smtp" : "whatsapp",
+      providerMessageId: params.externalMessageId,
+    });
+  }
 }
 
 /**
@@ -1434,22 +1494,23 @@ setIncomingWhatsAppHandler(async ({ from }) => {
   logger.warn(`Ignored inbound legacy WhatsApp Web message from ${normalizePhoneKey(from) || "unknown"}: no tenant identity.`);
 });
 
-// ── Conversations (Inbox) endpoints ──
-// The legacy conversation store is a deployment-wide JSON file with no tenant
-// key. Exposing or mutating it from a tenant dashboard would leak data. Keep the
-// tenant-safe empty contract until conversation persistence is migrated.
+// ── Tenant-owned conversations (Inbox) ──
 app.get(
   "/api/conversations",
   resolveTenantContext,
   requirePermission("VIEW_LEADS"),
-  (_req, res) => res.json({ conversations: [], totalUnread: 0 })
+  asyncHandler(async (req, res) => res.json(await listConversations(ctxOf(req))))
 );
 
 app.get(
   "/api/conversations/:id",
   resolveTenantContext,
   requirePermission("VIEW_LEADS"),
-  (_req, res) => res.status(404).json({ error: "Conversation not found.", code: "not_found" })
+  asyncHandler(async (req, res) => {
+    const conversation = await getConversation(ctxOf(req), req.params.id);
+    if (!conversation) return res.status(404).json({ error: "Conversation not found.", code: "not_found" });
+    res.json({ conversation });
+  })
 );
 
 app.post(
@@ -1457,28 +1518,94 @@ app.post(
   heavyActionRateLimiter(),
   resolveTenantContext,
   requirePermission("EDIT_LEADS"),
-  (_req, res) => res.status(404).json({ error: "Conversation not found.", code: "not_found" })
+  asyncHandler(async (req, res) => {
+    const ctx = ctxOf(req);
+    const conversation = await getConversation(ctx, req.params.id);
+    if (!conversation) return res.status(404).json({ error: "Conversation not found.", code: "not_found" });
+
+    const text = String(req.body?.text || "").trim();
+    if (!text || text.length > 10_000) {
+      return res.status(400).json({ error: "Reply text must be between 1 and 10,000 characters." });
+    }
+
+    let provider = "manual";
+    let providerMessageId: string | undefined;
+    if (conversation.channel === "email") {
+      if (!conversation.email) return res.status(400).json({ error: "This conversation has no email recipient." });
+      const smtp = await getUserIntegration(ctx.userId, "smtp", ctx.tenantId) as any;
+      if (!smtp?.host || !smtp?.user || !smtp?.password) {
+        return res.status(400).json({ error: "Email is not configured for this workspace." });
+      }
+      const result = await sendEmailOutreach(conversation.email, "Re: your enquiry", text, {
+        host: smtp.host,
+        port: Number(smtp.port) || 587,
+        secure: Boolean(smtp.secure),
+        user: smtp.user,
+        pass: smtp.password,
+        from: smtp.fromName || smtp.fromEmail || smtp.user,
+      });
+      if (!result.success) return res.status(502).json({ error: result.error || "Failed to send email reply." });
+      provider = "smtp";
+    } else {
+      if (!conversation.phone) return res.status(400).json({ error: "This conversation has no phone recipient." });
+      const result = await sendWhatsAppUnified(conversation.phone, text, {
+        userId: ctx.userId,
+        tenantId: ctx.tenantId,
+        allowTemplateFallback: false,
+      });
+      if (!result.ok) return res.status(502).json({ error: result.error || "Failed to send WhatsApp reply." });
+      provider = result.provider;
+      providerMessageId = result.messageId;
+    }
+
+    const updated = await recordOutbound({
+      tenantId: ctx.tenantId,
+      channel: conversation.channel,
+      email: conversation.email,
+      phone: conversation.phone,
+      leadId: conversation.leadId,
+      businessName: conversation.businessName,
+      text,
+      source: "manual_reply",
+      provider,
+      providerMessageId,
+    });
+    res.json({ conversation: updated });
+  })
 );
 
 app.post(
   "/api/conversations/:id/read",
   resolveTenantContext,
   requirePermission("VIEW_LEADS"),
-  (_req, res) => res.status(404).json({ error: "Conversation not found.", code: "not_found" })
+  asyncHandler(async (req, res) => {
+    const conversation = await markConversationRead(ctxOf(req), req.params.id);
+    if (!conversation) return res.status(404).json({ error: "Conversation not found.", code: "not_found" });
+    res.json({ conversation });
+  })
 );
 
 app.patch(
   "/api/conversations/:id/status",
   resolveTenantContext,
   requirePermission("EDIT_LEADS"),
-  (_req, res) => res.status(404).json({ error: "Conversation not found.", code: "not_found" })
+  asyncHandler(async (req, res) => {
+    const conversation = await setConversationStatus(ctxOf(req), req.params.id, req.body?.status);
+    if (!conversation) return res.status(404).json({ error: "Conversation not found.", code: "not_found" });
+    res.json({ conversation });
+  })
 );
 
 app.delete(
   "/api/conversations/:id",
   resolveTenantContext,
   requirePermission("DELETE_LEADS"),
-  (_req, res) => res.status(404).json({ error: "Conversation not found.", code: "not_found" })
+  asyncHandler(async (req, res) => {
+    if (!await deleteConversation(ctxOf(req), req.params.id)) {
+      return res.status(404).json({ error: "Conversation not found.", code: "not_found" });
+    }
+    res.json({ success: true });
+  })
 );
 
 // ── Email reply ingestion (IMAP polling) ──
@@ -1515,7 +1642,7 @@ async function getPollableMailboxes(): Promise<ImapMailbox[]> {
 
 startEmailReplyPolling(
   getPollableMailboxes,
-  async ({ tenantId, from }) => {
+  async ({ tenantId, from, fromName, subject, text, messageId }) => {
     if (!tenantId) return;
     try {
       // The mailbox identifies the workspace, so sender matching cannot cross
@@ -1528,6 +1655,18 @@ startEmailReplyPolling(
         await prisma.lead.update({ where: { id: lead.id }, data: { conversationStatus: "REPLIED" } }).catch(() => {});
         logger.success(`Email reply received for tenant ${tenantId} from ${from}.`);
       }
+
+      await recordInbound({
+        tenantId,
+        channel: "email",
+        email: from,
+        leadId: lead?.id,
+        businessName: lead?.businessName || fromName || from,
+        text: subject ? `${subject}\n\n${text}` : text,
+        source: "imap",
+        provider: "imap",
+        providerMessageId: messageId,
+      });
     } catch (err: any) {
       logger.warn(`Failed to handle tenant email reply: ${err?.message || err}`);
     }
@@ -1570,7 +1709,15 @@ app.post(
     }
 
     const result = await sendEmailOutreach(String(to), String(subject), String(body), userSmtpConfig);
-    await trackManualOutreach(ctx, { leadId: String(leadId), channel: "email", status: result.success ? "SENT" : "FAILED" });
+    await trackManualOutreach(ctx, {
+      leadId: String(leadId),
+      channel: "email",
+      status: result.success ? "SENT" : "FAILED",
+      recipient: String(to),
+      subject: String(subject),
+      body: String(body),
+      errorMessage: result.error,
+    });
     if (result.success) return res.json({ success: true, message: "Email sent successfully." });
     return res.status(500).json({ error: result.error || "Failed to send email." });
   })
@@ -1593,7 +1740,15 @@ app.post(
     }
 
     const result = await sendWhatsAppUnified(String(phone), String(message), { userId: ctx.userId, tenantId: ctx.tenantId });
-    await trackManualOutreach(ctx, { leadId: String(leadId), channel: "whatsapp", status: result.ok ? "SENT" : "FAILED" });
+    await trackManualOutreach(ctx, {
+      leadId: String(leadId),
+      channel: "whatsapp",
+      status: result.ok ? "SENT" : "FAILED",
+      recipient: String(phone),
+      body: String(message),
+      externalMessageId: result.messageId,
+      errorMessage: result.error,
+    });
     if (result.ok) {
       return res.json({ success: true, message: "WhatsApp message sent successfully.", provider: result.provider });
     }
@@ -2098,75 +2253,24 @@ app.post(
   });
 }));
 
+/**
+ * Legacy immediate-send campaigns are retired. The reviewed campaign workflow
+ * at POST /api/campaigns is the only allowed delivery path.
+ */
+function legacyCampaignRetired(res: express.Response) {
+  return res.status(410).json({
+    error: "Legacy campaigns are retired. Generate, review, approve, and send through /api/campaigns instead.",
+    code: "legacy_campaign_retired",
+  });
+}
+
 app.post(
   "/api/campaign/start",
   heavyActionRateLimiter(),
   resolveTenantContext,
   requirePermission("SEND_CAMPAIGN"),
-  (req, res) => {
-  const ctx = ctxOf(req);
-  if (isCampaignRunning) {
-    return res.status(409).json({ error: "Campaign capacity is currently in use. Please try again shortly." });
-  }
-
-  const { delaySeconds, enableEmail, enableWhatsapp, dryRun } = req.body;
-  const { source, filters, templates } = parseCampaignRequest(req.body);
-  const delaySec = parseInt(delaySeconds, 10) || 30;
-  const mailActive = enableEmail !== undefined ? Boolean(enableEmail) : true;
-  let waActive = enableWhatsapp !== undefined ? Boolean(enableWhatsapp) : true;
-  const simulated = Boolean(dryRun);
-
-  if (!mailActive && !waActive) {
-    return res.status(400).json({ error: "Select at least one outreach channel (Email or WhatsApp)." });
-  }
-  if (source.type === "list" && !source.listId) {
-    return res.status(400).json({ error: "Select a lead list to run the campaign against." });
-  }
-
-  // ── Plan enforcement ──
-  const ent = entOf(req);
-  // WhatsApp outreach is a Pro feature. If a Free plan requests it, either
-  // block (WhatsApp-only) or continue with email only.
-  if (waActive && !ent.whatsappOutreach) {
-    if (!mailActive) {
-      return res.status(403).json({
-        error: `WhatsApp outreach is not included in your ${ent.planName} plan. Upgrade to Pro to unlock it.`,
-        code: "plan_restricted",
-        feature: "whatsappOutreach",
-      });
-    }
-    logger.warn(`WhatsApp outreach disabled for this campaign: not included in the ${ent.planName} plan. Continuing with email only.`);
-    waActive = false;
-  }
-  const useAiInsights = ent.aiInsights;
-
-  isCampaignRunning = true;
-  activeCampaignTenantId = ctx.tenantId;
-  campaignCancelRequested = false;
-  campaignProgress = {
-    current: 0,
-    total: 0,
-    status: "Initializing",
-    secondsRemaining: 0,
-    emailsSent: 0,
-    emailsFailed: 0,
-    whatsappSent: 0,
-    whatsappFailed: 0,
-    skipped: 0
-  };
-  
-  const campaignUserId = ctx.userId;
-  const campaignId = `camp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-
-  runCampaignLoop(ctx, delaySec, mailActive, waActive, simulated, source, filters, templates, useAiInsights, campaignUserId, campaignId).catch(err => {
-    logger.error(`Campaign crashed: ${err}`);
-    isCampaignRunning = false;
-    activeCampaignTenantId = null;
-    campaignProgress.status = `Error: ${err.message || err}`;
-  });
-
-  res.json({ success: true, message: "Outreach campaign started in the background.", campaignId });
-});
+  (_req, res) => legacyCampaignRetired(res)
+);
 
 /**
  * GET /api/campaign/history
@@ -2178,7 +2282,43 @@ app.get(
   "/api/campaign/history",
   resolveTenantContext,
   requirePermission("VIEW_ANALYTICS"),
-  (_req, res) => res.json({ records: [], summary: summarizeCampaignHistory([]) })
+  asyncHandler(async (req, res) => {
+    const ctx = ctxOf(req);
+    const channel = req.query.channel === "email" || req.query.channel === "whatsapp" ? req.query.channel : undefined;
+    const status = req.query.status === "SENT" || req.query.status === "FAILED" ? req.query.status : undefined;
+    const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 200) : "";
+    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+    const rows = await prisma.campaignDispatch.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        ...(channel ? { channel } : {}),
+        ...(status ? { status } : {}),
+        ...(search ? { OR: [
+          { businessName: { contains: search } },
+          { recipient: { contains: search } },
+          { subject: { contains: search } },
+          { messageSnippet: { contains: search } },
+        ] } : {}),
+      },
+      orderBy: { occurredAt: "desc" },
+      take: limit,
+    });
+    const records = rows.map((row) => ({
+      id: row.id,
+      campaignId: row.campaignId || "manual",
+      timestamp: row.occurredAt.toISOString(),
+      businessName: row.businessName,
+      channel: row.channel,
+      status: row.status,
+      recipient: row.recipient,
+      subject: row.subject || undefined,
+      messageSnippet: row.messageSnippet || undefined,
+      dryRun: row.dryRun,
+      sourceType: row.sourceType,
+      sourceLabel: row.sourceLabel,
+    }));
+    res.json({ records, summary: summarizeCampaignHistory(records as any) });
+  })
 );
 
 // NOTE: literal-path routes (/export, /bulk) are registered BEFORE the
@@ -2281,15 +2421,8 @@ app.post(
   "/api/campaign/stop",
   resolveTenantContext,
   requirePermission("SEND_CAMPAIGN"),
-  (req, res) => {
-  const ctx = ctxOf(req);
-  if (!isCampaignRunning || activeCampaignTenantId !== ctx.tenantId) {
-    return res.status(400).json({ error: "No campaign currently active in this workspace." });
-  }
-  campaignCancelRequested = true;
-  campaignProgress.status = "Cancelling...";
-  res.json({ success: true, message: "Campaign cancellation requested." });
-});
+  (_req, res) => legacyCampaignRetired(res)
+);
 
 /**
  * GET /api/status
@@ -2478,6 +2611,8 @@ async function startServer() {
     
     // Start cleanup job for unverified users (removes accounts after 10 minutes)
     cleanupJobInterval = startUnverifiedUserCleanup();
+    // The backup service owns retention; this boot hook activates its daily run.
+    scheduleAutomaticBackups();
   });
 
   // ── Graceful shutdown ──

@@ -14,6 +14,9 @@ import {
   ShieldCheck,
   Eye,
   EyeOff,
+  Phone,
+  Check,
+  X,
 } from "lucide-react";
 
 export interface AuthedUser {
@@ -56,19 +59,27 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [phone, setPhone] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
-  const [otp, setOtp] = useState("");
+  // OTP state - array of 6 digits
+  const [otpDigits, setOtpDigits] = useState<string[]>(["", "", "", "", "", ""]);
+  const otpRefs = useRef<(HTMLInputElement | null)[]>([]);
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [resendIn, setResendIn] = useState(0);
 
+  // Password validation states
+  const [passwordTouched, setPasswordTouched] = useState(false);
+  const [confirmPasswordTouched, setConfirmPasswordTouched] = useState(false);
+
   // Forgot-password sub-flow: "none" | "request" | "reset"
   const [forgotStep, setForgotStep] = useState<"none" | "request" | "reset">("none");
   const [newPassword, setNewPassword] = useState("");
-
-  const otpInputRef = useRef<HTMLInputElement>(null);
 
   // Resend cooldown ticker
   useEffect(() => {
@@ -78,8 +89,68 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
   }, [resendIn]);
 
   useEffect(() => {
-    if (step === "otp") setTimeout(() => otpInputRef.current?.focus(), 100);
+    if (step === "otp") setTimeout(() => otpRefs.current[0]?.focus(), 100);
   }, [step]);
+
+  // Password strength check
+  const getPasswordStrength = (pwd: string): { strength: number; label: string; color: string } => {
+    if (!pwd) return { strength: 0, label: "", color: "" };
+    let strength = 0;
+    if (pwd.length >= 8) strength++;
+    if (pwd.length >= 12) strength++;
+    if (/[a-z]/.test(pwd) && /[A-Z]/.test(pwd)) strength++;
+    if (/\d/.test(pwd)) strength++;
+    if (/[^a-zA-Z0-9]/.test(pwd)) strength++;
+
+    if (strength <= 1) return { strength: 1, label: "Weak", color: "bg-red-500" };
+    if (strength <= 3) return { strength: 2, label: "Fair", color: "bg-yellow-500" };
+    if (strength <= 4) return { strength: 3, label: "Good", color: "bg-blue-500" };
+    return { strength: 4, label: "Strong", color: "bg-green-500" };
+  };
+
+  const passwordStrength = getPasswordStrength(password);
+  const passwordsMatch = confirmPassword && password === confirmPassword;
+  const passwordsDontMatch = confirmPassword && password !== confirmPassword;
+
+  // Handle OTP digit input
+  const handleOtpChange = (index: number, value: string) => {
+    // Only allow digits
+    const digit = value.replace(/\D/g, "").slice(-1);
+
+    const newDigits = [...otpDigits];
+    newDigits[index] = digit;
+    setOtpDigits(newDigits);
+
+    // Auto-focus next input
+    if (digit && index < 5) {
+      otpRefs.current[index + 1]?.focus();
+    }
+  };
+
+  const handleOtpKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Backspace" && !otpDigits[index] && index > 0) {
+      otpRefs.current[index - 1]?.focus();
+    }
+  };
+
+  const handleOtpPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    const pastedData = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6);
+    const newDigits = [...otpDigits];
+
+    for (let i = 0; i < pastedData.length && i < 6; i++) {
+      newDigits[i] = pastedData[i];
+    }
+
+    setOtpDigits(newDigits);
+
+    // Focus the next empty field or last field
+    const nextEmptyIndex = newDigits.findIndex((d) => !d);
+    const focusIndex = nextEmptyIndex === -1 ? 5 : nextEmptyIndex;
+    otpRefs.current[focusIndex]?.focus();
+  };
+
+  const getOtpString = () => otpDigits.join("");
 
   const resetMessages = () => {
     setError("");
@@ -89,17 +160,38 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
   const switchMode = (m: Mode) => {
     setMode(m);
     setStep("credentials");
-    setOtp("");
+    setOtpDigits(["", "", "", "", "", ""]);
+    setConfirmPassword("");
+    setPhone("");
+    setPasswordTouched(false);
+    setConfirmPasswordTouched(false);
     resetMessages();
   };
 
   const handleSubmitCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
     resetMessages();
+
+    // Validation for signup
+    if (mode === "signup") {
+      if (!confirmPasswordTouched) {
+        setError("Please confirm your password.");
+        return;
+      }
+      if (password !== confirmPassword) {
+        setError("Passwords do not match.");
+        return;
+      }
+      if (password.length < 8) {
+        setError("Password must be at least 8 characters.");
+        return;
+      }
+    }
+
     setBusy(true);
     try {
       if (mode === "signup") {
-        const { ok, data } = await postJson("/api/auth/signup", { name, email, password });
+        const { ok, data } = await postJson("/api/auth/signup", { name, email, password, phone });
         if (!ok) {
           setError(data.error || "Sign up failed.");
           return;
@@ -130,15 +222,30 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
 
   const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
+    const otpCode = getOtpString();
+
+    if (otpCode.length !== 6) {
+      setError("Please enter all 6 digits.");
+      return;
+    }
+
     resetMessages();
     setBusy(true);
     try {
-      const { ok, data } = await postJson("/api/auth/verify-otp", { email, code: otp, purpose: "verify" });
+      const { ok, data } = await postJson("/api/auth/verify-otp", { email, code: otpCode, purpose: "verify" });
       if (!ok) {
         setError(data.error || "Verification failed.");
+        setOtpDigits(["", "", "", "", "", ""]);
+        otpRefs.current[0]?.focus();
         return;
       }
-      onAuthenticated(data.user);
+      setMode("signin");
+      setStep("credentials");
+      setOtpDigits(["", "", "", "", "", ""]);
+      setPassword("");
+      setConfirmPassword("");
+      setError("");
+      setNotice("Email verified successfully. Sign in to open your workspace.");
     } catch {
       setError("Network error. Please try again.");
     } finally {
@@ -168,10 +275,17 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
 
   const handleResetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
+    const otpCode = getOtpString();
+
+    if (otpCode.length !== 6) {
+      setError("Please enter all 6 digits.");
+      return;
+    }
+
     resetMessages();
     setBusy(true);
     try {
-      const { ok, data } = await postJson("/api/auth/reset-password", { email, code: otp, password: newPassword });
+      const { ok, data } = await postJson("/api/auth/reset-password", { email, code: otpCode, password: newPassword });
       if (!ok) {
         setError(data.error || "Could not reset password.");
         return;
@@ -180,7 +294,7 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
       setForgotStep("none");
       setMode("signin");
       setStep("credentials");
-      setOtp("");
+      setOtpDigits(["", "", "", "", "", ""]);
       setNewPassword("");
       setPassword("");
       setError("");
@@ -199,6 +313,7 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
     try {
       await postJson("/api/auth/forgot-password", { email });
       setNotice(`A new reset code was sent to ${email}.`);
+      setOtpDigits(["", "", "", "", "", ""]);
       setResendIn(30);
     } catch {
       setError("Network error. Please try again.");
@@ -218,6 +333,7 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
         return;
       }
       setNotice(`A new code was sent to ${email}.`);
+      setOtpDigits(["", "", "", "", "", ""]);
       setResendIn(30);
     } catch {
       setError("Network error. Please try again.");
@@ -291,7 +407,7 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
                 onClick={() => {
                   setForgotStep("none");
                   resetMessages();
-                  setOtp("");
+                  setOtpDigits(["", "", "", "", "", ""]);
                   setNewPassword("");
                 }}
                 className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-6 cursor-pointer"
@@ -337,17 +453,31 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
                 </form>
               ) : (
                 <form onSubmit={handleResetPassword} className="space-y-4">
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    autoComplete="one-time-code"
-                    maxLength={6}
-                    placeholder="••••••"
-                    value={otp}
-                    onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                    className="w-full text-center tracking-[0.5em] text-2xl font-bold rounded-xl border border-slate-200 bg-white py-4 text-slate-800 placeholder-slate-300 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all"
-                    required
-                  />
+                  {/* Animated OTP Input Boxes */}
+                  <div className="flex gap-2 justify-center">
+                    {otpDigits.map((digit, index) => (
+                      <input
+                        key={index}
+                        ref={(el) => {
+                          otpRefs.current[index] = el;
+                        }}
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={1}
+                        value={digit}
+                        onChange={(e) => handleOtpChange(index, e.target.value)}
+                        onKeyDown={(e) => handleOtpKeyDown(index, e)}
+                        onPaste={index === 0 ? handleOtpPaste : undefined}
+                        className={`w-12 h-14 text-center text-2xl font-bold rounded-xl border-2 transition-all duration-200 ${
+                          digit
+                            ? "border-indigo-500 bg-indigo-50 text-indigo-900 scale-105"
+                            : "border-slate-200 bg-white text-slate-800 hover:border-slate-300"
+                        } focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20`}
+                        autoComplete="off"
+                      />
+                    ))}
+                  </div>
+
                   <div className="relative">
                     <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4.5 w-4.5 text-slate-400" />
                     <input
@@ -368,11 +498,11 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
                       {showPassword ? <EyeOff className="h-4.5 w-4.5" /> : <Eye className="h-4.5 w-4.5" />}
                     </button>
                   </div>
-                  {error && <div className="text-sm text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2">{error}</div>}
-                  {notice && !error && <div className="text-sm text-emerald-600 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2">{notice}</div>}
+                  {error && <div className="text-sm text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2 animate-in fade-in slide-in-from-top-2 duration-200">{error}</div>}
+                  {notice && !error && <div className="text-sm text-emerald-600 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2 animate-in fade-in slide-in-from-top-2 duration-200">{notice}</div>}
                   <button
                     type="submit"
-                    disabled={busy || otp.length !== 6}
+                    disabled={busy || getOtpString().length !== 6}
                     className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 shadow-lg shadow-indigo-500/30 transition-all disabled:opacity-60 cursor-pointer"
                   >
                     {busy ? <Loader2 className="h-4.5 w-4.5 animate-spin" /> : "Reset password"}
@@ -434,6 +564,7 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
                       onChange={(e) => setName(e.target.value)}
                       className={inputBase}
                       autoComplete="name"
+                      required
                     />
                   </div>
                 )}
@@ -451,13 +582,30 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
                   />
                 </div>
 
+                {mode === "signup" && (
+                  <div className="relative">
+                    <Phone className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4.5 w-4.5 text-slate-400" />
+                    <input
+                      type="tel"
+                      placeholder="Phone (with country code, e.g., +91XXXXXXXXXX)"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      className={inputBase}
+                      autoComplete="tel"
+                    />
+                  </div>
+                )}
+
                 <div className="relative">
                   <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4.5 w-4.5 text-slate-400" />
                   <input
                     type={showPassword ? "text" : "password"}
                     placeholder={mode === "signup" ? "Create a password (min. 8 chars)" : "Password"}
                     value={password}
-                    onChange={(e) => setPassword(e.target.value)}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      setPasswordTouched(true);
+                    }}
                     className={`${inputBase} pr-11`}
                     autoComplete={mode === "signup" ? "new-password" : "current-password"}
                     required
@@ -471,6 +619,73 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
                     {showPassword ? <EyeOff className="h-4.5 w-4.5" /> : <Eye className="h-4.5 w-4.5" />}
                   </button>
                 </div>
+
+                {mode === "signup" && passwordTouched && password && (
+                  <div className="space-y-2 animate-in fade-in slide-in-from-top-2 duration-300">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-600">Password strength:</span>
+                      <span className={`font-semibold ${
+                        passwordStrength.strength === 1 ? "text-red-600" :
+                        passwordStrength.strength === 2 ? "text-yellow-600" :
+                        passwordStrength.strength === 3 ? "text-blue-600" :
+                        "text-green-600"
+                      }`}>
+                        {passwordStrength.label}
+                      </span>
+                    </div>
+                    <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full ${passwordStrength.color} transition-all duration-300 ease-out`}
+                        style={{ width: `${(passwordStrength.strength / 4) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {mode === "signup" && (
+                  <div className="relative">
+                    <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4.5 w-4.5 text-slate-400" />
+                    <input
+                      type={showConfirmPassword ? "text" : "password"}
+                      placeholder="Confirm password"
+                      value={confirmPassword}
+                      onChange={(e) => {
+                        setConfirmPassword(e.target.value);
+                        setConfirmPasswordTouched(true);
+                      }}
+                      className={`${inputBase} pr-11 ${
+                        confirmPasswordTouched && passwordsMatch ? "border-green-500 focus:border-green-500 focus:ring-green-500/20" :
+                        confirmPasswordTouched && passwordsDontMatch ? "border-red-500 focus:border-red-500 focus:ring-red-500/20" :
+                        ""
+                      }`}
+                      autoComplete="new-password"
+                      required
+                    />
+                    <div className="absolute right-11 top-1/2 -translate-y-1/2">
+                      {confirmPasswordTouched && passwordsMatch && (
+                        <Check className="h-4.5 w-4.5 text-green-600 animate-in zoom-in duration-200" />
+                      )}
+                      {confirmPasswordTouched && passwordsDontMatch && (
+                        <X className="h-4.5 w-4.5 text-red-600 animate-in zoom-in duration-200" />
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowConfirmPassword((s) => !s)}
+                      className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                      tabIndex={-1}
+                    >
+                      {showConfirmPassword ? <EyeOff className="h-4.5 w-4.5" /> : <Eye className="h-4.5 w-4.5" />}
+                    </button>
+                  </div>
+                )}
+
+                {mode === "signup" && confirmPasswordTouched && passwordsDontMatch && (
+                  <div className="text-xs text-red-600 flex items-center gap-1.5 animate-in fade-in slide-in-from-top-1 duration-200">
+                    <X className="h-3.5 w-3.5" />
+                    <span>Passwords do not match</span>
+                  </div>
+                )}
 
                 {mode === "signin" && (
                   <div className="flex justify-end -mt-1">
@@ -512,6 +727,33 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
                     </>
                   )}
                 </button>
+
+                {/* Divider */}
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-slate-200"></div>
+                  </div>
+                  <div className="relative flex justify-center text-xs">
+                    <span className="bg-slate-50 px-2 text-slate-500">Or continue with</span>
+                  </div>
+                </div>
+
+                {/* Google Sign In - Placeholder for future implementation */}
+                <button
+                  type="button"
+                  disabled
+                  className="w-full flex items-center justify-center gap-3 py-3 rounded-xl text-sm font-semibold text-slate-700 bg-white border-2 border-slate-200 hover:border-slate-300 hover:bg-slate-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Google Sign In - Coming Soon"
+                >
+                  <svg className="h-5 w-5" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                  </svg>
+                  <span>Sign in with Google</span>
+                  <span className="text-xs text-slate-400">(Coming Soon)</span>
+                </button>
               </form>
 
               <p className="text-center text-sm text-slate-500 mt-6">
@@ -548,33 +790,45 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
               </div>
 
               <form onSubmit={handleVerifyOtp} className="space-y-4">
-                <input
-                  ref={otpInputRef}
-                  type="text"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  maxLength={6}
-                  placeholder="••••••"
-                  value={otp}
-                  onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                  className="w-full text-center tracking-[0.5em] text-2xl font-bold rounded-xl border border-slate-200 bg-white py-4 text-slate-800 placeholder-slate-300 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all"
-                  required
-                />
+                {/* Animated OTP Input Boxes */}
+                <div className="flex gap-2 justify-center">
+                  {otpDigits.map((digit, index) => (
+                    <input
+                      key={index}
+                      ref={(el) => {
+                        otpRefs.current[index] = el;
+                      }}
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={1}
+                      value={digit}
+                      onChange={(e) => handleOtpChange(index, e.target.value)}
+                      onKeyDown={(e) => handleOtpKeyDown(index, e)}
+                      onPaste={index === 0 ? handleOtpPaste : undefined}
+                      className={`w-12 h-14 text-center text-2xl font-bold rounded-xl border-2 transition-all duration-200 ${
+                        digit
+                          ? "border-indigo-500 bg-indigo-50 text-indigo-900 scale-105"
+                          : "border-slate-200 bg-white text-slate-800 hover:border-slate-300"
+                      } focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20`}
+                      autoComplete="off"
+                    />
+                  ))}
+                </div>
 
                 {error && (
-                  <div className="text-sm text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2">
+                  <div className="text-sm text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2 animate-in fade-in slide-in-from-top-2 duration-200">
                     {error}
                   </div>
                 )}
                 {notice && !error && (
-                  <div className="text-sm text-emerald-600 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2">
+                  <div className="text-sm text-emerald-600 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2 animate-in fade-in slide-in-from-top-2 duration-200">
                     {notice}
                   </div>
                 )}
 
                 <button
                   type="submit"
-                  disabled={busy || otp.length !== 6}
+                  disabled={busy || getOtpString().length !== 6}
                   className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 shadow-lg shadow-indigo-500/30 transition-all disabled:opacity-60 cursor-pointer"
                 >
                   {busy ? <Loader2 className="h-4.5 w-4.5 animate-spin" /> : "Verify & Continue"}

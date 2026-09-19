@@ -9,10 +9,11 @@ import jwt from "jsonwebtoken";
 import { prisma } from "./prisma";
 import { env } from "./env";
 import { sendOtpEmail } from "./mailer";
+import { sendSmsOtp, isValidPhone, normalizePhone } from "./smsService";
 import { logger } from "./logger";
 import { ensureTenantForUser } from "./tenancy/tenantService";
 
-export type OtpPurpose = "verify" | "login" | "reset";
+export type OtpPurpose = "verify" | "login" | "reset" | "phone_verify";
 
 export interface RequestMeta {
   ip?: string;
@@ -130,15 +131,30 @@ export function sessionCookieOptions() {
 // ── OTP lifecycle ──
 
 /**
- * Generates a fresh OTP for an email, persists its hash, and emails the code.
+ * Generates a fresh OTP for an email or phone, persists its hash, and sends the code.
  * Enforces a resend cooldown to prevent spamming.
  */
-async function createAndSendOtp(email: string, purpose: OtpPurpose, userId?: string | null): Promise<void> {
+async function createAndSendOtp(
+  target: string,
+  purpose: OtpPurpose,
+  userId?: string | null,
+  targetType: "email" | "phone" = "email"
+): Promise<void> {
+  // OTPs for phone verification are bound to the account that requested them;
+  // knowing a code issued for the same phone on another account is insufficient.
+  const whereClause = {
+    ...(targetType === "email" ? { email: target, phone: null } : { phone: target, email: null }),
+    purpose,
+    consumed: false,
+    ...(userId ? { userId } : {}),
+  };
+
   // Resend cooldown: reject if a very recent unconsumed OTP exists.
   const recent = await prisma.emailOtp.findFirst({
-    where: { email, purpose, consumed: false },
+    where: whereClause,
     orderBy: { createdAt: "desc" },
   });
+
   if (recent) {
     const ageSeconds = (Date.now() - new Date(recent.createdAt).getTime()) / 1000;
     if (ageSeconds < env.auth.otpResendSeconds) {
@@ -150,9 +166,9 @@ async function createAndSendOtp(email: string, purpose: OtpPurpose, userId?: str
     }
   }
 
-  // Invalidate any prior outstanding codes for this email+purpose.
+  // Invalidate any prior outstanding codes for this target+purpose.
   await prisma.emailOtp.updateMany({
-    where: { email, purpose, consumed: false },
+    where: whereClause,
     data: { consumed: true },
   });
 
@@ -160,22 +176,60 @@ async function createAndSendOtp(email: string, purpose: OtpPurpose, userId?: str
   const codeHash = await bcrypt.hash(code, 10);
   const expiresAt = new Date(Date.now() + env.auth.otpTtlMinutes * 60 * 1000);
 
-  await prisma.emailOtp.create({
-    data: { email, codeHash, purpose, expiresAt, userId: userId ?? null },
-  });
+  const otpData: any = {
+    codeHash,
+    purpose,
+    expiresAt,
+    userId: userId ?? null,
+  };
 
-  const sent = await sendOtpEmail(email, code, purpose);
-  if (!sent) {
-    throw new AuthError(502, "email_failed", "Failed to send the verification email. Please try again.");
+  if (targetType === "email") {
+    otpData.email = target;
+    otpData.phone = null;
+  } else {
+    otpData.phone = target;
+    otpData.email = null;
+  }
+
+  const createdOtp = await prisma.emailOtp.create({ data: otpData });
+
+  // Send via appropriate channel. A failed delivery must not leave a valid
+  // code behind that can be recovered from logs or block a retry by cooldown.
+  let sent = false;
+  if (targetType === "email") {
+    sent = await sendOtpEmail(target, code, purpose);
+    if (!sent) {
+      await prisma.emailOtp.update({ where: { id: createdOtp.id }, data: { consumed: true } });
+      throw new AuthError(502, "email_failed", "Failed to send the verification email. Please try again.");
+    }
+  } else {
+    sent = await sendSmsOtp({ phone: target, code, purpose: purpose as any });
+    if (!sent) {
+      await prisma.emailOtp.update({ where: { id: createdOtp.id }, data: { consumed: true } });
+      throw new AuthError(502, "sms_failed", "Failed to send the verification SMS. Please try again.");
+    }
   }
 }
 
 /**
- * Validates an OTP code for an email+purpose. Consumes it on success.
+ * Validates an OTP code for an email or phone + purpose. Consumes it on success.
  */
-async function consumeOtp(email: string, code: string, purpose: OtpPurpose): Promise<void> {
+async function consumeOtp(
+  target: string,
+  code: string,
+  purpose: OtpPurpose,
+  targetType: "email" | "phone" = "email",
+  userId?: string
+): Promise<void> {
+  const whereClause = {
+    ...(targetType === "email" ? { email: target, phone: null } : { phone: target, email: null }),
+    purpose,
+    consumed: false,
+    ...(userId ? { userId } : {}),
+  };
+
   const otp = await prisma.emailOtp.findFirst({
-    where: { email, purpose, consumed: false },
+    where: whereClause,
     orderBy: { createdAt: "desc" },
   });
 
@@ -210,31 +264,55 @@ async function consumeOtp(email: string, code: string, purpose: OtpPurpose): Pro
  * Registers a new user (unverified) and sends a verification OTP.
  * If an unverified account already exists, resends the code instead.
  */
-export async function signup(input: { name?: string; email: string; password: string }): Promise<{ requiresVerification: true }> {
+export async function signup(input: {
+  name?: string;
+  email: string;
+  password: string;
+  phone?: string;
+}): Promise<{ requiresVerification: true }> {
   const email = normalizeEmail(input.email);
   const name = (input.name || "").trim() || null;
   const password = String(input.password || "");
+  const phone = input.phone ? normalizePhone(input.phone) : null;
 
   if (!EMAIL_RE.test(email)) throw new AuthError(400, "invalid_email", "Please enter a valid email address.");
   if (password.length < 8) throw new AuthError(400, "weak_password", "Password must be at least 8 characters.");
+
+  // Validate phone if provided
+  if (phone && !isValidPhone(phone)) {
+    throw new AuthError(400, "invalid_phone", "Please enter a valid phone number with country code (e.g., +91XXXXXXXXXX).");
+  }
+  if (phone) {
+    const phoneOwner = await prisma.user.findFirst({ where: { phone } });
+    if (phoneOwner && phoneOwner.email !== email) {
+      throw new AuthError(409, "phone_taken", "This phone number is already registered to another account.");
+    }
+  }
 
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) {
     if (existing.emailVerified) {
       throw new AuthError(409, "email_taken", "An account with this email already exists. Please sign in.");
     }
-    // Account exists but not verified — update password/name and resend OTP.
+    // Account exists but not verified — update password/name/phone and resend OTP.
     const passwordHash = await bcrypt.hash(password, 12);
-    await prisma.user.update({ where: { id: existing.id }, data: { passwordHash, name: name ?? existing.name } });
-    await createAndSendOtp(email, "verify", existing.id);
+    await prisma.user.update({
+      where: { id: existing.id },
+      data: {
+        passwordHash,
+        name: name ?? existing.name,
+        phone: phone ?? existing.phone,
+      }
+    });
+    await createAndSendOtp(email, "verify", existing.id, "email");
     return { requiresVerification: true };
   }
 
   const passwordHash = await bcrypt.hash(password, 12);
   const user = await prisma.user.create({
-    data: { email, name, passwordHash, emailVerified: false },
+    data: { email, name, passwordHash, phone, emailVerified: false, phoneVerified: false },
   });
-  await createAndSendOtp(email, "verify", user.id);
+  await createAndSendOtp(email, "verify", user.id, "email");
   await writeAudit("signup", { userId: user.id });
   logger.info(`New signup pending verification: ${email}`);
   return { requiresVerification: true };
@@ -242,9 +320,9 @@ export async function signup(input: { name?: string; email: string; password: st
 
 /**
  * Verifies a signup/login OTP. On success, marks the email verified (if needed)
- * and returns the user plus a session token.
+ * and returns the verified user. A password login creates the session.
  */
-export async function verifyOtp(input: { email: string; code: string; purpose?: OtpPurpose }): Promise<{ user: PublicUser; token: string }> {
+export async function verifyOtp(input: { email: string; code: string; purpose?: OtpPurpose }): Promise<{ user: PublicUser }> {
   const email = normalizeEmail(input.email);
 
   /*
@@ -266,7 +344,7 @@ export async function verifyOtp(input: { email: string; code: string; purpose?: 
   }
   const purpose: OtpPurpose = "verify";
 
-  await consumeOtp(email, input.code, purpose);
+  await consumeOtp(email, input.code, purpose, "email");
 
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) throw new AuthError(404, "user_not_found", "Account not found.");
@@ -277,16 +355,13 @@ export async function verifyOtp(input: { email: string; code: string; purpose?: 
     data: { emailVerified: true, lastLoginAt: new Date(), failedLoginAttempts: 0, lockedUntil: null, role },
   });
 
-  // The account is usable from here, so it needs a workspace to act on.
-  // Idempotent, and failure is non-fatal: the tenant guard reports a missing
-  // workspace clearly rather than letting a sign-in fail over provisioning.
-  await ensureTenantForUser(updated.id).catch((err) =>
-    logger.error(`Could not provision a workspace for ${updated.id}`, err)
-  );
+  // A session without a workspace is unusable and produces authorization
+  // failures on every tenant route. Provision first and fail the verification
+  // request if workspace creation fails; the next login can safely retry.
+  await ensureTenantForUser(updated.id);
 
   await writeAudit("email_verified", { userId: updated.id });
-  const token = issueSessionToken(updated);
-  return { user: toPublicUser(updated), token };
+  return { user: toPublicUser(updated) };
 }
 
 // ── Password reset ──
@@ -301,7 +376,7 @@ export async function requestPasswordReset(email: string, meta?: RequestMeta): P
   const user = await prisma.user.findUnique({ where: { email: normalized } });
   if (user) {
     try {
-      await createAndSendOtp(normalized, "reset", user.id);
+      await createAndSendOtp(normalized, "reset", user.id, "email");
       await writeAudit("password_reset_requested", { userId: user.id, meta });
     } catch (err) {
       // Swallow cooldown errors so the response stays uniform.
@@ -322,7 +397,7 @@ export async function resetPassword(
   const password = String(input.password || "");
   if (password.length < 8) throw new AuthError(400, "weak_password", "Password must be at least 8 characters.");
 
-  await consumeOtp(email, input.code, "reset");
+  await consumeOtp(email, input.code, "reset", "email");
 
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) throw new AuthError(404, "user_not_found", "Account not found.");
@@ -507,7 +582,7 @@ export async function login(
   }
 
   if (!user.emailVerified) {
-    await createAndSendOtp(email, "verify", user.id);
+    await createAndSendOtp(email, "verify", user.id, "email");
     return { requiresVerification: true, email };
   }
 
@@ -518,13 +593,9 @@ export async function login(
     data: { lastLoginAt: new Date(), failedLoginAttempts: 0, lockedUntil: null, role },
   });
 
-  // Also here, not just on verification: an account created before tenancy
-  // existed (or restored from a backup without running the backfill) would
-  // otherwise sign in successfully and then be refused by every tenant-scoped
-  // route. Cheap, idempotent, and logins are infrequent.
-  await ensureTenantForUser(updated.id).catch((err) =>
-    logger.error(`Could not provision a workspace for ${updated.id}`, err)
-  );
+  // Do not issue a session that cannot resolve a workspace. This is
+  // idempotent and repairs legacy accounts on their next successful login.
+  await ensureTenantForUser(updated.id);
 
   await writeAudit("login_success", { userId: user.id, meta });
   const token = issueSessionToken(updated);
@@ -562,7 +633,7 @@ export async function resendOtp(input: { email: string; purpose?: OtpPurpose }):
   const user = await prisma.user.findUnique({ where: { email } });
   // Do not reveal whether the account exists; only send when appropriate.
   if (user && !user.emailVerified) {
-    await createAndSendOtp(email, "verify", user.id);
+    await createAndSendOtp(email, "verify", user.id, "email");
   }
   return { ok: true };
 }
@@ -573,4 +644,92 @@ export async function resendOtp(input: { email: string; purpose?: OtpPurpose }):
 export async function getUserById(id: string): Promise<PublicUser | null> {
   const user = await prisma.user.findUnique({ where: { id } });
   return user ? toPublicUser(user) : null;
+}
+
+/**
+ * Sends an OTP to verify phone number
+ */
+export async function sendPhoneVerificationOtp(
+  userId: string,
+  phone: string
+): Promise<{ ok: true }> {
+  const normalized = normalizePhone(phone);
+
+  if (!isValidPhone(normalized)) {
+    throw new AuthError(400, "invalid_phone", "Please enter a valid phone number with country code.");
+  }
+
+  // A normalized phone is an account identifier and cannot be shared, even
+  // while verification is pending. The database unique index is the final
+  // arbiter for concurrent requests.
+  const existing = await prisma.user.findFirst({
+    where: {
+      phone: normalized,
+      id: { not: userId }
+    }
+  });
+
+  if (existing) {
+    throw new AuthError(409, "phone_taken", "This phone number is already registered to another account.");
+  }
+
+  try {
+    await prisma.user.update({
+      where: { id: userId },
+      data: { phone: normalized, phoneVerified: false }
+    });
+  } catch (err: any) {
+    if (err?.code === "P2002") {
+      throw new AuthError(409, "phone_taken", "This phone number is already registered to another account.");
+    }
+    throw err;
+  }
+
+  await createAndSendOtp(normalized, "phone_verify", userId, "phone");
+  await writeAudit("phone_verification_requested", { userId });
+
+  return { ok: true };
+}
+
+/**
+ * Verifies phone OTP and marks phone as verified
+ */
+export async function verifyPhoneOtp(
+  userId: string,
+  code: string
+): Promise<{ ok: true }> {
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user || !user.phone) {
+    throw new AuthError(400, "no_phone", "No phone number associated with this account.");
+  }
+
+  await consumeOtp(user.phone, code, "phone_verify", "phone", userId);
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: { phoneVerified: true }
+  });
+
+  await writeAudit("phone_verified", { userId });
+
+  return { ok: true };
+}
+
+/**
+ * Resends phone verification OTP
+ */
+export async function resendPhoneOtp(userId: string): Promise<{ ok: true }> {
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+
+  if (!user || !user.phone) {
+    throw new AuthError(400, "no_phone", "No phone number associated with this account.");
+  }
+
+  if (user.phoneVerified) {
+    throw new AuthError(400, "already_verified", "Phone number is already verified.");
+  }
+
+  await createAndSendOtp(user.phone, "phone_verify", userId, "phone");
+
+  return { ok: true };
 }
