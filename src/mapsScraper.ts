@@ -13,7 +13,8 @@ import { analyzeWebsite } from "./websiteAnalyzer";
 import { analyzeInstagram } from "./instagramAnalyzer";
 import { analyzeFacebook } from "./facebookAnalyzer";
 import { analyzeLinkedIn } from "./linkedinAnalyzer";
-import { calculateDigitalPresenceScore } from "./digitalPresenceScorer";
+import { evaluate, builtInRuleSet, type ScorableLead } from "./scoring";
+import { buildSearchQueries } from "./icp/icpService";
 import { generateSalesInsight } from "./aiInsights";
 import { runGrowthIntelligence } from "./analysis/growthIntelligenceAgent";
 import { growthIntelligenceToLeadFields } from "./analysis/leadFields";
@@ -41,6 +42,75 @@ export interface ScrapeProgress {
 }
 
 export type ProgressReporter = (progress: ScrapeProgress) => void;
+
+/**
+ * Tenant-specific behaviour injected into a run.
+ *
+ * The scraper stays free of database access and of any tenant concept: it is
+ * handed the queries to execute, a predicate for what to keep, a duplicate check
+ * and a scorer, and it reports back what it saw. Everything workspace-shaped —
+ * which rule set, whose dedupe history, which ICP — is resolved by the caller in
+ * server.ts and passed in.
+ *
+ * That boundary is deliberate. The alternative, a scraper that reads the tenant's
+ * configuration itself, is what produced the shared mutable CONFIG object: once
+ * this module owns state, that state ends up process-global.
+ *
+ * Every hook is optional, so the CLI entry point still works with no plan at all.
+ */
+export interface DiscoveryPlan {
+  /** Search queries to run. Falls back to businessType/location when absent. */
+  queries?: string[];
+
+  /**
+   * Rejects a candidate before any analyzer runs. Each rejected business
+   * otherwise costs four page loads to reach the same conclusion.
+   */
+  filter?: (candidate: {
+    businessName: string;
+    category: string;
+    address: string;
+    rating: number;
+    reviews: number;
+  }) => { keep: boolean; reason?: string };
+
+  /** True when this workspace has already discovered the business. */
+  isDuplicate?: (businessName: string, address: string) => boolean;
+
+  /**
+   * Called for every business examined, kept or not.
+   *
+   * Recording a rejection is what stops the next run re-analysing it. The old
+   * duplicate store only learned about a business after its webhook delivery
+   * succeeded, so anything filtered out — or persisted to the CRM without a
+   * Sheets integration — was re-scraped in full on every subsequent run.
+   */
+  onSeen?: (info: {
+    businessName: string;
+    address: string;
+    phone: string;
+    category: string;
+    kept: boolean;
+    reason?: string;
+  }) => void;
+
+  /** Scores a lead. Defaults to the built-in rule set. */
+  score?: (lead: ScorableLead) => {
+    score: number;
+    max: number;
+    priority: "HOT" | "WARM" | "COLD";
+    breakdown: { signal: string; label: string; points: number }[];
+    ruleSetId?: string;
+    ruleSetVersion: number;
+  };
+
+  /** Attribution written onto each lead. */
+  icpProfileId?: string | null;
+
+  /** Tenant attribution for AI calls, so usage is metered to the right workspace. */
+  tenantId?: string;
+  userId?: string;
+}
 
 /**
  * Per-run cancellation.
@@ -158,42 +228,46 @@ async function launchChromium(isHeadless: boolean): Promise<Browser> {
   }
 }
 
+/**
+ * Search queries for a run, from the criteria alone.
+ *
+ * Prefers the explicit `categories` and `locations` arrays the ICP supplies, and
+ * falls back to splitting the legacy comma-separated fields.
+ *
+ * WHAT WAS REMOVED, AND WHY
+ * -------------------------
+ * This function used to expand "dental, skin clinic" into "dental clinic" and
+ * "skin clinic" by matching the last word of the final part against a hardcoded
+ * list of thirty English business nouns — hospital, clinic, salon, dealer, spa
+ * and so on. A fixed vocabulary of what a business can be is exactly what a
+ * universal platform cannot have: any category outside the list was silently
+ * searched for as written, the list was unreachable from the UI, and the rule
+ * only applied when the LAST part happened to end in a listed word, so the same
+ * input in a different order behaved differently.
+ *
+ * The ICP holds categories as an explicit array, so each one is stated in full
+ * and no guessing is needed. A workspace that relied on the old expansion should
+ * list "dental clinic" and "skin clinic" as two categories, which is what it was
+ * trying to express.
+ */
 export function parseSearchQueries(businessType: string, location: string): string[] {
-  const parts = businessType.split(",").map(p => p.trim()).filter(Boolean);
-  if (parts.length <= 1) {
-    return [`${businessType} in ${location}`];
+  const categories = businessType.split(",").map((p) => p.trim()).filter(Boolean);
+  const locations = location.split(",").map((p) => p.trim()).filter(Boolean);
+  return buildSearchQueries(
+    categories.length ? categories : [businessType],
+    locations.length ? locations : [location]
+  );
+}
+
+/** Resolves the queries for a run, preferring an explicit plan. */
+function resolveQueries(criteria: ScrapeCriteria, plan?: DiscoveryPlan): string[] {
+  if (plan?.queries?.length) return plan.queries;
+
+  if (criteria.categories?.length && criteria.locations?.length) {
+    return buildSearchQueries(criteria.categories, criteria.locations);
   }
-  
-  const queries: string[] = [];
-  const lastPart = parts[parts.length - 1];
-  const lastPartWords = lastPart.split(/\s+/);
-  
-  const suffixes = [
-    "hospital", "clinic", "shop", "center", "centre", "restaurant", "hotel", "cafe", 
-    "dentist", "dentistry", "surgeon", "store", "academy", "school", "office", 
-    "parlour", "parlor", "spa", "salon", "studio", "gym", "club", "bar", "pub", 
-    "care", "service", "services", "doctor", "dermatologist", "agency", "dealer"
-  ];
-  
-  let suffixToAppend = "";
-  const lastWord = lastPartWords[lastPartWords.length - 1]?.toLowerCase();
-  if (lastWord && suffixes.includes(lastWord)) {
-    suffixToAppend = lastPartWords[lastPartWords.length - 1];
-  }
-  
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i];
-    const partWords = part.split(/\s+/);
-    const partHasSuffix = partWords.some(w => suffixes.includes(w.toLowerCase()));
-    
-    if (!partHasSuffix && suffixToAppend && i < parts.length - 1) {
-      queries.push(`${part} ${suffixToAppend} in ${location}`);
-    } else {
-      queries.push(`${part} in ${location}`);
-    }
-  }
-  
-  return Array.from(new Set(queries));
+
+  return parseSearchQueries(criteria.businessType, criteria.location);
 }
 
 async function extractDetailsFromPage(page: Page) {
@@ -381,21 +455,40 @@ export async function runScraper(
   criteria: ScrapeCriteria = DEFAULT_CRITERIA,
   token: CancellationToken = new CancellationToken(),
   customWebhookUrl?: string,
-  onProgress?: ProgressReporter
+  onProgress?: ProgressReporter,
+  plan?: DiscoveryPlan
 ): Promise<ScrapingResult> {
   activeTokens.add(token);
   try {
-    return await executeScrape(criteria, token, customWebhookUrl, onProgress);
+    return await executeScrape(criteria, token, customWebhookUrl, onProgress, plan);
   } finally {
     activeTokens.delete(token);
   }
+}
+
+/** Scores with the plan's rule set, or the built-in one for the CLI path. */
+function resolveScorer(plan?: DiscoveryPlan) {
+  if (plan?.score) return plan.score;
+  const fallback = builtInRuleSet();
+  return (lead: ScorableLead) => {
+    const result = evaluate(lead, fallback);
+    return {
+      score: result.score,
+      max: result.max,
+      priority: result.priority,
+      breakdown: result.breakdown,
+      ruleSetId: result.ruleSetId,
+      ruleSetVersion: result.ruleSetVersion,
+    };
+  };
 }
 
 async function executeScrape(
   criteria: ScrapeCriteria,
   token: CancellationToken,
   customWebhookUrl?: string,
-  onProgress?: ProgressReporter
+  onProgress?: ProgressReporter,
+  plan?: DiscoveryPlan
 ): Promise<ScrapingResult> {
   /** Reports progress without ever letting a reporting failure break the run. */
   const report = (progress: ScrapeProgress) => {
@@ -452,8 +545,15 @@ async function executeScrape(
 
     const page = await context.newPage();
     
-    const queries = parseSearchQueries(criteria.businessType, criteria.location);
+    const queries = resolveQueries(criteria, plan);
     logger.info(`Generated ${queries.length} search queries to execute sequentially.`);
+    if (queries.length === 0) {
+      throw new Error(
+        "Nothing to search for: this run has no target categories or locations. " +
+          "Set them on your customer profile."
+      );
+    }
+    const scorer = resolveScorer(plan);
     const placeLinks = new Set<string>();
 
     for (const queryToRun of queries) {
@@ -599,7 +699,7 @@ async function executeScrape(
           await browser.close();
           browser = null;
         }
-        return await runSimulationScanner(criteria, token, customWebhookUrl);
+        return await runSimulationScanner(criteria, token, customWebhookUrl, plan);
       } else {
         throw new Error("No businesses extracted. Headless mode might be blocked by Google Maps bot protection, or no results were found for the query.");
       }
@@ -670,10 +770,45 @@ async function executeScrape(
           continue;
         }
 
-        // Duplicate Check
-        if (duplicateChecker.isDuplicate(businessName, address)) {
-          logger.warn(`Skipped: '${businessName}' (Already processed in processed-leads.json)`);
+        /*
+         * Duplicate check.
+         *
+         * The plan supplies a workspace-scoped check. The legacy
+         * duplicateChecker is the fallback for the CLI entry point only: it reads
+         * one process-wide JSON file, so under the server it suppressed a
+         * business for every tenant once any tenant had seen it.
+         */
+        const isDuplicate = plan?.isDuplicate
+          ? plan.isDuplicate(businessName, address)
+          : duplicateChecker.isDuplicate(businessName, address);
+        if (isDuplicate) {
+          logger.warn(`Skipped: '${businessName}' (already discovered by this workspace)`);
           continue;
+        }
+
+        /*
+         * ICP exclusions and the reputation floor, applied before the analyzers.
+         *
+         * Ordering matters for cost, not correctness: each rejected business
+         * would otherwise cost four page loads — website, Instagram, Facebook,
+         * LinkedIn — to reach a conclusion available from the listing alone.
+         * A search for "clinic" returns the tenant's own competitors as readily
+         * as prospects, so this rejects a real share of results.
+         */
+        if (plan?.filter) {
+          const verdict = plan.filter({ businessName, category, address, rating, reviews });
+          if (!verdict.keep) {
+            logger.warn(`Skipped: '${businessName}' (${verdict.reason || "excluded by the customer profile"})`);
+            plan.onSeen?.({
+              businessName,
+              address,
+              phone,
+              category,
+              kept: false,
+              reason: verdict.reason,
+            });
+            continue;
+          }
         }
 
         // Coordinate / Distance Filter Check
@@ -766,17 +901,36 @@ async function executeScrape(
           linkedinStatus: liAnalysis.status
         };
 
-        const scoreDetails = calculateDigitalPresenceScore(partialLead);
-        const aiInsight = await generateSalesInsight({
-          ...partialLead,
-          leadScore: scoreDetails.score,
-          leadPriority: scoreDetails.priority
-        });
+        const scoreDetails = scorer(partialLead);
+
+        /*
+         * The denominator is the rule set's real maximum.
+         *
+         * Before Phase 4 this call could not pass one: the parameter did not
+         * exist, the prompt defaulted to 200, and the only scorer in the product
+         * topped out at 170 — so every lead was described to the model as about
+         * 15% weaker than it was, and a maximally-underserved business read as
+         * 85% instead of 100%.
+         */
+        const aiInsight = await generateSalesInsight(
+          {
+            ...partialLead,
+            leadScore: scoreDetails.score,
+            leadPriority: scoreDetails.priority,
+            scoreDenominator: scoreDetails.max,
+          },
+          { tenantId: plan?.tenantId, userId: plan?.userId }
+        );
 
         const fullLead: Lead = {
           ...partialLead,
           leadScore: scoreDetails.score,
           leadPriority: scoreDetails.priority,
+          scoreMax: scoreDetails.max,
+          scoreBreakdown: scoreDetails.breakdown,
+          scoringRuleSetId: scoreDetails.ruleSetId,
+          scoringVersion: scoreDetails.ruleSetVersion,
+          ...(plan?.icpProfileId ? { icpProfileId: plan.icpProfileId } : {}),
           aiInsight,
           dateAdded: new Date().toISOString().split("T")[0],
           sheetName
@@ -850,6 +1004,17 @@ async function executeScrape(
 
         leadsFound.push(fullLead);
 
+        /*
+         * Recorded as seen the moment it is kept, not after the webhook succeeds.
+         *
+         * The old ordering only remembered a business once Google Sheets accepted
+         * it, so a workspace with no Sheets integration — or with a webhook
+         * having a bad day — re-scraped and re-analysed the same businesses on
+         * every subsequent run, paying the full four-page-load cost each time and
+         * charging the lead quota again.
+         */
+        plan?.onSeen?.({ businessName, address, phone, category, kept: true });
+
         if (token.isCancelled) {
           logger.warn("Scraping cancelled by user before webhook submission.");
           break;
@@ -859,7 +1024,9 @@ async function executeScrape(
         const success = await sendLeadToWebhook(fullLead, customWebhookUrl);
         if (success) {
           addedCount++;
-          duplicateChecker.saveLead(fullLead);
+          // Legacy process-wide cache, for the CLI path. Under the server the
+          // plan's onSeen hook has already recorded it against the workspace.
+          if (!plan?.onSeen) duplicateChecker.saveLead(fullLead);
           logger.success(`Added To Sheet`);
         } else {
           failedCount++;
@@ -875,7 +1042,7 @@ async function executeScrape(
     logger.error("Scraper encountered a critical error during execution:", error);
     if (criteria.enableSimulation) {
       logger.warn("Piping fallback to high-fidelity AI simulation scanner...");
-      return await runSimulationScanner(criteria, token, customWebhookUrl);
+      return await runSimulationScanner(criteria, token, customWebhookUrl, plan);
     } else {
       throw error;
     }
@@ -914,14 +1081,19 @@ async function executeScrape(
 export async function runSimulationScanner(
   criteria: ScrapeCriteria = DEFAULT_CRITERIA,
   token: CancellationToken = new CancellationToken(),
-  customWebhookUrl?: string
+  customWebhookUrl?: string,
+  plan?: DiscoveryPlan
 ): Promise<ScrapingResult> {
   const query = `${criteria.businessType} in ${criteria.location}`;
   logger.warn(`--- Running High-Fidelity Simulation Mode for '${query}' ---`);
   const sheetName = generateSheetName(criteria);
-  
+  const scorer = resolveScorer(plan);
+
   const startTime = Date.now();
-  const simulatedLeads: Partial<Lead>[] = getMockLeadsPool(criteria.businessType, criteria.location);
+  // Generated from the first target category, so a simulated run reflects what
+  // this workspace actually searches for.
+  const simulationCategory = criteria.categories?.[0] || criteria.businessType;
+  const simulatedLeads: Partial<Lead>[] = getMockLeadsPool(simulationCategory, criteria.location);
   
   let scannedCount = 0;
   let withoutWebsiteCount = 0;
@@ -970,10 +1142,27 @@ export async function runSimulationScanner(
     const mockLat = centerLat + latOffset;
     const mockLng = centerLng + lngOffset;
 
-    // Check duplicate
-    if (duplicateChecker.isDuplicate(mock.businessName!, mock.address!)) {
-      logger.warn(`Skipped: '${mock.businessName}' (Already processed in processed-leads.json)`);
+    // Check duplicate — workspace-scoped when a plan is supplied.
+    const simIsDuplicate = plan?.isDuplicate
+      ? plan.isDuplicate(mock.businessName!, mock.address!)
+      : duplicateChecker.isDuplicate(mock.businessName!, mock.address!);
+    if (simIsDuplicate) {
+      logger.warn(`Skipped: '${mock.businessName}' (already discovered by this workspace)`);
       continue;
+    }
+
+    if (plan?.filter) {
+      const verdict = plan.filter({
+        businessName: mock.businessName!,
+        category: mock.category || "",
+        address: mock.address || "",
+        rating: mock.rating || 0,
+        reviews: mock.reviews || 0,
+      });
+      if (!verdict.keep) {
+        logger.warn(`Skipped: '${mock.businessName}' (${verdict.reason || "excluded by the customer profile"})`);
+        continue;
+      }
     }
 
     // Determine mock statuses dynamically to make it realistic
@@ -1030,17 +1219,26 @@ export async function runSimulationScanner(
       linkedinStatus
     };
 
-    const scoreDetails = calculateDigitalPresenceScore(partialLead);
-    const aiInsight = await generateSalesInsight({
-      ...partialLead,
-      leadScore: scoreDetails.score,
-      leadPriority: scoreDetails.priority
-    });
+    const scoreDetails = scorer(partialLead);
+    const aiInsight = await generateSalesInsight(
+      {
+        ...partialLead,
+        leadScore: scoreDetails.score,
+        leadPriority: scoreDetails.priority,
+        scoreDenominator: scoreDetails.max,
+      },
+      { tenantId: plan?.tenantId, userId: plan?.userId }
+    );
 
     const fullLead: Lead = {
       ...partialLead,
       leadScore: scoreDetails.score,
       leadPriority: scoreDetails.priority,
+      scoreMax: scoreDetails.max,
+      scoreBreakdown: scoreDetails.breakdown,
+      scoringRuleSetId: scoreDetails.ruleSetId,
+      scoringVersion: scoreDetails.ruleSetVersion,
+      ...(plan?.icpProfileId ? { icpProfileId: plan.icpProfileId } : {}),
       aiInsight,
       dateAdded: new Date().toISOString().split("T")[0],
       sheetName
@@ -1059,6 +1257,14 @@ export async function runSimulationScanner(
 
     leadsFound.push(fullLead);
 
+    plan?.onSeen?.({
+      businessName: fullLead.businessName,
+      address: fullLead.address,
+      phone: fullLead.phone,
+      category: fullLead.category,
+      kept: true,
+    });
+
     if (token.isCancelled) {
       logger.warn("Simulated scraping cancelled by user before webhook submission.");
       break;
@@ -1068,8 +1274,8 @@ export async function runSimulationScanner(
     const success = await sendLeadToWebhook(fullLead, customWebhookUrl);
     if (success) {
       addedCount++;
-      // Only save to duplicate checker cache if successfully delivered
-      duplicateChecker.saveLead(fullLead);
+      // Legacy process-wide cache, for the CLI path only.
+      if (!plan?.onSeen) duplicateChecker.saveLead(fullLead);
       logger.success(`Added To Sheet`);
     } else {
       failedCount++;
@@ -1112,301 +1318,68 @@ function displaySummaryTable(data: any, criteria: ScrapeCriteria) {
   logger.log("================================\n");
 }
 
+/**
+ * Synthetic leads for simulation mode, generated from the requested category.
+ *
+ * WHAT WAS REMOVED, AND WHY
+ * -------------------------
+ * This function used to branch on the search term and return one of three
+ * hand-written pools: eight named dental clinics, six dermatology clinics, four
+ * restaurants, plus a generic fallback. Roughly three hundred lines of fabricated
+ * businesses with Indian phone numbers and invented addresses.
+ *
+ * Three problems made it worse than useless for a universal platform. Anyone
+ * outside those three verticals got the generic branch, so simulation told them
+ * nothing about their own market. Anyone inside them saw plausible, specific,
+ * entirely fictional businesses — "Smile Dental Design Clinic" with a rating and a
+ * review count — which is precisely the kind of fabricated data this product
+ * promises never to produce. And the pools encoded the assumption that the
+ * platform sells to dentists, dermatologists and restaurants.
+ *
+ * The replacement is deliberately, visibly synthetic. Names are built from the
+ * caller's own category, phone numbers use the reserved 555 range, and every
+ * record is prefixed so it cannot be mistaken for a real business if it reaches a
+ * CRM or a spreadsheet. Simulation exists to exercise the pipeline without a
+ * browser, not to show a customer what their market looks like.
+ */
 function getMockLeadsPool(type: string, location: string): Partial<Lead>[] {
-  const normalizedType = type.toLowerCase();
-  
-  if (normalizedType.includes("dental") || normalizedType.includes("dentist") || normalizedType.includes("dentistry")) {
-    return [
-      {
-        businessName: "Smile Dental Design Clinic",
-        phone: "+91 98123 45678",
-        address: `12 Main St, Near Bank, ${location}`,
-        rating: 4.8,
-        reviews: 245,
-        website: "",
-        category: "Dental Clinic",
-        mapsUrl: "https://maps.google.com/?cid=smile_dental"
-      },
-      {
-        businessName: "Elite Multi-specialty Dental Care",
-        phone: "+91 97234 56789",
-        address: `A-401, Sapphire Complex, ${location}`,
-        rating: 4.6,
-        reviews: 180,
-        website: "https://elitedental.com",
-        category: "Dental Clinic",
-        mapsUrl: "https://maps.google.com/?cid=elite_dental"
-      },
-      {
-        businessName: "Healthy Teeth Orthodontic Center",
-        phone: "+91 99345 67890",
-        address: `Shop 5, Ground Floor, Plaza Bldg, ${location}`,
-        rating: 4.9,
-        reviews: 95,
-        website: "",
-        category: "Dentist",
-        mapsUrl: "https://maps.google.com/?cid=healthy_teeth"
-      },
-      {
-        businessName: "Perfect Smiles Pediatric Dentist",
-        phone: "+91 96456 78901",
-        address: `Upper Mall, Road No. 2, ${location}`,
-        rating: 4.2,
-        reviews: 320,
-        website: "",
-        category: "Dental Clinic",
-        mapsUrl: "https://maps.google.com/?cid=perfect_smiles"
-      },
-      {
-        businessName: "Sparkle Dental & Facial Hub",
-        phone: "+91 95567 89012",
-        address: `Green Row Villas, Sector B, ${location}`,
-        rating: 4.7,
-        reviews: 112,
-        website: "",
-        category: "Dental Clinic",
-        mapsUrl: "https://maps.google.com/?cid=sparkle_dental"
-      },
-      {
-        businessName: "Modern Dental implantology Group",
-        phone: "+91 94678 90123",
-        address: `Tower C, IT Hub Road, ${location}`,
-        rating: 4.4,
-        reviews: 55,
-        website: "https://moderndentistry.org",
-        category: "Dental Clinic",
-        mapsUrl: "https://maps.google.com/?cid=modern_dental"
-      },
-      {
-        businessName: "Grace Dental Clinic & Orthognathic Center",
-        phone: "+91 91122 33445",
-        address: `Corner Office, Lakeview St, ${location}`,
-        rating: 4.5,
-        reviews: 21,
-        website: "",
-        category: "Dentist",
-        mapsUrl: "https://maps.google.com/?cid=grace_dental"
-      },
-      {
-        businessName: "Alpha Dental Clinic",
-        phone: "", // Will trigger filter skipped: Phone missing
-        address: `Plot 56, Sector 4, ${location}`,
-        rating: 4.8,
-        reviews: 15,
-        website: "",
-        category: "Dental Clinic",
-        mapsUrl: "https://maps.google.com/?cid=alpha"
-      }
-    ];
-  } else if (normalizedType.includes("skin") || normalizedType.includes("derma") || normalizedType.includes("aesthetic") || normalizedType.includes("laser") || normalizedType.includes("cosmet")) {
-    return [
-      {
-        businessName: "ClearSkin Dermatology & Laser Clinic",
-        phone: "+91 98812 34567",
-        address: `Sadar Bazar, Near Court Road, ${location}`,
-        rating: 4.8,
-        reviews: 215,
-        website: "",
-        category: "Skin Care Clinic",
-        mapsUrl: "https://maps.google.com/?cid=clearskin_satara"
-      },
-      {
-        businessName: "Dr. Patil's Skin & Hair Aesthetic Laser Centre",
-        phone: "+91 97654 32109",
-        address: `Radhika Road, Opp. Civil Hospital, ${location}`,
-        rating: 4.6,
-        reviews: 140,
-        website: "https://drpatilskin.com",
-        category: "Dermatologist",
-        mapsUrl: "https://maps.google.com/?cid=drpatilskin"
-      },
-      {
-        businessName: "Radiant Glow Skin Clinic & Cosmetology",
-        phone: "+91 99234 56789",
-        address: `Shop No. 4, Shahu Stadium Complex, ${location}`,
-        rating: 4.9,
-        reviews: 98,
-        website: "",
-        category: "Skin Care Clinic",
-        mapsUrl: "https://maps.google.com/?cid=radiantglow"
-      },
-      {
-        businessName: "Aura Laser & Hair Transplant Centre",
-        phone: "+91 95456 78901",
-        address: `Powai Naka, Commercial Arcade, ${location}`,
-        rating: 4.3,
-        reviews: 74,
-        website: "",
-        category: "Laser Clinic",
-        mapsUrl: "https://maps.google.com/?cid=aurahair"
-      },
-      {
-        businessName: "The Skin Artistry Clinic",
-        phone: "+91 91586 78912",
-        address: `Yashwant High School Road, ${location}`,
-        rating: 4.7,
-        reviews: 110,
-        website: "",
-        category: "Skin Care Clinic",
-        mapsUrl: "https://maps.google.com/?cid=skinartistry"
-      },
-      {
-        businessName: "Grace Advanced Skin Care & Salon",
-        phone: "+91 94238 90123",
-        address: `Karanje Turf, Near Maruti Mandir, ${location}`,
-        rating: 4.4,
-        reviews: 58,
-        website: "https://graceskinclinic.org",
-        category: "Skin Care Clinic",
-        mapsUrl: "https://maps.google.com/?cid=graceskin"
-      },
-      {
-        businessName: "Perfect Derma Care & Laser Center",
-        phone: "+91 91122 55446",
-        address: `Bombay Restaurant Chowk, NH4 bypass, ${location}`,
-        rating: 4.5,
-        reviews: 32,
-        website: "",
-        category: "Dermatologist",
-        mapsUrl: "https://maps.google.com/?cid=perfectderma"
-      },
-      {
-        businessName: "DermaElite Skin Clinic",
-        phone: "", // Will trigger filter skipped: Phone missing
-        address: `Plot 78, Guruwar Peth, ${location}`,
-        rating: 4.8,
-        reviews: 12,
-        website: "",
-        category: "Skin Care Clinic",
-        mapsUrl: "https://maps.google.com/?cid=dermaelite"
-      }
-    ];
-  } else if (normalizedType.includes("restaurant") || normalizedType.includes("hotel") || normalizedType.includes("cafe")) {
-    return [
-      {
-        businessName: "The Local Harvest Bistro",
-        phone: "+91 88123 45678",
-        address: `Main Crossing Road, ${location}`,
-        rating: 4.7,
-        reviews: 350,
-        website: "",
-        category: "Restaurant",
-        mapsUrl: "https://maps.google.com/?cid=local_harvest"
-      },
-      {
-        businessName: "Aroma Cafe & Brewmaster",
-        phone: "+91 87234 56789",
-        address: `Lane 3, Behind Star Mall, ${location}`,
-        rating: 4.4,
-        reviews: 1200,
-        website: "https://aromacafe.in",
-        category: "Cafe",
-        mapsUrl: "https://maps.google.com/?cid=aroma_cafe"
-      },
-      {
-        businessName: "Royal Spice Family Restaurant",
-        phone: "+91 85567 89012",
-        address: `Dona Heights Building, ${location}`,
-        rating: 4.6,
-        reviews: 240,
-        website: "",
-        category: "Restaurant",
-        mapsUrl: "https://maps.google.com/?cid=royal_spice"
-      },
-      {
-        businessName: "The Golden Leaf Boutique Hotel",
-        phone: "+91 82233 44556",
-        address: `Hillside View Lane, ${location}`,
-        rating: 4.9,
-        reviews: 35,
-        website: "",
-        category: "Hotel",
-        mapsUrl: "https://maps.google.com/?cid=golden_leaf"
-      }
-    ];
-  } else {
-    // Generic local business template generator
-    return [
-      {
-        businessName: `Pioneer ${type} Expert`,
-        phone: "+91 99911 22334",
-        address: `Central Market Plaza, ${location}`,
-        rating: 4.8,
-        reviews: 156,
-        website: "",
-        category: type,
-        mapsUrl: "https://maps.google.com/?cid=pioneer"
-      },
-      {
-        businessName: `Metro ${type} & Services`,
-        phone: "+91 99922 33445",
-        address: `Avenue Road Cross, ${location}`,
-        rating: 4.2,
-        reviews: 80,
-        website: "https://metroservices.org",
-        category: type,
-        mapsUrl: "https://maps.google.com/?cid=metro"
-      },
-      {
-        businessName: `${location} Elite ${type}`,
-        phone: "+91 99933 44556",
-        address: `Prime Arcade Suite 10, ${location}`,
-        rating: 4.7,
-        reviews: 210,
-        website: "",
-        category: type,
-        mapsUrl: "https://maps.google.com/?cid=elite_place"
-      },
-      {
-        businessName: `Apex ${type} Group`,
-        phone: "+91 98844 55667",
-        address: `Sector 12, Main Hub, ${location}`,
-        rating: 4.5,
-        reviews: 134,
-        website: "",
-        category: type,
-        mapsUrl: "https://maps.google.com/?cid=apex"
-      },
-      {
-        businessName: `Royal ${type} Hub`,
-        phone: "+91 97755 66778",
-        address: `Block B-3, Sapphire Square, ${location}`,
-        rating: 4.9,
-        reviews: 82,
-        website: "",
-        category: type,
-        mapsUrl: "https://maps.google.com/?cid=royal"
-      },
-      {
-        businessName: `Greenway ${type} Care`,
-        phone: "+91 96666 77889",
-        address: `Oakwood Avenue, Near City Park, ${location}`,
-        rating: 4.3,
-        reviews: 99,
-        website: "",
-        category: type,
-        mapsUrl: "https://maps.google.com/?cid=greenway"
-      },
-      {
-        businessName: `FirstChoice ${type} Clinic`,
-        phone: "+91 95577 88990",
-        address: `G-15, Royal Shopping Arcade, ${location}`,
-        rating: 4.6,
-        reviews: 45,
-        website: "",
-        category: type,
-        mapsUrl: "https://maps.google.com/?cid=firstchoice"
-      },
-      {
-        businessName: `Modern ${type} Solutions`,
-        phone: "+91 94488 99001",
-        address: `Tower B, Commercial Business Park, ${location}`,
-        rating: 4.1,
-        reviews: 29,
-        website: "",
-        category: type,
-        mapsUrl: "https://maps.google.com/?cid=modern"
-      }
-    ];
-  }
+  const category = (type || "Business").trim() || "Business";
+
+  /*
+   * Fixed shapes rather than random values, so a simulated run is reproducible
+   * and the scoring path is exercised across every band: a missing website with
+   * strong reputation scores HOT, a working well-instrumented site scores COLD.
+   */
+  const shapes: {
+    prefix: string;
+    rating: number;
+    reviews: number;
+    hasWebsite: boolean;
+  }[] = [
+    { prefix: "Sample A", rating: 4.8, reviews: 245, hasWebsite: false },
+    { prefix: "Sample B", rating: 4.6, reviews: 180, hasWebsite: true },
+    { prefix: "Sample C", rating: 4.9, reviews: 95, hasWebsite: false },
+    { prefix: "Sample D", rating: 4.2, reviews: 320, hasWebsite: false },
+    { prefix: "Sample E", rating: 4.4, reviews: 55, hasWebsite: true },
+    { prefix: "Sample F", rating: 3.9, reviews: 18, hasWebsite: false },
+    { prefix: "Sample G", rating: 4.7, reviews: 112, hasWebsite: false },
+    { prefix: "Sample H", rating: 4.1, reviews: 29, hasWebsite: true },
+  ];
+
+  return shapes.map((shape, index) => {
+    const businessName = `[SIMULATED] ${shape.prefix} ${category}`;
+    const slug = `sim-${index + 1}`;
+    return {
+      businessName,
+      // The 555 exchange is reserved for fiction precisely so it cannot reach a
+      // real person if a simulated lead escapes into an outreach campaign.
+      phone: `+1 555 0100 ${String(index + 1).padStart(2, "0")}`,
+      address: `Unit ${index + 1}, Example Street, ${location}`,
+      rating: shape.rating,
+      reviews: shape.reviews,
+      website: shape.hasWebsite ? `https://example.com/${slug}` : "",
+      category,
+      mapsUrl: `https://maps.google.com/?cid=${slug}`,
+    };
+  });
 }

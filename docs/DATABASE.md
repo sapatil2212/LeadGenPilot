@@ -7,7 +7,7 @@
 | Engine | MySQL (remote), accessed via Prisma |
 | Active database | `leadgenerationtool` — configured in `DATABASE_URL` |
 | Schema source of truth | `prisma/schema.prisma` |
-| Migration history | `prisma/migrations/` — 3 applied: `0_init`, `add_tenancy_and_jobs`, `add_business_knowledge` |
+| Migration history | `prisma/migrations/` — 4 applied: `0_init`, `add_tenancy_and_jobs`, `add_business_knowledge`, `add_icp_and_scoring` |
 | Drift | none (`prisma migrate diff` returns an empty migration) |
 | Data | empty, aside from Prisma's `_prisma_migrations` bookkeeping |
 
@@ -173,6 +173,52 @@ chunking and embedding are separate failure points with different fixes, and
 "which step failed" is the first thing anyone asks. `extracted_text` is kept so
 re-chunking never needs the original file — which is why the original bytes are
 not retained at all.
+
+## Targeting and scoring tables
+
+`20260919115840_add_icp_and_scoring` added three tables and eight columns on
+`leads`. All additive: every new column is nullable or defaulted, so the migration
+cannot lose data.
+
+| Table | Replaces | Holds |
+|---|---|---|
+| `icp_profiles` | `src/config.ts` | who to search for and where, plus the discovery defaults |
+| `scoring_rule_sets` | `src/digitalPresenceScorer.ts` | the weights that decide lead priority |
+| `discovered_businesses` | `processed-leads.json` | per-workspace deduplication history |
+
+**Scoring rules are JSON, and that is deliberate.** They are always read and
+evaluated as a complete set — a partial rule set scores nothing meaningful — and a
+set is around a dozen entries. Each rule names a `signal` from the registry in
+`src/scoring/signals.ts`, so a rule set is data selecting among known extractors,
+never anything executable. Tenant-configurable scoring must not mean
+tenant-supplied code.
+
+**`version` is bumped on every edit and stamped onto each lead scored with it.**
+Without that, changing one weight leaves yesterday's scores and today's sitting in
+the same column on different scales with nothing to tell them apart.
+
+**Priority bands are fractions of the achievable maximum, not absolute points.**
+The old scorer compared an absolute 100 and 60 against a maximum of 170 that
+appeared nowhere in the code, so its "HOT" band silently meant 59% and editing any
+weight moved the bands without anyone touching them. The built-in set stores
+`100/170` and `60/170` exactly, which is what makes it grade identically to the
+function it replaced.
+
+**`leads.score_max` and `leads.score_breakdown` make a score self-describing.** A
+bare `lead_score` cannot be read as a proportion, compared against a lead scored
+under different weights, or explained to the person acting on it.
+
+**`leads.icp_fit_score` is a different measurement from `lead_score`.** The score
+measures opportunity signals on the business; fit measures whether it is the right
+kind of customer. A dentist with no website tops the first and is worth nothing to
+a seller of hospital equipment on the second.
+
+**`discovered_businesses` is keyed by a normalised name+address digest**, unique
+per workspace, so the duplicate check is one indexed lookup. Name alone collides
+across branches of a chain; address alone collides in a shared building. Rows with
+a null `lead_id` are businesses that were seen and filtered out — worth
+remembering so the next run does not spend four page loads reaching the same
+conclusion.
 
 ## Backups
 

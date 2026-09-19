@@ -25,6 +25,16 @@ export async function generateSalesInsight(lead: {
   appointmentSystem: boolean;
   leadScore: number;
   leadPriority: string;
+  /**
+   * The achievable maximum of the rule set that produced `leadScore`.
+   *
+   * Required for the score to mean anything to the model. Until Phase 4 no
+   * caller could supply it — this parameter did not exist — so the prompt used
+   * its 200 default while the only scorer in the product topped out at 170.
+   * Every lead was therefore described as roughly 15% weaker than it was, and a
+   * maximally-underserved business read as 85% rather than 100%.
+   */
+  scoreDenominator?: number;
   emails?: string[];
   linkedinStatus?: string;
   googleAnalyticsPresent?: boolean;

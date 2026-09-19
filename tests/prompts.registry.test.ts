@@ -88,8 +88,18 @@ describe("grounding rules", () => {
       cleanName: "Acme",
       // business.extraction
       sourceText: "We make X-ray machines.",
-      // assistant.chat
+      // assistant.chat + icp.suggestion
       business: {}, knowledge: [], history: [], question: "What do we sell?",
+      // lead.icpFit
+      profile: {
+        name: "Mid-size hospitals",
+        targetCategories: [],
+        targetIndustries: [],
+        targetLocations: [],
+        excludeCategories: [],
+        excludeKeywords: [],
+      },
+      candidates: [{ ref: "0", businessName: "Acme" }],
     };
 
     const messages = prompt.build(sampleInput);

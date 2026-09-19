@@ -1,98 +1,44 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * Compatibility shim over the configurable scoring engine.
+ *
+ * This file used to hold the scoring rules themselves: a fixed function awarding
+ * 50 points for "has no website", 15 for "no Instagram", and grading HOT at an
+ * absolute 100 points against a maximum nobody had worked out. Those weights
+ * describe prospects for a web design agency, which made the product unusable for
+ * anyone selling something else.
+ *
+ * Phase 4 moved the rules into src/scoring/, where they are tenant-owned data.
+ * The built-in rule set reproduces the numbers below exactly, so this signature
+ * survives for the call sites that only want a score and a band, and
+ * tests/digitalPresenceScorer.test.ts — written against the original
+ * implementation and deliberately left unedited — is the proof that the engine
+ * grades identically.
+ *
+ * New code should call src/scoring/index.ts `scoreLead` instead, which returns
+ * the achievable maximum and the per-rule breakdown. Those are what make a score
+ * explainable, and they are the reason the AI prompt can finally be told the
+ * right denominator.
  */
 
-import { Lead } from "./types";
+import { evaluate, builtInRuleSet, type LeadPriority } from "./scoring/ruleSet";
+import type { ScorableLead } from "./scoring/signals";
 
 export interface ScoreDetails {
   score: number;
-  priority: "HOT" | "WARM" | "COLD";
+  priority: LeadPriority;
 }
 
-export function calculateDigitalPresenceScore(lead: Omit<Lead, "leadScore" | "leadPriority" | "dateAdded" | "aiInsight">): ScoreDetails {
-  let score = 0;
-
-  // 1. Website status scoring (+50 / +40 / +30)
-  if (lead.websiteStatus === "MISSING") {
-    score += 50;
-  } else if (lead.websiteStatus === "BROKEN") {
-    score += 40;
-  } else if (lead.websiteStatus === "OUTDATED") {
-    score += 30;
-  }
-
-  // 2. Google Maps reputation checks (+20 / +20)
-  if (lead.reviews > 100) {
-    score += 20;
-  }
-  if (lead.rating > 4.5) {
-    score += 20;
-  }
-
-  // 3. Instagram presence (+15 / +10)
-  if (lead.instagramStatus === "NOT_FOUND") {
-    score += 15;
-  } else if (lead.instagramStatus === "INACTIVE") {
-    score += 10;
-  }
-
-  // 4. Facebook presence (+10 / +10)
-  if (lead.facebookStatus === "NOT_FOUND") {
-    score += 10;
-  } else if (lead.facebookStatus === "INACTIVE") {
-    score += 10;
-  }
-
-  // 5. Contact channel elements on website (+10 / +10)
-  if (lead.websiteStatus !== "MISSING" && lead.websiteStatus !== "BROKEN") {
-    if (!lead.whatsappPresent) {
-      score += 10;
-    }
-    if (!lead.appointmentSystem) {
-      score += 10;
-    }
-  } else {
-    // If website is missing/broken, contact channels are also considered missing
-    score += 10;
-    score += 10;
-  }
-
-  // 6. Tracking pixels & email audits (+10 / +10 / +5)
-  if (lead.websiteStatus !== "MISSING" && lead.websiteStatus !== "BROKEN") {
-    if (!lead.googleAnalyticsPresent) {
-      score += 10;
-    }
-    if (!lead.metaPixelPresent) {
-      score += 10;
-    }
-    if (!lead.emails || lead.emails.length === 0) {
-      score += 5;
-    }
-  } else {
-    score += 10; // no GA
-    score += 10; // no Pixel
-    score += 5;  // no Email
-  }
-
-  // 7. LinkedIn Presence check (+10)
-  if (lead.linkedinStatus === "NOT_FOUND") {
-    score += 10;
-  }
-
-  // Clamp at max 200
-  score = Math.min(score, 200);
-
-  // Calculate priority
-  let priority: "HOT" | "WARM" | "COLD" = "COLD";
-  if (score >= 100) {
-    priority = "HOT";
-  } else if (score >= 60) {
-    priority = "WARM";
-  }
-
-  return {
-    score,
-    priority
-  };
+/**
+ * Scores a lead with the built-in rule set.
+ *
+ * @deprecated Prefer `scoreLead` from src/scoring, which also reports the
+ * maximum and the breakdown. Kept because the CLI entry point and the
+ * characterization tests depend on this exact shape.
+ */
+export function calculateDigitalPresenceScore(lead: ScorableLead): ScoreDetails {
+  const result = evaluate(lead, builtInRuleSet());
+  return { score: result.score, priority: result.priority };
 }

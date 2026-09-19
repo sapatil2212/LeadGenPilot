@@ -14,6 +14,8 @@ import { leadInsightPrompt } from "./leadInsight";
 import { outreachCopyPrompt } from "./outreachCopy";
 import { businessExtractionPrompt } from "./businessExtraction";
 import { assistantPrompt } from "./assistant";
+import { icpSuggestionPrompt } from "./icpSuggestion";
+import { leadIcpFitPrompt } from "./leadIcpFit";
 import type { PromptDefinition } from "./types";
 
 export { GROUNDING_PREAMBLE, withGrounding } from "./types";
@@ -38,6 +40,21 @@ export {
   type AssistantBusinessContext,
   type RetrievedChunk,
 } from "./assistant";
+export {
+  icpSuggestionPrompt,
+  validateIcpSuggestion,
+  type IcpSuggestionInput,
+  type IcpSuggestionOutput,
+} from "./icpSuggestion";
+export {
+  leadIcpFitPrompt,
+  validateIcpFit,
+  type IcpFitCandidate,
+  type IcpFitInput,
+  type IcpFitOutput,
+  type IcpFitProfile,
+  type IcpFitVerdict,
+} from "./leadIcpFit";
 
 /** All registered prompts, keyed by name. */
 export const PROMPTS = {
@@ -45,6 +62,8 @@ export const PROMPTS = {
   [outreachCopyPrompt.name]: outreachCopyPrompt,
   [businessExtractionPrompt.name]: businessExtractionPrompt,
   [assistantPrompt.name]: assistantPrompt,
+  [icpSuggestionPrompt.name]: icpSuggestionPrompt,
+  [leadIcpFitPrompt.name]: leadIcpFitPrompt,
 } as const satisfies Record<string, PromptDefinition<any>>;
 
 export type PromptName = keyof typeof PROMPTS;

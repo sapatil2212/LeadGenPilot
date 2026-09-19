@@ -14,6 +14,7 @@ import {
   cancelAllScrapes,
   CancellationToken,
   type ScrapeCriteria,
+  type DiscoveryPlan,
 } from "./src/mapsScraper";
 import { logger } from "./src/logger";
 import { duplicateChecker } from "./src/duplicateChecker";
@@ -41,7 +42,7 @@ import { generateAICopy } from "./src/aiCopyGenerator";
 import { env, validateEnv } from "./src/env";
 import { readJson, writeJsonAtomic, withLock } from "./src/storage";
 import cookieParser from "cookie-parser";
-import authRoutes from "./src/authRoutes";
+import authRoutes, { requireAuth, requireAdmin } from "./src/authRoutes";
 import accountRoutes from "./src/accountRoutes";
 import adminRoutes from "./src/adminRoutes";
 import superAdminRoutes from "./src/superAdminRoutes";
@@ -49,6 +50,25 @@ import productionRoutes from "./src/productionRoutes";
 import businessRoutes from "./src/business/businessRoutes";
 import knowledgeRoutes from "./src/knowledge/knowledgeRoutes";
 import assistantRoutes from "./src/assistant/assistantRoutes";
+import icpRoutes from "./src/icp/icpRoutes";
+import scoringRoutes from "./src/scoring/scoringRoutes";
+import {
+  resolveDefaultIcp,
+  createIcpProfile,
+  updateIcpProfile,
+  type IcpView,
+} from "./src/icp/icpService";
+import { passesIcpFilters, buildSearchQueries } from "./src/icp/icpService";
+import { scoreFit } from "./src/icp/fitService";
+import { resolveActiveRuleSet, scoreLead } from "./src/scoring";
+import { buildBusinessContext } from "./src/business/businessService";
+import {
+  listDiscovered,
+  clearDiscovered,
+  loadSeenFingerprints,
+  fingerprintOf,
+  recordManyDiscovered,
+} from "./src/discovery/dedupeService";
 import { connectDatabase, disconnectDatabase } from "./src/prisma";
 import crmRoutes, { appLeadToDbInput, dbLeadToAppLead } from "./crmRoutes";
 import { prisma } from "./src/prisma";
@@ -471,95 +491,155 @@ app.use("/api/business", businessRoutes);
 app.use("/api/knowledge", knowledgeRoutes);
 app.use("/api/assistant", assistantRoutes);
 
+/*
+ * ── Targeting and scoring (Phase 4) ──────────────────────────────────────────
+ *
+ * Between them these replace the two pieces of deployment-global state that made
+ * the product single-tenant in practice: the mutable CONFIG object holding one
+ * vertical and one city, and the hardcoded scorer whose weights only suited a web
+ * design agency.
+ */
+app.use("/api/icp", icpRoutes);
+app.use("/api/scoring", scoringRoutes);
+
+/*
+ * ── Discovery settings, formerly the global CONFIG ───────────────────────────
+ *
+ * These two routes used to read and write `CONFIG`, a mutable module-level object
+ * shared by the entire deployment, with no tenant scope and no permission check
+ * beyond "has a session". Any authenticated user could change what every other
+ * workspace's next discovery run searched for, and in development POST rewrote
+ * `src/config.ts` on disk so the change survived a restart.
+ *
+ * They are now a compatibility façade over the caller's own default ICP. The
+ * request and response shapes are unchanged so the existing dashboard keeps
+ * working without a frontend release; `/api/icp` is the real interface, and it
+ * exposes the multi-category, multi-location targeting this shape cannot express.
+ */
+
+/** Presents an ICP in the legacy single-field config shape. */
+function icpToLegacyConfig(profile: IcpView | null) {
+  return {
+    businessType: profile?.targetCategories.join(", ") ?? "",
+    location: profile?.targetLocations.join(", ") ?? "",
+    maxResults: profile?.maxResults ?? 50,
+    enableSimulation: false,
+    headless: true,
+    lat: undefined as number | undefined,
+    lng: undefined as number | undefined,
+    radius: profile?.radiusKm ?? undefined,
+    enableDeepAnalysis: profile?.deepAnalysis ?? false,
+    /** Added fields, so a client can discover the richer interface. */
+    icpProfileId: profile?.id ?? null,
+    icpConfigured: !!profile,
+  };
+}
+
+/** Splits a legacy comma-separated field into the ICP's array form. */
+function splitLegacyList(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  return value
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 // API Routes
-app.get("/api/config", (req, res) => {
-  try {
-    // Read directly from file to be updated on client changes
-    const configPath = path.join(process.cwd(), "src/config.ts");
-    if (fs.existsSync(configPath)) {
-      // Find the CONFIG object via matching regex or serve import
-      res.json(CONFIG);
-    } else {
-      res.json({ businessType: "Dental Clinic", location: "Baner Pune", maxResults: 10 });
-    }
-  } catch (error) {
-    res.status(500).json({ error: "Failed to load config." });
-  }
-});
+app.get(
+  "/api/config",
+  resolveTenantContext,
+  requirePermission("VIEW_ANALYTICS"),
+  asyncHandler(async (req, res) => {
+    const profile = await resolveDefaultIcp(ctxOf(req));
+    res.json(icpToLegacyConfig(profile));
+  })
+);
 
-app.post("/api/config", (req, res) => {
-  try {
-    const { businessType, location, maxResults, enableSimulation, headless, lat, lng, radius } = req.body;
+app.post(
+  "/api/config",
+  resolveTenantContext,
+  requirePermission("MANAGE_BUSINESS_PROFILE"),
+  asyncHandler(async (req, res) => {
+    const ctx = ctxOf(req);
+    const { businessType, location, maxResults, radius, enableDeepAnalysis } = req.body || {};
+
     if (!businessType || !location || maxResults === undefined) {
-      return res.status(400).json({ error: "Invalid parameters" });
+      return res.status(400).json({ error: "Invalid parameters", code: "validation" });
     }
 
-    // Validate numeric bounds
-    const parsedMax = parseInt(maxResults, 10);
+    const parsedMax = parseInt(String(maxResults), 10);
     if (!Number.isFinite(parsedMax) || parsedMax < 1 || parsedMax > 5000) {
       return res.status(400).json({ error: "maxResults must be a number between 1 and 5000." });
     }
 
-    // Update current memory instance (source of truth for the running scraper)
-    CONFIG.businessType = String(businessType);
-    CONFIG.location = String(location);
-    CONFIG.maxResults = parsedMax;
-    CONFIG.enableSimulation = Boolean(enableSimulation);
-    CONFIG.headless = Boolean(headless);
-    CONFIG.lat = lat !== undefined && lat !== null ? parseFloat(lat) : undefined;
-    CONFIG.lng = lng !== undefined && lng !== null ? parseFloat(lng) : undefined;
-    CONFIG.radius = radius !== undefined && radius !== null ? parseFloat(radius) : undefined;
+    const patch = {
+      targetCategories: splitLegacyList(businessType),
+      targetLocations: splitLegacyList(location),
+      maxResults: parsedMax,
+      ...(radius !== undefined && radius !== null && Number.isFinite(parseFloat(String(radius)))
+        ? { radiusKm: parseFloat(String(radius)) }
+        : {}),
+      ...(enableDeepAnalysis !== undefined ? { deepAnalysis: Boolean(enableDeepAnalysis) } : {}),
+    };
 
-    // Persist a JSON override that is reloaded on startup (works everywhere).
-    persistConfigOverride();
+    const existing = await resolveDefaultIcp(ctx);
+    const profile = existing
+      ? await updateIcpProfile(ctx, existing.id, patch)
+      : await createIcpProfile(ctx, { name: "Default search", ...patch });
 
-    // In development, also rewrite the source config for convenience. This is
-    // skipped in production where the source tree is typically read-only.
-    if (!env.isProduction) {
-      try {
-        const configPath = path.join(process.cwd(), "src/config.ts");
-        const newContent = `/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
+    logger.info(
+      `Discovery settings updated for workspace ${ctx.tenantId}: ` +
+        `${patch.targetCategories.join(", ")} in ${patch.targetLocations.join(", ")} (max ${parsedMax}).`
+    );
+
+    res.json({ success: true, config: icpToLegacyConfig(profile ?? null) });
+  })
+);
+
+/**
+ * GET /api/processed — businesses this workspace has already discovered.
+ *
+ * Used to return `processed-leads.json`, a single file with no tenant dimension,
+ * to any authenticated caller. That disclosed every workspace's prospect list:
+ * business names, addresses and phone numbers harvested by other customers of the
+ * platform. It now reads the tenant-scoped table and requires lead access.
  */
+app.get(
+  "/api/processed",
+  resolveTenantContext,
+  requirePermission("VIEW_LEADS"),
+  asyncHandler(async (req, res) => {
+    const limit = parseInt(String(req.query.limit ?? "100"), 10);
+    const offset = parseInt(String(req.query.offset ?? "0"), 10);
+    const page = await listDiscovered(ctxOf(req), {
+      limit: Number.isFinite(limit) ? limit : 100,
+      offset: Number.isFinite(offset) ? offset : 0,
+    });
+    res.json(page);
+  })
+);
 
-import { Config } from "./types";
-
-export const CONFIG: Config = {
-  businessType: ${JSON.stringify(CONFIG.businessType)},
-  location: ${JSON.stringify(CONFIG.location)},
-  maxResults: ${CONFIG.maxResults},
-  enableSimulation: ${CONFIG.enableSimulation},
-  headless: ${CONFIG.headless},
-  lat: ${CONFIG.lat !== undefined ? CONFIG.lat : "undefined"},
-  lng: ${CONFIG.lng !== undefined ? CONFIG.lng : "undefined"},
-  radius: ${CONFIG.radius !== undefined ? CONFIG.radius : "undefined"}
-};
-`;
-        fs.writeFileSync(configPath, newContent, "utf8");
-      } catch (err) {
-        logger.warn(`Could not rewrite src/config.ts (non-fatal): ${(err as Error).message}`);
-      }
-    }
-
-    logger.info(`Configuration updated: ${CONFIG.businessType} in ${CONFIG.location} (max: ${CONFIG.maxResults}, coords: ${CONFIG.lat},${CONFIG.lng}, radius: ${CONFIG.radius}km)`);
-    res.json({ success: true, config: CONFIG });
-  } catch (error) {
-    res.status(500).json({ error: "Failed to write configuration file." });
-  }
-});
-
-app.get("/api/processed", (req, res) => {
-  const leads = duplicateChecker.loadLeads();
-  res.json(leads);
-});
-
-app.get("/api/failed", (req, res) => {
+/**
+ * GET /api/failed — webhook delivery failures.
+ *
+ * `failed-leads.json` is a deployment-wide store holding lead records from every
+ * workspace, so it cannot be tenant-scoped without the delivery pipeline moving
+ * to the database. Until Phase 6 does that, it is an operator diagnostic and
+ * requires admin rather than leaking across workspaces.
+ */
+app.get("/api/failed", requireAuth, requireAdmin, (req, res) => {
   const leads = loadFailedLeads();
   res.json(leads);
 });
 
-app.get("/api/logs", (req, res) => {
+/**
+ * GET /api/logs — the process log.
+ *
+ * Contains every workspace's search queries and discovered business names, so it
+ * is operator-only. The per-workspace equivalent is GET /api/status and
+ * GET /api/jobs, which report from the tenant's own job rows.
+ */
+app.get("/api/logs", requireAuth, requireAdmin, (req, res) => {
   const logs = logger.readLogs();
   res.json({ logs });
 });
@@ -589,9 +669,62 @@ app.post(
   asyncHandler(async (req, res) => {
     const ctx = ctxOf(req);
 
-    // Per-run copy of the search criteria. Mutating this cannot affect any other
-    // workspace, which is the whole point of taking a copy.
-    const criteria: ScrapeCriteria = { ...CONFIG, ...readTenantCriteria(req.body) };
+    /*
+     * Per-run criteria, resolved in this order:
+     *   1. the workspace's default ICP — the multi-category, multi-location
+     *      targeting it actually configured;
+     *   2. anything explicitly overridden in the request body;
+     *   3. the compile-time CONFIG, for the fields neither supplies.
+     *
+     * CONFIG is last and is only a source of defaults. It used to be the source
+     * of truth: a shared mutable object holding one vertical and one city for the
+     * whole deployment, which any tenant could redirect mid-run.
+     */
+    const icpProfile = await resolveDefaultIcp(ctx);
+    const overrides = readTenantCriteria(req.body);
+
+    const criteria: ScrapeCriteria = {
+      ...CONFIG,
+      ...(icpProfile
+        ? {
+            categories: icpProfile.targetCategories,
+            locations: icpProfile.targetLocations,
+            excludeCategories: icpProfile.excludeCategories,
+            excludeKeywords: icpProfile.excludeKeywords,
+            minRating: icpProfile.minRating,
+            minReviews: icpProfile.minReviews,
+            maxResults: icpProfile.maxResults,
+            radius: icpProfile.radiusKm ?? undefined,
+            enableDeepAnalysis: icpProfile.deepAnalysis,
+            icpProfileId: icpProfile.id,
+            // Kept in sync so logs, the sheet tab name and the generated list
+            // name still describe the run.
+            businessType: icpProfile.targetCategories.join(", ") || CONFIG.businessType,
+            location: icpProfile.targetLocations.join(", ") || CONFIG.location,
+          }
+        : {}),
+      ...overrides,
+    };
+
+    // An explicit businessType/location override replaces the ICP's arrays
+    // rather than sitting alongside them, otherwise the override would be
+    // silently ignored in favour of the profile.
+    if (overrides.businessType !== undefined) {
+      criteria.categories = overrides.businessType.split(",").map((s) => s.trim()).filter(Boolean);
+    }
+    if (overrides.location !== undefined) {
+      criteria.locations = overrides.location.split(",").map((s) => s.trim()).filter(Boolean);
+    }
+
+    if (!criteria.categories?.length || !criteria.locations?.length) {
+      return res.status(400).json({
+        error:
+          "There is nothing to search for yet. Set target categories and locations on your " +
+          "customer profile, or send businessType and location with this request.",
+        code: "icp_incomplete",
+        icpConfigured: !!icpProfile,
+      });
+    }
 
     // ── Plan enforcement: monthly lead quota ──
     const ent = entOf(req);
@@ -664,14 +797,72 @@ app.post(
        * process) can read it. Throttled to one write every 2s: the scraper
        * reports per lead, and each write is a round trip to a remote database.
        */
+      /*
+       * The workspace's scoring configuration and dedupe history, resolved once
+       * per run and handed to the scraper.
+       *
+       * The scraper never touches the database: it receives the queries, the
+       * filter, the duplicate check and the scorer as functions. That boundary is
+       * why it has no tenant concept to get wrong, and it is the fix for the
+       * original design where the module owned its own state and that state was
+       * therefore process-global.
+       */
+      const ruleSet = await resolveActiveRuleSet(ctx);
+      const seenFingerprints = await loadSeenFingerprints(ctx);
+      const icpFilters = {
+        excludeCategories: criteria.excludeCategories ?? [],
+        excludeKeywords: criteria.excludeKeywords ?? [],
+        minRating: criteria.minRating ?? null,
+        minReviews: criteria.minReviews ?? null,
+      };
+
+      /** Businesses this run examined, written back after the scrape. */
+      const seenThisRun: {
+        businessName: string;
+        address: string;
+        phone: string;
+        category: string;
+        kept: boolean;
+      }[] = [];
+
+      const plan: DiscoveryPlan = {
+        queries: buildSearchQueries(criteria.categories ?? [], criteria.locations ?? []),
+        tenantId: ctx.tenantId,
+        userId: scrapingUserId,
+        icpProfileId: criteria.icpProfileId ?? null,
+        filter: (candidate) => passesIcpFilters(candidate, icpFilters),
+        isDuplicate: (businessName, address) =>
+          seenFingerprints.has(fingerprintOf(businessName, address)),
+        onSeen: (info) => {
+          // Buffered rather than written per business: a discovery run examines
+          // hundreds, and one round trip each to a remote database that is known
+          // to drop connections would be both slow and fragile.
+          seenThisRun.push(info);
+          seenFingerprints.add(fingerprintOf(info.businessName, info.address));
+        },
+        score: (lead) => scoreLead(lead, ruleSet),
+      };
+
+      logger.info(
+        `Discovery for workspace ${ctx.tenantId}: ${plan.queries!.length} quer(y|ies), ` +
+          `scoring with "${ruleSet.name}" v${ruleSet.version} (max ${ruleSet.maxScore}), ` +
+          `${seenFingerprints.size} business(es) already known.`
+      );
+
       let lastProgressWrite = 0;
-      const result = await runScraper(criteria, token, customWebhookUrl, (progress) => {
-        const now = Date.now();
-        const isFinalStage = progress.current >= progress.total && progress.total > 0;
-        if (now - lastProgressWrite < 2000 && !isFinalStage) return;
-        lastProgressWrite = now;
-        void updateJobProgress(job.id, progress as any);
-      });
+      const result = await runScraper(
+        criteria,
+        token,
+        customWebhookUrl,
+        (progress) => {
+          const now = Date.now();
+          const isFinalStage = progress.current >= progress.total && progress.total > 0;
+          if (now - lastProgressWrite < 2000 && !isFinalStage) return;
+          lastProgressWrite = now;
+          void updateJobProgress(job.id, progress as any);
+        },
+        plan
+      );
 
       // Persist harvested leads, then charge the monthly quota against what was
       // actually stored so the CRM count and quota never diverge.
@@ -693,17 +884,74 @@ app.post(
               // code paths that have not migrated yet.
               tenantId: ctx.tenantId,
               userId: scrapingUserId,
+              icpProfileId: criteria.icpProfileId ?? null,
             },
           });
           listCreated = true;
 
-          // Insert leads one-by-one so a single bad row can't drop the batch.
-          for (const lead of result.leads) {
+          /*
+           * ICP fit, judged for the whole batch before persisting.
+           *
+           * Separate from the lead score on purpose: the score says how much
+           * opportunity a business represents, fit says whether it is the right
+           * kind of customer at all. Batched because it is a short comparison
+           * and one request per lead would dominate the run.
+           *
+           * Non-fatal — leads persist unscored for fit rather than not at all.
+           */
+          const fitByRef = new Map<string, { fit: number | null; reason: string }>();
+          if (icpProfile) {
             try {
-              await prisma.lead.create({
-                data: { ...appLeadToDbInput(lead, leadList.id, scrapingUserId), tenantId: ctx.tenantId },
+              const business = await buildBusinessContext(ctx);
+              const sellerSummary = [
+                business.businessName,
+                business.description,
+                business.products.map((p) => p.name).join(", "),
+              ]
+                .filter(Boolean)
+                .join(" — ");
+
+              const verdicts = await scoreFit(
+                ctx,
+                result.leads.map((lead, index) => ({
+                  ref: String(index),
+                  businessName: lead.businessName,
+                  category: lead.category,
+                  address: lead.address,
+                  rating: lead.rating,
+                  reviews: lead.reviews,
+                })),
+                icpProfile,
+                { sellerSummary: sellerSummary || null }
+              );
+              for (const [ref, verdict] of verdicts) {
+                fitByRef.set(ref, { fit: verdict.fit, reason: verdict.reason });
+              }
+            } catch (fitErr: any) {
+              logger.warn(`ICP fit scoring skipped for this run: ${fitErr?.message || fitErr}`);
+            }
+          }
+
+          // Insert leads one-by-one so a single bad row can't drop the batch.
+          for (const [index, lead] of result.leads.entries()) {
+            try {
+              const fit = fitByRef.get(String(index));
+              const created = await prisma.lead.create({
+                data: {
+                  ...appLeadToDbInput(lead, leadList.id, scrapingUserId),
+                  tenantId: ctx.tenantId,
+                  icpProfileId: criteria.icpProfileId ?? null,
+                  ...(fit && fit.fit !== null
+                    ? { icpFitScore: fit.fit, icpFitReason: fit.reason }
+                    : {}),
+                },
               });
               persistedCount++;
+
+              // Point the dedupe record at the stored lead, so the history can
+              // answer "which lead did this business become".
+              const seen = seenThisRun.find((s) => s.businessName === lead.businessName);
+              if (seen) (seen as any).leadId = created.id;
             } catch (leadErr: any) {
               logger.warn(`CRM: Skipped lead "${lead.businessName}" — ${leadErr.message}`);
             }
@@ -731,6 +979,25 @@ app.post(
         await notificationService.notifyScraperComplete(scrapingUserId, 0);
       }
 
+      /*
+       * Write the run's sightings, including the businesses that were filtered
+       * out. Remembering a rejection is what stops the next run spending four
+       * page loads to reach the same conclusion, and it is why this records
+       * everything examined rather than only what was kept.
+       */
+      if (seenThisRun.length > 0) {
+        await recordManyDiscovered(
+          ctx,
+          seenThisRun.map((s) => ({
+            businessName: s.businessName,
+            address: s.address,
+            phone: s.phone,
+            category: s.category,
+            leadId: (s as any).leadId ?? null,
+          }))
+        );
+      }
+
       await finishJob(job.id, token.isCancelled ? "cancelled" : "completed", {
         result: {
           scannedCount: result.scannedCount,
@@ -739,6 +1006,12 @@ app.post(
           failedCount: result.failedCount,
           leadsFound: result.leads.length,
           leadsPersisted: persistedCount,
+          scoringRuleSet: ruleSet.name,
+          scoringVersion: ruleSet.version,
+          scoreMax: ruleSet.maxScore,
+          icpProfileId: criteria.icpProfileId ?? null,
+          examined: seenThisRun.length,
+          excluded: seenThisRun.filter((s) => !s.kept).length,
         },
       });
     } catch (error) {
@@ -860,21 +1133,31 @@ app.post("/api/test-webhook", async (req, res) => {
   }
 });
 
-app.post("/api/clear-leads", (req, res) => {
-  try {
-    const processedPath = path.join(process.cwd(), "processed-leads.json");
-    const failedPath = path.join(process.cwd(), "failed-leads.json");
-    
-    writeJsonAtomic(processedPath, []);
-    writeJsonAtomic(failedPath, []);
-    logger.clear();
-    logger.success("Processed and Failed Lead Caches have been successfully reset!");
-    
-    res.json({ success: true, message: "Lead caches cleared successfully." });
-  } catch (error) {
-    res.status(500).json({ error: "Failed to reset lead caches." });
-  }
-});
+/**
+ * POST /api/clear-leads — forget this workspace's discovery history.
+ *
+ * Previously truncated the shared `processed-leads.json` and `failed-leads.json`
+ * and cleared the process log, for every workspace at once, for any authenticated
+ * caller. It now deletes only the caller's own discovered-business records, which
+ * is what the button was for: letting a previously-seen business be found again.
+ *
+ * Requires DELETE_LEADS rather than a lesser permission because the effect is
+ * destructive to the workspace's own history, and `member` should not be able to
+ * make a run re-harvest and re-charge quota for businesses already seen.
+ */
+app.post(
+  "/api/clear-leads",
+  resolveTenantContext,
+  requirePermission("DELETE_LEADS"),
+  asyncHandler(async (req, res) => {
+    const cleared = await clearDiscovered(ctxOf(req));
+    res.json({
+      success: true,
+      cleared,
+      message: `Forgot ${cleared} previously discovered business${cleared === 1 ? "" : "es"}.`,
+    });
+  })
+);
 
 async function updateLeadOutreachStatus(businessName: string, channel: "email" | "whatsapp", status: "SENT" | "FAILED", mapsUrl?: string, customWebhookUrl?: string) {
   try {
@@ -1083,8 +1366,17 @@ app.get("/api/geocode/reverse", async (req, res) => {
   }
 });
 
-// Data Reset endpoint
-app.post("/api/reset-data", (req, res) => {
+/**
+ * POST /api/reset-data — operator-only wipe of the deployment-wide JSON stores.
+ *
+ * Truncates files shared by every workspace and stops whatever campaign is
+ * running, so it is destructive across tenants by construction. It was reachable
+ * by any authenticated user; it now requires admin.
+ *
+ * A tenant wanting to reset their own state wants POST /api/clear-leads, which is
+ * scoped to their workspace.
+ */
+app.post("/api/reset-data", requireAuth, requireAdmin, (req, res) => {
   try {
     const processedPath = path.join(process.cwd(), "processed-leads.json");
     const failedPath = path.join(process.cwd(), "failed-leads.json");

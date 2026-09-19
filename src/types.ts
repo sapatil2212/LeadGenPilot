@@ -53,6 +53,22 @@ export interface Lead {
   // Conversation lifecycle: set to REPLIED once the lead replies to outreach.
   conversationStatus?: "AWAITING_REPLY" | "REPLIED" | "CLOSED";
 
+  // ── Score provenance (Phase 4) ──
+  // `leadScore` on its own cannot be read as a proportion or compared against a
+  // lead scored under different weights. These say what it was out of, which
+  // rules fired, and which version of which rule set produced it.
+  scoreMax?: number;
+  scoreBreakdown?: { signal: string; label: string; points: number }[];
+  scoringRuleSetId?: string;
+  scoringVersion?: number;
+
+  // ── ICP fit (Phase 4) ──
+  // Whether this is the right kind of customer, which is a different question
+  // from how much opportunity it represents.
+  icpProfileId?: string;
+  icpFitScore?: number;
+  icpFitReason?: string;
+
   // ── AI Growth Intelligence fields (optional, additive) ──
   // Populated only when deep analysis is enabled. All optional so existing
   // consumers and the CRM/DB mapping remain fully backward compatible.
@@ -83,6 +99,14 @@ export interface LeadList {
 }
 
 export interface Config {
+  /**
+   * Legacy single-field targeting, kept for the CLI entry point and for
+   * displaying what a run searched for.
+   *
+   * `categories` and `locations` below are the real inputs: a workspace targets
+   * several kinds of business across several places, which one comma-separated
+   * string could only express by guessing where the boundaries were.
+   */
   businessType: string;
   location: string;
   maxResults: number;
@@ -95,4 +119,18 @@ export interface Config {
   enableDeepAnalysis?: boolean;
   /** Also discover YouTube/TikTok/Threads during deep analysis (extra tabs). */
   deepAnalysisExtraSocial?: boolean;
+
+  // ── ICP-derived targeting (Phase 4) ──
+  /** Business kinds to search for, each stated in full. */
+  categories?: string[];
+  /** Places to search. Every category is searched in every location. */
+  locations?: string[];
+  /** Categories a search for the above would wrongly return. */
+  excludeCategories?: string[];
+  excludeKeywords?: string[];
+  /** Reputation floor, applied before any analyzer runs. */
+  minRating?: number | null;
+  minReviews?: number | null;
+  /** The profile this run came from, recorded on the lead list and the leads. */
+  icpProfileId?: string | null;
 }

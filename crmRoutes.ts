@@ -108,6 +108,23 @@ function dbLeadToAppLead(l: any): LeadType & { id: string; listId: string; notes
     lat: l.lat ?? undefined,
     lng: l.lng ?? undefined,
     notes: l.notes ?? undefined,
+    // Score provenance. Without scoreMax a stored leadScore cannot be read as a
+    // proportion, which is why the dashboard could only ever show a bare number.
+    scoreMax: l.scoreMax ?? undefined,
+    scoreBreakdown: l.scoreBreakdown
+      ? (() => {
+          try {
+            return JSON.parse(l.scoreBreakdown);
+          } catch {
+            return undefined;
+          }
+        })()
+      : undefined,
+    scoringRuleSetId: l.scoringRuleSetId ?? undefined,
+    scoringVersion: l.scoringVersion ?? undefined,
+    icpProfileId: l.icpProfileId ?? undefined,
+    icpFitScore: l.icpFitScore ?? undefined,
+    icpFitReason: l.icpFitReason ?? undefined,
   };
 }
 
@@ -156,6 +173,14 @@ function appLeadToDbInput(lead: LeadType, listId: string, userId?: string | null
     conversationStatus: lead.conversationStatus ?? null,
     lat: lead.lat ?? null,
     lng: lead.lng ?? null,
+    // Score provenance, so a stored score can be read as a proportion and traced
+    // to the rule set version that produced it. Null for leads created by hand
+    // through the CRM, which are not scored.
+    scoreMax: typeof lead.scoreMax === "number" ? lead.scoreMax : null,
+    scoreBreakdown: lead.scoreBreakdown ? JSON.stringify(lead.scoreBreakdown) : null,
+    scoringRuleSetId: lead.scoringRuleSetId ?? null,
+    scoringVersion: typeof lead.scoringVersion === "number" ? lead.scoringVersion : null,
+    scoredAt: typeof lead.leadScore === "number" ? new Date() : null,
   };
 }
 

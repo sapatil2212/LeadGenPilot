@@ -45,6 +45,9 @@ model User {
   uploadedDocuments KnowledgeDocument[]
   aiConversations   AiConversation[]
 
+  icpProfiles     IcpProfile[]
+  scoringRuleSets ScoringRuleSet[]
+
   @@map("users")
 }
 
@@ -95,6 +98,10 @@ model Tenant {
   knowledgeItems    KnowledgeItem[]
   aiConversations   AiConversation[]
   aiMessages        AiMessage[]
+
+  icpProfiles          IcpProfile[]
+  scoringRuleSets      ScoringRuleSet[]
+  discoveredBusinesses DiscoveredBusiness[]
 
   @@index([status])
   @@map("tenants")
@@ -288,12 +295,19 @@ model LeadList {
   tenantId String? @map("tenant_id")
   tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  /// The ICP this list was discovered for, when it came from a targeted run.
+  /// SetNull rather than Cascade: deleting a profile must not delete the leads
+  /// found with it.
+  icpProfileId String?     @map("icp_profile_id")
+  icpProfile   IcpProfile? @relation(fields: [icpProfileId], references: [id], onDelete: SetNull)
+
   leads Lead[]
 
   @@index([userId])
   @@index([scrapedAt])
   @@index([tenantId])
   @@index([tenantId, scrapedAt])
+  @@index([icpProfileId])
   @@map("lead_lists")
 }
 
@@ -342,6 +356,31 @@ model Lead {
   // Conversation lifecycle: REPLIED once the lead responds to outreach.
   conversationStatus String? @map("conversation_status")
 
+  // ── Score provenance (Phase 4) ──
+  //
+  // `leadScore` alone is not interpretable. The pre-Phase-4 scorer had a
+  // reachable maximum of 170 that appeared nowhere, so a stored 95 could not be
+  // read as a proportion, could not be compared against a lead scored under
+  // different weights, and could not be explained to the user. These columns
+  // make a score self-describing: what it was out of, which rules fired, and
+  // which version of which rule set produced it.
+  scoreMax          Int?    @map("score_max")
+  /// JSON array of { signal, label, points } for the rules that fired.
+  scoreBreakdown    String? @map("score_breakdown") @db.Text
+  scoringRuleSetId  String? @map("scoring_rule_set_id")
+  scoringVersion    Int?    @map("scoring_version")
+
+  /// Fit against the workspace's ICP, 0-100, with the reason given.
+  /// Separate from `leadScore`: that measures opportunity signals on the
+  /// business, this measures whether it is even the right kind of customer. A
+  /// dentist with no website scores high on the first and zero on the second
+  /// for a seller of hospital equipment.
+  icpProfileId String? @map("icp_profile_id")
+  icpFitScore  Int?    @map("icp_fit_score")
+  icpFitReason String? @map("icp_fit_reason") @db.Text
+
+  scoredAt DateTime? @map("scored_at")
+
   // Geo coords
   lat Float?
   lng Float?
@@ -373,6 +412,10 @@ model Lead {
   @@index([tenantId, leadScore])
   @@index([tenantId, leadPriority])
   @@index([tenantId, createdAt])
+  // "Which leads still need scoring under the current rule set?" and
+  // "re-score everything scored by version N" are both tenant-scoped scans.
+  @@index([tenantId, scoringRuleSetId])
+  @@index([tenantId, icpFitScore])
   @@map("leads")
 }
 
@@ -704,4 +747,180 @@ model AiMessage {
   @@index([conversationId, createdAt])
   @@index([tenantId])
   @@map("ai_messages")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TARGETING AND SCORING
+//
+// Who this workspace wants to reach, and how a discovered business is judged
+// against that.
+//
+// Both were previously hardcoded, and in opposite ways. Targeting lived in a
+// mutable module-level `CONFIG` object holding one vertical and one city, shared
+// by the whole deployment — any tenant saving a search changed what every other
+// tenant's next run looked for. Scoring lived in a fixed function whose rules
+// only make sense for one kind of seller: it awards 50 points for "has no
+// website", which identifies a prospect for a web agency and is meaningless to a
+// medical equipment manufacturer selling to hospitals.
+//
+// Making both tenant-owned rows is what lets the product serve any business
+// rather than the one it was written for.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A workspace's ideal customer profile: who to look for, and where.
+///
+/// Also carries the discovery defaults that used to live in `CONFIG`, so
+/// "run discovery for my ICP" needs no other input.
+model IcpProfile {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  name        String
+  description String? @db.Text
+
+  /// JSON string arrays. Free-form values, never enums: the categories a
+  /// medical equipment manufacturer targets ("Multispecialty Hospital",
+  /// "Diagnostic Centre") have nothing in common with a gym's, and any fixed
+  /// vocabulary would exclude somebody's actual market.
+  targetCategories String? @map("target_categories") @db.Text
+  targetIndustries String? @map("target_industries") @db.Text
+  /// Places to search, e.g. ["Pune", "Nashik"]. One run fans out across them.
+  targetLocations  String? @map("target_locations") @db.Text
+  /// Roles worth reaching inside a target, e.g. ["Hospital Administrator"].
+  decisionMakerRoles String? @map("decision_maker_roles") @db.Text
+
+  /// Categories or name fragments to drop from results, e.g. ["pharmacy"].
+  /// Exclusions matter as much as inclusions: a search for "clinic" returns
+  /// competitors as readily as prospects.
+  excludeCategories String? @map("exclude_categories") @db.Text
+  excludeKeywords   String? @map("exclude_keywords") @db.Text
+
+  /// Signals a lead MUST have to be worth keeping, and ones that merely help.
+  /// Stored as JSON arrays of signal ids known to src/scoring/signals.ts.
+  requiredSignals  String? @map("required_signals") @db.Text
+  preferredSignals String? @map("preferred_signals") @db.Text
+
+  /// Size and reputation hints used by fit scoring.
+  minRating  Float? @map("min_rating")
+  minReviews Int?   @map("min_reviews")
+
+  // ── Discovery defaults (formerly the global CONFIG) ──
+  maxResults   Int     @default(50) @map("max_results")
+  /// Search radius in km from the resolved centre of each target location.
+  radiusKm     Float?  @map("radius_km")
+  /// Opt-in deep analysis. Costs time and quota, so it is off by default.
+  deepAnalysis Boolean @default(false) @map("deep_analysis")
+
+  /// Exactly one profile per workspace is the default. Enforced in the service,
+  /// not by a partial unique index, which MySQL does not support.
+  isDefault Boolean @default(false) @map("is_default")
+  status    String  @default("active")
+
+  /// Provenance when a profile was proposed by the AI rather than typed.
+  /// Lets a surprising target category be traced to the prompt that suggested it.
+  aiConfidence      Float?    @map("ai_confidence")
+  lastSuggestedAt   DateTime? @map("last_suggested_at")
+  lastPromptName    String?   @map("last_prompt_name")
+  lastPromptVersion Int?      @map("last_prompt_version")
+
+  createdById String? @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdBy User?  @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  leadLists LeadList[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, isDefault])
+  @@index([createdById])
+  @@map("icp_profiles")
+}
+
+/// A workspace's lead scoring configuration.
+///
+/// Rules are JSON rather than a child table because they are always read and
+/// evaluated as a complete set — a partial rule set scores nothing meaningful —
+/// and a set is around a dozen entries. Each rule names a `signal` from the
+/// registry in src/scoring/signals.ts, so a rule set is data selecting among
+/// known extractors, never anything executable.
+///
+/// `version` is bumped on every edit and stamped onto each lead scored with it.
+/// Without that, changing a weight silently makes yesterday's scores
+/// incomparable with today's while both sit in the same table.
+model ScoringRuleSet {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  name        String
+  description String? @db.Text
+  version     Int     @default(1)
+
+  /// JSON array of { id, signal, label, points, when?, enabled }.
+  rules String @db.Text
+
+  /// Priority bands as FRACTIONS of the achievable maximum, not absolute
+  /// points. The old scorer compared an absolute 100 and 60 against a maximum of
+  /// 170, so its "HOT" band silently meant 59% and editing any weight moved the
+  /// bands without anyone touching them.
+  hotThreshold  Float @default(0.58) @map("hot_threshold")
+  warmThreshold Float @default(0.35) @map("warm_threshold")
+
+  isDefault Boolean @default(false) @map("is_default")
+  /// True for the seeded rule set that reproduces the pre-Phase-4 scorer.
+  isBuiltIn Boolean @default(false) @map("is_built_in")
+  status    String  @default("active")
+
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdBy User?  @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, status])
+  @@index([tenantId, isDefault])
+  @@index([createdById])
+  @@map("scoring_rule_sets")
+}
+
+/// Businesses this workspace has already discovered, for deduplication.
+///
+/// Replaces `processed-leads.json`: one file in the process working directory,
+/// with no tenant dimension, re-parsed and linearly scanned for every candidate
+/// lead. Two consequences beyond the obvious performance one — one workspace's
+/// harvest suppressed the same business for every other workspace, and
+/// `GET /api/processed` served the whole file to any authenticated caller,
+/// which disclosed every tenant's prospect list.
+///
+/// The key is a normalised name+address digest rather than the raw strings, so
+/// "Dr. Patil's Clinic, 12 Main St." and "dr patils clinic 12 main st" collide
+/// as they should. Unique per workspace, so the check is an index lookup.
+model DiscoveredBusiness {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  /// SHA-256 of the normalised name + address.
+  fingerprint String
+
+  businessName String  @map("business_name")
+  address      String? @db.Text
+  phone        String?
+  category     String?
+
+  /// Where it ended up, when it was kept. Null for a business that was seen and
+  /// filtered out — still worth remembering so it is not re-analysed.
+  leadId String? @map("lead_id")
+
+  /// How many discovery runs have encountered it.
+  timesSeen  Int      @default(1) @map("times_seen")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, fingerprint])
+  @@index([tenantId, lastSeenAt])
+  @@map("discovered_businesses")
 }
