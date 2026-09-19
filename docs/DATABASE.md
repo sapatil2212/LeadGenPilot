@@ -7,7 +7,7 @@
 | Engine | MySQL (remote), accessed via Prisma |
 | Active database | `leadgenerationtool` — configured in `DATABASE_URL` |
 | Schema source of truth | `prisma/schema.prisma` |
-| Migration history | `prisma/migrations/` — `0_init` applied |
+| Migration history | `prisma/migrations/` — 3 applied: `0_init`, `add_tenancy_and_jobs`, `add_business_knowledge` |
 | Drift | none (`prisma migrate diff` returns an empty migration) |
 | Data | empty, aside from Prisma's `_prisma_migrations` bookkeeping |
 
@@ -132,6 +132,47 @@ The backfill is idempotent and reports anything it cannot attribute rather than
 guessing. Rehearsed against the real Phase 0 backup: 2 workspaces, 5 lists, 52
 leads and 30 audit entries attributed, 9 audit entries correctly left
 platform-level because they have no owning user (failed sign-in attempts).
+
+## Business intelligence tables
+
+`20260919104624_add_business_knowledge` added eight tables, all `tenant_id`-scoped
+and all cascading from `tenants`, so deleting a workspace leaves none of its
+business data behind.
+
+| Table | Holds |
+|---|---|
+| `business_profiles` | one row per workspace: company facts, target customers, differentiators |
+| `business_products` / `business_services` | the catalogue, used for product-to-lead fit in Phase 4 |
+| `knowledge_documents` | an upload and its processing lifecycle |
+| `knowledge_chunks` | retrievable slices of a document, with embeddings |
+| `knowledge_items` | arbitrary labelled facts that have no column of their own |
+| `ai_conversations` / `ai_messages` | assistant threads, with per-turn provenance |
+
+Four things about the design are load-bearing rather than incidental:
+
+**Industry and business type are free text, never enums.** The platform has to
+work for any category, so "Medical Equipment Manufacturer" and "Dental Clinic"
+must be equally valid. Any hardcoded category list is a bug.
+
+**List fields are JSON string arrays on the parent row**, not child tables, because
+they are always read with the profile and never queried individually. `null` and
+`[]` mean different things: `null` is "the tenant has not told us", `[]` is "they
+told us there are none". The assistant asks in the first case and not the second.
+
+**`knowledge_chunks.embedding` is a JSON number array and similarity is computed
+in the application.** MySQL has no vector type and no ANN index, and at the scale
+this serves — hundreds of chunks per workspace — a scan is cheaper than adding a
+vector database to the deployment. Each chunk also stores `embedding_model`:
+vectors from different models are not comparable, so retrieval embeds the query
+and then compares **only** against chunks carrying the same model. Changing the
+embedding model is therefore a re-embed of old rows (`POST
+/api/knowledge/documents/:id/reprocess`) rather than silently broken search.
+
+**`knowledge_documents.status` is a status column, not a boolean.** Extraction,
+chunking and embedding are separate failure points with different fixes, and
+"which step failed" is the first thing anyone asks. `extracted_text` is kept so
+re-chunking never needs the original file — which is why the original bytes are
+not retained at all.
 
 ## Backups
 

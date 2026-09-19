@@ -46,6 +46,9 @@ import accountRoutes from "./src/accountRoutes";
 import adminRoutes from "./src/adminRoutes";
 import superAdminRoutes from "./src/superAdminRoutes";
 import productionRoutes from "./src/productionRoutes";
+import businessRoutes from "./src/business/businessRoutes";
+import knowledgeRoutes from "./src/knowledge/knowledgeRoutes";
+import assistantRoutes from "./src/assistant/assistantRoutes";
 import { connectDatabase, disconnectDatabase } from "./src/prisma";
 import crmRoutes, { appLeadToDbInput, dbLeadToAppLead } from "./crmRoutes";
 import { prisma } from "./src/prisma";
@@ -455,6 +458,18 @@ app.use("/api/crm", crmRoutes);
 
 // ── Production features (analytics, notifications, backups) ──
 app.use("/api/production", productionRoutes);
+
+/*
+ * ── Business intelligence (Phase 3) ──────────────────────────────────────────
+ *
+ * Mounted here, after apiKeyAuth and attachEntitlements, for the same reason as
+ * crmRoutes: each of these routers calls resolveTenantContext, which reads
+ * req.authUser. Mounted any earlier they would see no session and refuse every
+ * request — or worse, repeat the Phase 1 bug of treating "no user" as "no scope".
+ */
+app.use("/api/business", businessRoutes);
+app.use("/api/knowledge", knowledgeRoutes);
+app.use("/api/assistant", assistantRoutes);
 
 // API Routes
 app.get("/api/config", (req, res) => {

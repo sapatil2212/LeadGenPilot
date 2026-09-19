@@ -32,7 +32,12 @@ export {
   type BusinessExtractionInput,
   type BusinessExtractionOutput,
 } from "./businessExtraction";
-export { assistantPrompt, type AssistantInput } from "./assistant";
+export {
+  assistantPrompt,
+  type AssistantInput,
+  type AssistantBusinessContext,
+  type RetrievedChunk,
+} from "./assistant";
 
 /** All registered prompts, keyed by name. */
 export const PROMPTS = {

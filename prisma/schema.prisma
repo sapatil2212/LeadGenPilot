@@ -42,6 +42,9 @@ model User {
   memberships TenantMember[]
   jobs        Job[]
 
+  uploadedDocuments KnowledgeDocument[]
+  aiConversations   AiConversation[]
+
   @@map("users")
 }
 
@@ -83,6 +86,15 @@ model Tenant {
   integrations UserIntegration[]
   auditLogs    AuditLog[]
   jobs         Job[]
+
+  businessProfile   BusinessProfile?
+  products          BusinessProduct[]
+  services          BusinessService[]
+  knowledgeDocuments KnowledgeDocument[]
+  knowledgeChunks   KnowledgeChunk[]
+  knowledgeItems    KnowledgeItem[]
+  aiConversations   AiConversation[]
+  aiMessages        AiMessage[]
 
   @@index([status])
   @@map("tenants")
@@ -379,3 +391,317 @@ model PageView {
   @@map("page_views")
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUSINESS KNOWLEDGE
+//
+// What the tenant sells, to whom, and what makes it different. This is the
+// factual basis every later phase reads from: the ICP builder, lead scoring,
+// campaign generation and the assistant all assemble their context from these
+// rows.
+//
+// Structured fields rather than one free-text blob, deliberately. A single
+// "about the business" paragraph cannot be queried, cannot be partially
+// updated, and forces every prompt to carry the whole thing — campaign
+// generation needs the products and the differentiators, lead scoring needs the
+// target customer profile, and neither should spend its context budget on the
+// other's text.
+//
+// Every table carries tenantId and cascades from Tenant: deleting a workspace
+// must not leave its business data behind.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One per workspace. The company-level facts.
+model BusinessProfile {
+  id       String @id @default(cuid())
+  tenantId String @unique @map("tenant_id")
+
+  businessName String? @map("business_name")
+  /// Free-form rather than an enum: the platform must work for any category,
+  /// so "Medical Equipment Manufacturer" and "Dental Clinic" are equally valid.
+  industry     String?
+  businessType String? @map("business_type")
+  website      String?
+  description  String? @db.Text
+
+  /// Headquarters / primary contact location.
+  country String?
+  state   String?
+  city    String?
+
+  contactEmail String? @map("contact_email")
+  contactPhone String? @map("contact_phone")
+
+  /// JSON string arrays. Kept as arrays on one row rather than child tables
+  /// because they are always read together with the profile and never queried
+  /// individually. KnowledgeItem exists for anything that needs to be.
+  locationsServed     String? @map("locations_served") @db.Text
+  targetCustomerTypes String? @map("target_customer_types") @db.Text
+  targetIndustries    String? @map("target_industries") @db.Text
+  uniqueSellingPoints String? @map("unique_selling_points") @db.Text
+  certifications      String? @db.Text
+  decisionMakerRoles  String? @map("decision_maker_roles") @db.Text
+
+  /// Tone guidance applied to generated copy, e.g. "formal, technical".
+  brandVoice      String? @map("brand_voice") @db.Text
+  salesObjectives String? @map("sales_objectives") @db.Text
+
+  /// 0-1 completeness estimate from the last AI extraction, and the questions
+  /// it could not answer — so the UI can ask instead of the model guessing.
+  aiConfidence       Float?  @map("ai_confidence")
+  missingInformation String? @map("missing_information") @db.Text
+
+  /// Provenance of the last AI-assisted update. Lets a surprising value be
+  /// traced back to the exact prompt wording that produced it.
+  lastExtractedAt      DateTime? @map("last_extracted_at")
+  lastPromptName       String?   @map("last_prompt_name")
+  lastPromptVersion    Int?      @map("last_prompt_version")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("business_profiles")
+}
+
+/// A product the tenant sells. Drives product-to-lead fit analysis in Phase 4.
+model BusinessProduct {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  name        String
+  category    String?
+  description String? @db.Text
+
+  /// JSON string arrays.
+  keyFeatures String? @map("key_features") @db.Text
+  /// Customer types this product suits, e.g. ["Hospital","Diagnostic Centre"].
+  idealFor    String? @map("ideal_for") @db.Text
+
+  /// Free text, not a number: real price positioning is "from ₹8L" or "on
+  /// application" as often as it is a figure, and the AI must never invent one.
+  priceRange String? @map("price_range")
+
+  status String @default("active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@map("business_products")
+}
+
+/// A service the tenant offers.
+model BusinessService {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  name        String
+  category    String?
+  description String? @db.Text
+  idealFor    String? @map("ideal_for") @db.Text
+  priceRange  String? @map("price_range")
+  status      String  @default("active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@map("business_services")
+}
+
+/// An uploaded document, with its processing lifecycle.
+model KnowledgeDocument {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  title        String
+  originalName String  @map("original_name")
+  mimeType     String  @map("mime_type")
+  /// "pdf" | "docx" | "pptx" | "txt" | "md"
+  fileType     String  @map("file_type")
+  sizeBytes    Int     @map("size_bytes")
+  /// SHA-256 of the file, so re-uploading the same document is detectable.
+  checksum     String
+
+  /// Where the bytes live. Local path today; an object-store key later.
+  storagePath String? @map("storage_path") @db.Text
+
+  /// "pending" | "extracting" | "chunking" | "embedding" | "ready" | "failed"
+  ///
+  /// A status column rather than a boolean: extraction, chunking and embedding
+  /// are separate failure points, and "which step failed" is the first thing
+  /// anyone asks. The matching error is kept alongside.
+  status String  @default("pending")
+  error  String? @db.Text
+
+  /// Extracted plain text. Kept so re-chunking never requires re-parsing the
+  /// original file, which for a large PDF is the expensive part.
+  extractedText String? @map("extracted_text") @db.LongText
+  charCount     Int?    @map("char_count")
+  chunkCount    Int?    @map("chunk_count")
+
+  /// Optional knowledge category, e.g. "product_catalogue", "company_profile".
+  category String?
+
+  uploadedById String? @map("uploaded_by_id")
+  processedAt  DateTime? @map("processed_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  tenant     Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  uploadedBy User?  @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  chunks        KnowledgeChunk[]
+  derivedItems  KnowledgeItem[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+  // Explicit so MySQL reuses it for the foreign key instead of creating its own,
+  // which would then report as schema drift. See docs/DATABASE.md.
+  @@index([uploadedById])
+  // Detects a duplicate upload of the same bytes within one workspace.
+  @@index([tenantId, checksum])
+  @@map("knowledge_documents")
+}
+
+/// A retrievable slice of a document, with its embedding.
+model KnowledgeChunk {
+  id         String @id @default(cuid())
+  tenantId   String @map("tenant_id")
+  documentId String @map("document_id")
+
+  /// Position within the document, so neighbouring context can be recovered.
+  chunkIndex Int    @map("chunk_index")
+  content    String @db.Text
+  /// Rough token estimate, for assembling a prompt within a budget.
+  tokenCount Int?   @map("token_count")
+
+  /// The embedding as a JSON number array.
+  ///
+  /// MySQL has no vector type and no ANN index, so similarity is computed in
+  /// the application. At the scale this serves — hundreds of chunks per
+  /// workspace — a scan is fine, and it avoids adding a vector database to the
+  /// deployment for no benefit yet.
+  embedding String? @db.Text
+
+  /// Which model produced the embedding, and its dimensionality.
+  ///
+  /// Not decoration: vectors from different models are not comparable, so
+  /// retrieval MUST embed the query with the same model that embedded the
+  /// chunk. Storing it per chunk means changing the embedding model is a
+  /// re-embed of old rows rather than silently broken search.
+  embeddingModel String? @map("embedding_model")
+  embeddingDims  Int?    @map("embedding_dims")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  document KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([documentId, chunkIndex])
+  @@index([tenantId, embeddingModel])
+  @@map("knowledge_chunks")
+}
+
+/// A single structured fact extracted from a document or a conversation.
+///
+/// Complements BusinessProfile: the profile holds the fields the product knows
+/// it needs, while this holds arbitrary labelled facts worth remembering —
+/// warranty terms, lead times, a certification number — without a schema change
+/// for each one.
+model KnowledgeItem {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  /// "company" | "product" | "service" | "target_customer" | "location" |
+  /// "usp" | "certification" | "pricing" | "faq" | "brand_voice" | "other"
+  category String
+  label    String
+  value    String @db.Text
+
+  /// 0-1. Extraction confidence, or 1 when a human entered it.
+  confidence Float @default(1)
+  /// "user" | "document" | "conversation"
+  source     String @default("user")
+
+  sourceDocumentId String? @map("source_document_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant         Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sourceDocument KnowledgeDocument? @relation(fields: [sourceDocumentId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, category])
+  @@index([sourceDocumentId])
+  @@map("knowledge_items")
+}
+
+/// An assistant chat thread.
+model AiConversation {
+  id       String  @id @default(cuid())
+  tenantId String  @map("tenant_id")
+  userId   String? @map("user_id")
+
+  title String?
+  /// "assistant" | "onboarding" — onboarding threads drive the guided
+  /// "teach the AI about your business" flow.
+  kind  String  @default("assistant")
+
+  /// Rolling count, so history can be trimmed without a COUNT(*).
+  messageCount Int @default(0) @map("message_count")
+
+  archivedAt DateTime? @map("archived_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  tenant   Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user     User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  messages AiMessage[]
+
+  @@index([tenantId, updatedAt])
+  @@index([userId])
+  @@map("ai_conversations")
+}
+
+/// One turn in an assistant conversation.
+model AiMessage {
+  id             String @id @default(cuid())
+  tenantId       String @map("tenant_id")
+  conversationId String @map("conversation_id")
+
+  /// "user" | "assistant" | "system"
+  role    String
+  content String @db.Text
+
+  /// Which provider, model and prompt version produced an assistant turn, and
+  /// what it cost. Answers "why did it say that" and feeds Phase 9 metering.
+  provider      String?
+  model         String?
+  promptName    String? @map("prompt_name")
+  promptVersion Int?    @map("prompt_version")
+  totalTokens   Int?    @map("total_tokens")
+  latencyMs     Int?    @map("latency_ms")
+
+  /// Ids of the knowledge chunks used, as JSON. Makes an answer auditable
+  /// against the documents it was drawn from.
+  citedChunkIds String? @map("cited_chunk_ids") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@index([tenantId])
+  @@map("ai_messages")
+}
