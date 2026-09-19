@@ -84,6 +84,7 @@ import BusinessPanel from "./features/BusinessPanel";
 import KnowledgePanel from "./features/KnowledgePanel";
 import AssistantPanel from "./features/AssistantPanel";
 import TargetingPanel from "./features/TargetingPanel";
+import CampaignPanel from "./features/CampaignPanel";
 import AlertModal, { AlertModalType } from "./AlertModal";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -117,22 +118,30 @@ interface UsageInfo {
   unlimited: boolean;
 }
 
+interface WorkspaceSummary {
+  id: string;
+  name: string;
+  slug: string;
+  role: string;
+}
+
 interface AppProps {
   currentUser?: AuthedUser | null;
+  currentWorkspace?: WorkspaceSummary | null;
   entitlements?: Entitlements | null;
   usage?: UsageInfo | null;
   onLogout?: () => void;
   onRefreshAccount?: () => void;
 }
 
-export default function App({ currentUser, entitlements, usage, onLogout, onRefreshAccount }: AppProps = {}) {
+export default function App({ currentUser, currentWorkspace, entitlements, usage, onLogout, onRefreshAccount }: AppProps = {}) {
   // When entitlements are absent (auth disabled / admin), everything is unlocked.
   const canWhatsapp = entitlements ? entitlements.whatsappOutreach : true;
   const canAiInsights = entitlements ? entitlements.aiInsights : true;
   const planName = entitlements?.planName || (currentUser?.plan ? currentUser.plan : "");
   const isFreePlan = !!entitlements && !entitlements.whatsappOutreach;
   // Navigation
-  const [activeTab, setActiveTab] = useState<"dashboard" | "finder" | "leads" | "outreach" | "templates" | "reports" | "conversations" | "settings" | "business" | "knowledge" | "assistant" | "targeting">(() => {
+  const [activeTab, setActiveTab] = useState<"dashboard" | "finder" | "leads" | "outreach" | "templates" | "reports" | "conversations" | "settings" | "business" | "knowledge" | "assistant" | "targeting" | "campaigns">(() => {
     const saved = typeof window !== "undefined" ? localStorage.getItem("nexaleadai_activeTab") : null;
     return (saved as any) || "dashboard";
   });
@@ -447,6 +456,16 @@ export default function App({ currentUser, entitlements, usage, onLogout, onRefr
     document.body.removeChild(link);
   };
 
+  const fetchWorkspaceLeads = async () => {
+    const response = await fetch("/api/processed", { credentials: "include" });
+    if (!response.ok) {
+      setProcessedLeads([]);
+      return;
+    }
+    const data = await response.json();
+    setProcessedLeads(Array.isArray(data) ? data : []);
+  };
+
   // Fetch all states from the server
   const fetchData = async () => {
     try {
@@ -473,28 +492,16 @@ export default function App({ currentUser, entitlements, usage, onLogout, onRefr
         setLastResult(status.lastResult);
       }
 
-      // 3. Fetch logs
-      const logsRes = await fetch("/api/logs");
-      if (logsRes.ok) {
-        const data = await logsRes.json();
-        setTerminalLogs(data.logs);
-      }
+      // Operator-wide process logs and failed-delivery files are deliberately
+      // not loaded in a tenant dashboard. Per-workspace status comes from the
+      // tenant-scoped status/jobs endpoints.
 
-      // 4. Fetch processed leads
-      const processedRes = await fetch("/api/processed");
-      if (processedRes.ok) {
-        const data = await processedRes.json();
-        setProcessedLeads(data);
-      }
+      // 3. Fetch this workspace's full CRM leads once. Status polling below
+      // refreshes them only when a discovery run finishes.
+      await fetchWorkspaceLeads();
+      setFailedLeads([]);
 
-      // 5. Fetch failed leads
-      const failedRes = await fetch("/api/failed");
-      if (failedRes.ok) {
-        const data = await failedRes.json();
-        setFailedLeads(data);
-      }
-
-      // 6. Fetch SMTP settings
+      // 4. Fetch SMTP settings
       const smtpRes = await fetch("/api/config/smtp");
       if (smtpRes.ok) {
         const smtp = await smtpRes.json();
@@ -561,29 +568,14 @@ export default function App({ currentUser, entitlements, usage, onLogout, onRefr
         setIsRunning((prev) => {
           // When a scrape finishes, refresh the account so the lead-usage
           // meter reflects the leads just consumed.
-          if (prev && !status.isRunning) onRefreshAccount?.();
+          if (prev && !status.isRunning) {
+            onRefreshAccount?.();
+            void fetchWorkspaceLeads();
+          }
           return status.isRunning;
         });
         setWebhookConfigured(status.webhookUrlConfigured);
         setLastResult(status.lastResult);
-      }
-
-      const logsRes = await fetch("/api/logs");
-      if (logsRes.ok) {
-        const data = await logsRes.json();
-        setTerminalLogs(data.logs);
-      }
-
-      const processedRes = await fetch("/api/processed");
-      if (processedRes.ok) {
-        const data = await processedRes.json();
-        setProcessedLeads(data);
-      }
-      
-      const failedRes = await fetch("/api/failed");
-      if (failedRes.ok) {
-        const data = await failedRes.json();
-        setFailedLeads(data);
       }
 
       const waRes = await fetch("/api/whatsapp/status");
@@ -2306,7 +2298,8 @@ export default function App({ currentUser, entitlements, usage, onLogout, onRefr
               { tab: "targeting", icon: Target, label: "Targeting", pulse: false, badge: undefined },
               { tab: "finder", icon: MapPin, label: "Lead Finder", pulse: isRunning, badge: undefined },
               { tab: "leads", icon: Database, label: "Leads", pulse: false, badge: totalProcessed as number | undefined },
-              { tab: "outreach", icon: Send, label: "Campaigns", pulse: campaignRunning, badge: undefined },
+              { tab: "campaigns", icon: Send, label: "Campaigns", pulse: campaignRunning, badge: undefined },
+              { tab: "outreach", icon: Send, label: "Legacy Campaigns", pulse: campaignRunning, badge: undefined },
               { tab: "conversations", icon: MessageSquare, label: "Inbox", pulse: conversationsUnread > 0, badge: conversationsUnread > 0 ? conversationsUnread : undefined },
               { tab: "templates", icon: Layout, label: "Templates", pulse: false, badge: undefined },
               { tab: "reports", icon: BarChart3, label: "Reports", pulse: campaignRunning, badge: undefined },
@@ -2412,11 +2405,13 @@ export default function App({ currentUser, entitlements, usage, onLogout, onRefr
             {activeTab === "knowledge" && <Library className="h-5 w-5 text-indigo-500" />}
             {activeTab === "assistant" && <Bot className="h-5 w-5 text-indigo-500" />}
             {activeTab === "targeting" && <Target className="h-5 w-5 text-indigo-500" />}
+            {activeTab === "campaigns" && <Send className="h-5 w-5 text-indigo-500" />}
             <span className={`text-base font-semibold tracking-tight ${isLight ? "text-slate-800" : "text-white"}`}>
               {activeTab === "dashboard" && "Dashboard Overview"}
               {activeTab === "finder" && "Geo Lead Finder"}
               {activeTab === "leads" && "Leads Database"}
-              {activeTab === "outreach" && "Outreach Campaigns"}
+              {activeTab === "outreach" && "Legacy Campaigns"}
+              {activeTab === "campaigns" && "Campaigns"}
               {activeTab === "templates" && "Outreach Templates"}
               {activeTab === "reports" && "Outreach Reports"}
               {activeTab === "conversations" && "Conversations"}
@@ -2429,6 +2424,13 @@ export default function App({ currentUser, entitlements, usage, onLogout, onRefr
           </div>
 
           <div className="flex items-center gap-3">
+            {currentWorkspace && (
+              <div className={`hidden sm:flex items-center gap-2 rounded-lg border px-3 py-1.5 ${isLight ? "border-slate-200 bg-slate-50 text-slate-700" : "border-slate-700 bg-slate-900 text-slate-200"}`} title={currentWorkspace.slug}>
+                <Building2 className="h-4 w-4 text-indigo-500" />
+                <span className="max-w-48 truncate text-xs font-semibold">{currentWorkspace.name}</span>
+                <span className="text-[10px] capitalize text-slate-400">{currentWorkspace.role}</span>
+              </div>
+            )}
             <button 
               onClick={() => setTheme(isLight ? "dark" : "light")}
               className={`p-1.5 rounded-lg border ${borderSubtle} ${isLight ? "hover:bg-slate-100 text-slate-500 hover:text-slate-800" : "hover:bg-slate-800/50 text-slate-400 hover:text-white"} transition-all cursor-pointer`}
@@ -4788,6 +4790,13 @@ export default function App({ currentUser, entitlements, usage, onLogout, onRefr
           {activeTab === "targeting" && (
             <div className="animate-fadeIn">
               <TargetingPanel isLight={isLight} />
+            </div>
+          )}
+
+          {/* TAB 13: CAMPAIGNS (Phase 5: generation with approval) */}
+          {activeTab === "campaigns" && (
+            <div className="animate-fadeIn">
+              <CampaignPanel isLight={isLight} />
             </div>
           )}
 

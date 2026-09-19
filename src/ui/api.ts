@@ -346,3 +346,42 @@ export interface ScorePreview {
   breakdown: { signal: string; label: string; points: number }[];
   ruleSetVersion: number;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 5: Campaign generation with approval
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface CampaignView {
+  id: string;
+  name: string;
+  status: string;
+  sourceType: string;
+  sourceListId: string | null;
+  channels: { email: boolean; whatsapp: boolean };
+  totalMessages: number;
+  pendingCount: number;
+  approvedCount: number;
+  rejectedCount: number;
+  sentCount: number;
+  failedCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CampaignMessageView {
+  id: string;
+  businessName: string;
+  recipient: string;
+  channel: string;
+  subject: string | null;
+  body: string;
+  status: string;
+  rejectionReason: string | null;
+  errorMessage: string | null;
+  leadId: string | null;
+  createdAt: string;
+}
+
+export interface CampaignDetailView extends CampaignView {
+  messages: CampaignMessageView[];
+}
