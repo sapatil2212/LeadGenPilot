@@ -16,7 +16,9 @@ import {
   type ScrapeCriteria,
   type DiscoveryPlan,
 } from "./src/mapsScraper";
-import { logger } from "./src/logger";
+import { logger, logContext } from "./src/logger";
+import { suppressFromInboundReply } from "./src/compliance/suppressionService";
+import suppressionRoutes from "./src/compliance/suppressionRoutes";
 import { duplicateChecker } from "./src/duplicateChecker";
 import { loadFailedLeads, retryFailedLeads, sendLeadToWebhook, fetchLeadsFromGoogleSheet, fetchSheetNamesFromGoogleSheet } from "./src/googleSheetsWebhook";
 import { 
@@ -76,11 +78,17 @@ import {
   compileTemplateSubject,
   templateNeedsAiBody,
 } from "./src/outreachTemplates";
+import { summarizeCampaignHistory } from "./src/campaignHistory";
 import {
-  queryCampaignHistory,
-  summarizeCampaignHistory,
-  CampaignHistoryQuery,
-} from "./src/campaignHistory";
+  listTenantDispatches,
+  exportTenantDispatches,
+  getTenantDispatch,
+  updateTenantDispatch,
+  deleteTenantDispatch,
+  deleteTenantDispatches,
+  type DispatchHistoryQuery,
+} from "./src/campaign/campaignDispatchService";
+import { getCampaignStatus } from "./src/campaign/campaignStatusService";
 import { exportCampaignHistoryToCsv, exportCampaignHistoryToPdf, exportCampaignHistoryToDocx } from "./src/campaignReportExporter";
 import {
   getUserIntegration,
@@ -123,6 +131,7 @@ import {
   getLatestJob,
   listJobs,
   isTerminal,
+  findActiveJob,
   reclaimAbandonedJobs,
 } from "./src/tenancy/jobService";
 import { performanceMiddleware } from "./src/analytics";
@@ -249,10 +258,9 @@ app.get("/api/ready", (req, res) => {
     geminiConfigured: env.isGeminiConfigured(),
     databaseConfigured: env.isDatabaseConfigured(),
     whatsapp: getWhatsAppStatus().status,
-    // Deliberately no longer reported here: whether a scrape is running is
-    // per-workspace state, and this endpoint is public and unauthenticated.
-    // Ask GET /api/status with a session instead.
-    campaignRunning: isCampaignRunning,
+    // Deliberately not reported here: whether any scrape or campaign is running
+    // is per-workspace state, and this endpoint is public and unauthenticated.
+    // Ask GET /api/status or GET /api/campaign/status with a session instead.
     authEnabled: env.isAuthEnabled(),
   });
 });
@@ -406,6 +414,23 @@ app.post(
           provider: "meta_cloud",
           providerMessageId: msg.messageId,
         });
+
+        // "STOP" must take effect the moment it arrives, not when someone reads
+        // the inbox. The suppression is recorded before any further campaign can
+        // claim this number.
+        const optOut = await suppressFromInboundReply({
+          tenantId: tenant.tenantId,
+          channel: "whatsapp",
+          contact: msg.from,
+          text: msg.text || "",
+          source: "inbound_whatsapp",
+        }).catch((error: any) => {
+          logger.error(`Failed to record a WhatsApp opt-out: ${error?.message || error}${logContext({ tenant: tenant.tenantId })}`);
+          return null;
+        });
+        if (optOut) {
+          logger.warn(`Recorded a WhatsApp opt-out; this contact will be excluded from future outreach.${logContext({ tenant: tenant.tenantId, lead: lead?.id })}`);
+        }
       }
 
       /*
@@ -1494,12 +1519,24 @@ setIncomingWhatsAppHandler(async ({ from }) => {
   logger.warn(`Ignored inbound legacy WhatsApp Web message from ${normalizePhoneKey(from) || "unknown"}: no tenant identity.`);
 });
 
+// ── Suppression list (opt-out compliance) ──
+app.use("/api/suppressions", apiRateLimiter(), suppressionRoutes);
+
 // ── Tenant-owned conversations (Inbox) ──
 app.get(
   "/api/conversations",
   resolveTenantContext,
   requirePermission("VIEW_LEADS"),
-  asyncHandler(async (req, res) => res.json(await listConversations(ctxOf(req))))
+  asyncHandler(async (req, res) =>
+    res.json(
+      await listConversations(ctxOf(req), {
+        page: req.query.page ? Number(req.query.page) : undefined,
+        pageSize: req.query.pageSize ? Number(req.query.pageSize) : undefined,
+        channel: req.query.channel === "email" || req.query.channel === "whatsapp" ? req.query.channel : undefined,
+        search: req.query.search ? String(req.query.search) : undefined,
+      })
+    )
+  )
 );
 
 app.get(
@@ -1667,6 +1704,19 @@ startEmailReplyPolling(
         provider: "imap",
         providerMessageId: messageId,
       });
+
+      // An unsubscribe request usually arrives as a short reply or subject line.
+      // Both are checked so "Subject: unsubscribe" with an empty body counts.
+      const optOut = await suppressFromInboundReply({
+        tenantId,
+        channel: "email",
+        contact: from,
+        text: [subject, text].filter(Boolean).join(" ").trim(),
+        source: "inbound_email",
+      });
+      if (optOut) {
+        logger.warn(`Recorded an email unsubscribe; this contact will be excluded from future outreach.${logContext({ tenant: tenantId, lead: lead?.id })}`);
+      }
     } catch (err: any) {
       logger.warn(`Failed to handle tenant email reply: ${err?.message || err}`);
     }
@@ -2144,23 +2194,7 @@ app.get(
   "/api/campaign/status",
   resolveTenantContext,
   requirePermission("VIEW_ANALYTICS"),
-  (req, res) => {
-    const ownsActiveCampaign = isCampaignRunning && activeCampaignTenantId === ctxOf(req).tenantId;
-    res.json({
-      isRunning: ownsActiveCampaign,
-      progress: ownsActiveCampaign ? campaignProgress : {
-        current: 0,
-        total: 0,
-        status: "Idle",
-        secondsRemaining: 0,
-        emailsSent: 0,
-        emailsFailed: 0,
-        whatsappSent: 0,
-        whatsappFailed: 0,
-        skipped: 0,
-      },
-    });
-  }
+  asyncHandler(async (req, res) => res.json(await getCampaignStatus(ctxOf(req))))
 );
 
 app.get(
@@ -2283,41 +2317,8 @@ app.get(
   resolveTenantContext,
   requirePermission("VIEW_ANALYTICS"),
   asyncHandler(async (req, res) => {
-    const ctx = ctxOf(req);
-    const channel = req.query.channel === "email" || req.query.channel === "whatsapp" ? req.query.channel : undefined;
-    const status = req.query.status === "SENT" || req.query.status === "FAILED" ? req.query.status : undefined;
-    const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 200) : "";
-    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
-    const rows = await prisma.campaignDispatch.findMany({
-      where: {
-        tenantId: ctx.tenantId,
-        ...(channel ? { channel } : {}),
-        ...(status ? { status } : {}),
-        ...(search ? { OR: [
-          { businessName: { contains: search } },
-          { recipient: { contains: search } },
-          { subject: { contains: search } },
-          { messageSnippet: { contains: search } },
-        ] } : {}),
-      },
-      orderBy: { occurredAt: "desc" },
-      take: limit,
-    });
-    const records = rows.map((row) => ({
-      id: row.id,
-      campaignId: row.campaignId || "manual",
-      timestamp: row.occurredAt.toISOString(),
-      businessName: row.businessName,
-      channel: row.channel,
-      status: row.status,
-      recipient: row.recipient,
-      subject: row.subject || undefined,
-      messageSnippet: row.messageSnippet || undefined,
-      dryRun: row.dryRun,
-      sourceType: row.sourceType,
-      sourceLabel: row.sourceLabel,
-    }));
-    res.json({ records, summary: summarizeCampaignHistory(records as any) });
+    const page = await listTenantDispatches(ctxOf(req), req.query as DispatchHistoryQuery);
+    res.json({ ...page, summary: summarizeCampaignHistory(page.records as any) });
   })
 );
 
@@ -2332,18 +2333,10 @@ app.get(
  */
 app.get("/api/campaign/history/export", heavyActionRateLimiter(), resolveTenantContext, requirePermission("VIEW_ANALYTICS"), asyncHandler(async (req, res) => {
   const format = String(req.query.format || "csv").toLowerCase();
-  const q: CampaignHistoryQuery = {
-    channel: (req.query.channel as any) || "all",
-    status: (req.query.status as any) || "all",
-    campaignId: (req.query.campaignId as string) || undefined,
-    from: (req.query.from as string) || undefined,
-    to: (req.query.to as string) || undefined,
-    search: (req.query.search as string) || undefined,
-    limit: undefined,
-  };
-  // Legacy history is deployment-global and therefore never exposed through a
-  // tenant request. Exports stay empty until history is moved to tenant-owned storage.
-  const records: ReturnType<typeof queryCampaignHistory> = [];
+  // Exports read the same tenant-owned dispatch rows the report table reads,
+  // with the same filters applied, capped so a full-history export cannot
+  // materialise an unbounded result set.
+  const records = await exportTenantDispatches(ctxOf(req), req.query as DispatchHistoryQuery);
   const stamp = new Date().toISOString().slice(0, 10);
 
   if (format === "csv") {
@@ -2380,7 +2373,8 @@ app.delete(
   asyncHandler(async (req, res) => {
   const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((id: any) => typeof id === "string") : [];
   if (ids.length === 0) return res.status(400).json({ error: "No record ids provided." });
-  res.json({ success: true, removed: 0 });
+  const removed = await deleteTenantDispatches(ctxOf(req), ids);
+  res.json({ success: true, removed });
 }));
 
 /**
@@ -2391,19 +2385,37 @@ app.get(
   "/api/campaign/history/:id",
   resolveTenantContext,
   requirePermission("VIEW_ANALYTICS"),
-  (_req, res) => res.status(404).json({ error: "Dispatch record not found.", code: "not_found" })
+  asyncHandler(async (req, res) => {
+    const record = await getTenantDispatch(ctxOf(req), String(req.params.id));
+    if (!record) return res.status(404).json({ error: "Dispatch record not found.", code: "not_found" });
+    res.json({ record });
+  })
 );
 
 /**
  * PATCH /api/campaign/history/:id
  * Edit a single dispatch record (business name, recipient, subject/message,
  * status) — used by the Reports table's "edit" action.
+ *
+ * Correcting a contact name or a mistyped recipient in the audit trail is a
+ * legitimate operator action. The delivery outcome itself is constrained to the
+ * two states the sender can produce, so a report cannot be edited into a state
+ * no send could have reached.
  */
 app.patch(
   "/api/campaign/history/:id",
   resolveTenantContext,
   requirePermission("EDIT_LEADS"),
-  (_req, res) => res.status(404).json({ error: "Dispatch record not found.", code: "not_found" })
+  asyncHandler(async (req, res) => {
+    let record;
+    try {
+      record = await updateTenantDispatch(ctxOf(req), String(req.params.id), req.body || {});
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message || "Invalid update.", code: "invalid_update" });
+    }
+    if (!record) return res.status(404).json({ error: "Dispatch record not found.", code: "not_found" });
+    res.json({ record });
+  })
 );
 
 /**
@@ -2414,7 +2426,11 @@ app.delete(
   "/api/campaign/history/:id",
   resolveTenantContext,
   requirePermission("DELETE_LEADS"),
-  (_req, res) => res.status(404).json({ error: "Dispatch record not found.", code: "not_found" })
+  asyncHandler(async (req, res) => {
+    const removed = await deleteTenantDispatch(ctxOf(req), String(req.params.id));
+    if (!removed) return res.status(404).json({ error: "Dispatch record not found.", code: "not_found" });
+    res.json({ success: true });
+  })
 );
 
 app.post(
@@ -2454,7 +2470,9 @@ app.get(
         !!process.env.GOOGLE_SHEET_WEBHOOK_URL &&
         process.env.GOOGLE_SHEET_WEBHOOK_URL !== "YOUR_WEBHOOK_URL",
       whatsappConnected: getWhatsAppStatus().status === "CONNECTED",
-      campaignRunning: isCampaignRunning && activeCampaignTenantId === ctx.tenantId,
+      // Durable, per-workspace: a queued or running campaign job belonging to
+      // this tenant, not a deployment-wide boolean.
+      campaignRunning: !!(await findActiveJob(ctx.tenantId, "campaign")),
     });
   })
 );

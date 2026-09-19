@@ -21,21 +21,31 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 
 /**
- * Every Prisma model, paired with the physical table name so the dump is
- * self-describing even if the Prisma mapping changes later.
+ * The model list is derived from the generated datamodel rather than written out
+ * by hand.
+ *
+ * It was a hand-written list of seven tables, frozen at the pre-tenancy schema.
+ * Everything added afterwards — workspaces, memberships, jobs, campaigns,
+ * campaign messages, delivery reports, conversations, suppressions, the business
+ * knowledge base, ICP and scoring — was silently absent from every backup, so a
+ * restore would have returned the product to its first week while reporting
+ * success. Deriving the list means a model added tomorrow is backed up tonight.
  */
-const MODELS = [
-  { model: "user", table: "users" },
-  { model: "userIntegration", table: "user_integrations" },
-  { model: "auditLog", table: "audit_logs" },
-  { model: "emailOtp", table: "email_otps" },
-  { model: "leadList", table: "lead_lists" },
-  { model: "lead", table: "leads" },
-  { model: "pageView", table: "page_views" },
-];
+function discoverModels() {
+  const models = Prisma.dmmf?.datamodel?.models;
+  if (!Array.isArray(models) || models.length === 0) {
+    throw new Error("Could not read the Prisma datamodel. Run `npx prisma generate` first.");
+  }
+  return models
+    .map((model) => ({
+      model: model.name.charAt(0).toLowerCase() + model.name.slice(1),
+      table: model.dbName || model.name,
+    }))
+    .sort((a, b) => a.table.localeCompare(b.table));
+}
 
 /**
  * File-based stores. Secret-bearing files (.env*, .wwebjs_auth) are
@@ -83,7 +93,7 @@ async function main() {
 
   const manifest = {
     createdAt: new Date().toISOString(),
-    purpose: "Phase 0 pre-migration safety backup",
+    purpose: "Operational safety backup: every mapped table plus the file-based stores",
     readOnly: true,
     database: { reachable: false, tables: {}, totalRows: 0, error: null },
     runtimeFiles: {},
@@ -94,12 +104,15 @@ async function main() {
   };
 
   // ── 1. Database tables ──
+  const models = discoverModels();
+  manifest.database.modelCount = models.length;
+
   const prisma = new PrismaClient();
   try {
     await prisma.$connect();
     manifest.database.reachable = true;
 
-    for (const { model, table } of MODELS) {
+    for (const { model, table } of models) {
       const delegate = prisma[model];
       if (!delegate?.findMany) {
         manifest.database.tables[table] = { error: `no Prisma delegate "${model}"` };
@@ -115,7 +128,21 @@ async function main() {
         sha256: sha256(target),
       };
       manifest.database.totalRows += rows.length;
-      console.log(`  [db]   ${table.padEnd(20)} ${String(rows.length).padStart(6)} rows`);
+      console.log(`  [db]   ${table.padEnd(24)} ${String(rows.length).padStart(6)} rows`);
+    }
+
+    // A table that exists in the database but in no model would be lost on
+    // restore, so it is reported rather than ignored.
+    const present = await prisma.$queryRawUnsafe(
+      "SELECT TABLE_NAME AS name FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()"
+    );
+    const covered = new Set(models.map((entry) => entry.table));
+    const uncovered = present
+      .map((row) => row.name)
+      .filter((name) => name !== "_prisma_migrations" && !covered.has(name));
+    manifest.database.uncoveredTables = uncovered;
+    if (uncovered.length) {
+      console.warn(`  [db]   WARNING: ${uncovered.length} table(s) are not covered by any model: ${uncovered.join(", ")}`);
     }
   } catch (err) {
     manifest.database.error = err?.message || String(err);

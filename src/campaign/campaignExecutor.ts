@@ -6,11 +6,13 @@
  */
 import crypto from "node:crypto";
 import { prisma } from "../prisma";
-import { logger } from "../logger";
+import { logger, logContext } from "../logger";
 import { sendEmailOutreach } from "../outreachService";
 import { sendWhatsAppUnified } from "../whatsappGateway";
 import { getUserIntegration } from "../userIntegrationService";
 import { recordCampaignDispatch } from "./dispatchService";
+import { recordOutbound } from "../conversations/conversationService";
+import { isSuppressed } from "../compliance/suppressionService";
 import type { TenantContext } from "../tenancy/context";
 
 const DEFAULT_DELAY_MS = 5_000;
@@ -20,11 +22,25 @@ const MAX_PAGE_SIZE = 100;
 const JOB_LEASE_MS = 45_000;
 const MESSAGE_LEASE_MS = 45_000;
 const MAX_MESSAGE_ATTEMPTS = 3;
+/**
+ * Leases must be renewed well inside their own window. A provider call can take
+ * longer than a lease (an SMTP handshake to a slow host, a WhatsApp Web send),
+ * and the inter-message delay is configurable up to ten minutes — far past a
+ * 45s lease. Without renewal the lease expires while the work is still in
+ * flight, another worker recovers it as stale, and the recipient is contacted
+ * twice. Renewing every third of the lease tolerates two lost renewals.
+ *
+ * Configurable so the renewal behaviour itself can be exercised in tests without
+ * waiting 15 real seconds.
+ */
+const LEASE_RENEW_MS = Math.max(10, Number(process.env.CAMPAIGN_LEASE_RENEW_MS) || 15_000);
+/** How many queued jobs a worker will try before concluding the queue is taken. */
+const CLAIM_CANDIDATE_LIMIT = 10;
 
 export interface ExecutionOptions { delayMs?: number; batchSize?: number }
 export interface NormalizedExecutionOptions { delayMs: number; batchSize: number }
 export interface EnqueuedCampaignExecution { jobId: string; campaignId: string; status: "queued" }
-export interface WorkerRunResult { jobId: string; sent: number; failed: number; cancelled: boolean; deferred: boolean }
+export interface WorkerRunResult { jobId: string; sent: number; failed: number; skipped: number; cancelled: boolean; deferred: boolean }
 
 interface CampaignMessageSnapshot {
   id: string; campaignId: string; tenantId: string; leadId: string | null;
@@ -64,7 +80,7 @@ export async function enqueueCampaignExecution(ctx: TenantContext, campaignId: s
       },
     });
   });
-  logger.info(`Queued campaign ${campaignId} as durable job ${job.id} for workspace ${ctx.tenantId}.`);
+  logger.info(`Queued a campaign for durable execution.${logContext({ tenant: ctx.tenantId, user: ctx.userId, campaign: campaignId, job: job.id })}`);
   return { jobId: job.id, campaignId, status: "queued" };
 }
 
@@ -80,31 +96,39 @@ export async function recoverStaleCampaignLeases(now = new Date()): Promise<{ jo
       data: { status: "retry_wait", nextAttemptAt: now, leaseOwner: null, leaseToken: null, leaseExpiresAt: null, errorMessage: "Recovered after a worker lease expired." },
     }),
   ]);
-  // A cancelled job must never become runnable after its worker dies.
+  // A cancelled job must never become runnable after its worker dies, and must
+  // not linger in `cancelling` when no worker ever held it.
   await prisma.job.updateMany({
-    where: { kind: "campaign", status: "cancelling", leaseExpiresAt: { lt: now } },
+    where: { kind: "campaign", status: "cancelling", OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }] },
     data: { status: "cancelled", finishedAt: now, workerId: null, leaseToken: null, leaseExpiresAt: null, heartbeatAt: null },
   });
   return { jobs: jobs.count, messages: messages.count };
 }
 
-/** A find followed by conditional updateMany is an atomic compare-and-claim. */
+/**
+ * A read followed by a conditional updateMany is an atomic compare-and-claim:
+ * the loser of a race sees `count === 0` and moves on to the next candidate
+ * instead of giving up for the whole poll. Without that, N workers polling the
+ * same oldest row would claim one job per tick between them, so a queue of
+ * jobs drained at single-worker speed no matter how many replicas were running.
+ */
 export async function claimNextCampaignJob(workerId: string, now = new Date(), leaseMs = JOB_LEASE_MS): Promise<any | null> {
-  const candidate = await prisma.job.findFirst({
-    where: { kind: "campaign", OR: [{ status: "queued" }, { status: "running", leaseExpiresAt: { lt: now } }] },
+  const claimable = { kind: "campaign", OR: [{ status: "queued" }, { status: "running", leaseExpiresAt: { lt: now } }] };
+  const candidates = await prisma.job.findMany({
+    where: claimable,
     orderBy: { createdAt: "asc" },
+    take: CLAIM_CANDIDATE_LIMIT,
   });
-  if (!candidate) return null;
-  const leaseToken = crypto.randomUUID();
-  const claimed = await prisma.job.updateMany({
-    where: {
-      id: candidate.id, kind: "campaign",
-      OR: [{ status: "queued" }, { status: "running", leaseExpiresAt: { lt: now } }],
-    },
-    data: { status: "running", workerId, leaseToken, leaseExpiresAt: new Date(now.getTime() + leaseMs), heartbeatAt: now, startedAt: candidate.startedAt ?? now, attempt: { increment: 1 } },
-  });
-  if (claimed.count !== 1) return null;
-  return prisma.job.findFirst({ where: { id: candidate.id, workerId, leaseToken, kind: "campaign" } });
+  for (const candidate of candidates) {
+    const leaseToken = crypto.randomUUID();
+    const claimed = await prisma.job.updateMany({
+      where: { id: candidate.id, ...claimable },
+      data: { status: "running", workerId, leaseToken, leaseExpiresAt: new Date(now.getTime() + leaseMs), heartbeatAt: now, startedAt: candidate.startedAt ?? now, attempt: { increment: 1 } },
+    });
+    if (claimed.count !== 1) continue;
+    return prisma.job.findFirst({ where: { id: candidate.id, workerId, leaseToken, kind: "campaign" } });
+  }
+  return null;
 }
 
 async function heartbeatJob(job: any, now = new Date()): Promise<boolean> {
@@ -113,6 +137,45 @@ async function heartbeatJob(job: any, now = new Date()): Promise<boolean> {
     data: { heartbeatAt: now, leaseExpiresAt: new Date(now.getTime() + JOB_LEASE_MS) },
   });
   return updated.count === 1;
+}
+
+/** Extend this worker's claim on one message while its delivery is in flight. */
+async function renewMessageLease(message: CampaignMessageSnapshot, job: any, now = new Date()): Promise<boolean> {
+  const updated = await prisma.campaignMessage.updateMany({
+    where: { id: message.id, tenantId: job.tenantId, status: "sending", leaseOwner: job.workerId, leaseToken: message.leaseToken },
+    data: { leaseExpiresAt: new Date(now.getTime() + MESSAGE_LEASE_MS) },
+  });
+  return updated.count === 1;
+}
+
+/**
+ * Runs `operation` while holding both leases open. Renewal failures are ignored
+ * on purpose: losing a renewal does not make it correct to abandon a provider
+ * call that may already have delivered. The caller's next conditional write is
+ * what decides whether this worker still owns the outcome.
+ */
+async function withLeaseKeepAlive<T>(job: any, message: CampaignMessageSnapshot, operation: () => Promise<T>): Promise<T> {
+  const timer = setInterval(() => {
+    const now = new Date();
+    void Promise.allSettled([heartbeatJob(job, now), renewMessageLease(message, job, now)]);
+  }, LEASE_RENEW_MS);
+  if (typeof (timer as any).unref === "function") (timer as any).unref();
+  try {
+    return await operation();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+/** Waits out the pacing delay without letting the job lease lapse. */
+async function delayHoldingLease(job: any, ms: number): Promise<void> {
+  let remaining = ms;
+  while (remaining > 0) {
+    const slice = Math.min(remaining, LEASE_RENEW_MS);
+    await delay(slice);
+    remaining -= slice;
+    if (remaining > 0) await heartbeatJob(job).catch(() => false);
+  }
 }
 
 async function claimNextCampaignMessage(job: any, now = new Date()): Promise<CampaignMessageSnapshot | null> {
@@ -134,7 +197,7 @@ async function claimNextCampaignMessage(job: any, now = new Date()): Promise<Cam
   return prisma.campaignMessage.findFirst({ where: { id: candidate.id, tenantId: job.tenantId, leaseOwner: job.workerId, leaseToken } }) as Promise<CampaignMessageSnapshot | null>;
 }
 
-async function finishLeasedMessage(message: CampaignMessageSnapshot, job: any, status: "sent" | "failed" | "retry_wait", error?: string, externalMessageId?: string): Promise<boolean> {
+async function finishLeasedMessage(message: CampaignMessageSnapshot, job: any, status: "sent" | "failed" | "retry_wait" | "suppressed", error?: string, externalMessageId?: string): Promise<boolean> {
   const retryAt = status === "retry_wait" ? new Date(Date.now() + retryDelayMs(message.attemptCount)) : null;
   const updated = await prisma.campaignMessage.updateMany({
     where: { id: message.id, tenantId: job.tenantId, status: "sending", leaseOwner: job.workerId, leaseToken: message.leaseToken },
@@ -159,32 +222,50 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
   if (!campaign) return finishOwnedJob(job, "failed", { error: "Campaign no longer exists." });
   const ctx = { tenantId: job.tenantId, userId: job.userId, membershipId: "worker", role: "owner", tenantName: "worker", tenantSlug: "worker", permissions: new Set<string>() } as TenantContext;
   const smtp = await resolveTenantSmtpConfig(ctx);
-  let sent = 0; let failed = 0;
+  let sent = 0; let failed = 0; let skipped = 0;
+  const jobFields = { tenant: job.tenantId, job: job.id, campaign: campaign.id, worker: job.workerId };
   const total = await prisma.campaignMessage.count({ where: { campaignId: campaign.id, tenantId: job.tenantId, status: { in: ["approved", "retry_wait", "sending"] } } });
 
   while (true) {
-    if (!(await heartbeatJob(job))) return { jobId: job.id, sent, failed, cancelled: false, deferred: false };
+    if (!(await heartbeatJob(job))) {
+      logger.warn(`Campaign worker lost its job lease and stopped processing.${logContext(jobFields)}`);
+      return { jobId: job.id, sent, failed, skipped, cancelled: false, deferred: false };
+    }
     const state = await prisma.job.findFirst({ where: { id: job.id, tenantId: job.tenantId, workerId: job.workerId, leaseToken: job.leaseToken }, select: { status: true, cancelRequestedAt: true } });
     if (!state || state.status === "cancelling" || state.cancelRequestedAt) {
       await recomputeCampaignCounts(campaign.id, job.tenantId, "cancelled");
-      return finishOwnedJob(job, "cancelled", { result: { campaignId: campaign.id, sent, failed, cancelled: true } });
+      logger.info(`Campaign execution cancelled after ${sent} sent, ${failed} failed, ${skipped} skipped.${logContext(jobFields)}`);
+      return finishOwnedJob(job, "cancelled", { result: { campaignId: campaign.id, sent, failed, skipped, cancelled: true } });
     }
     const message = await claimNextCampaignMessage(job);
     if (!message) {
       const waiting = await prisma.campaignMessage.findFirst({ where: { campaignId: campaign.id, tenantId: job.tenantId, status: "retry_wait" }, orderBy: { nextAttemptAt: "asc" }, select: { nextAttemptAt: true } });
       if (waiting?.nextAttemptAt) {
         await prisma.job.updateMany({ where: { id: job.id, workerId: job.workerId, leaseToken: job.leaseToken, status: "running" }, data: { leaseExpiresAt: waiting.nextAttemptAt, heartbeatAt: new Date() } });
-        return { jobId: job.id, sent, failed, cancelled: false, deferred: true };
+        return { jobId: job.id, sent, failed, skipped, cancelled: false, deferred: true };
       }
       await recomputeCampaignCounts(campaign.id, job.tenantId, "complete");
-      return finishOwnedJob(job, "completed", { result: { campaignId: campaign.id, sent, failed, cancelled: false } });
+      logger.info(`Campaign execution completed with ${sent} sent, ${failed} failed, ${skipped} skipped.${logContext(jobFields)}`);
+      return finishOwnedJob(job, "completed", { result: { campaignId: campaign.id, sent, failed, skipped, cancelled: false } });
     }
+    const messageFields = { ...jobFields, message: message.id, channel: message.channel, attempt: message.attemptCount };
 
     try {
-      const externalMessageId = await deliverMessage(ctx, message, smtp);
-      if (await finishLeasedMessage(message, job, "sent", undefined, externalMessageId)) {
-        sent++;
-        await recordCampaignDispatch({ message, campaignName: campaign.name, status: "SENT", externalMessageId }).catch((error) => logger.warn(`Delivery ${message.id} persisted but report repair is needed: ${error?.message || error}`));
+      // Compliance is checked at delivery time, not only at generation time: a
+      // contact can opt out after the copy was approved but before it is sent.
+      if (await isSuppressedRecipient(job, message)) {
+        if (await finishLeasedMessage(message, job, "suppressed", "Recipient is on this workspace's suppression list.")) {
+          skipped++;
+          logger.info(`Campaign message skipped: the recipient has opted out.${logContext(messageFields)}`);
+        }
+      } else {
+        const externalMessageId = await withLeaseKeepAlive(job, message, () => deliverMessage(ctx, message, smtp));
+        if (await finishLeasedMessage(message, job, "sent", undefined, externalMessageId)) {
+          sent++;
+          await recordCampaignDispatch({ message, campaignName: campaign.name, status: "SENT", externalMessageId }).catch((error) => logger.warn(`Delivery persisted but report repair is needed: ${error?.message || error}${logContext(messageFields)}`));
+          await syncDeliveryToCrmAndInbox(job, message, { status: "SENT", externalMessageId });
+          logger.info(`Campaign message delivered.${logContext({ ...messageFields, providerMessageId: externalMessageId })}`);
+        }
       }
     } catch (error: any) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -192,14 +273,67 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
       if (await finishLeasedMessage(message, job, permanent ? "failed" : "retry_wait", reason)) {
         if (permanent) {
           failed++;
-          await recordCampaignDispatch({ message, campaignName: campaign.name, status: "FAILED", errorMessage: reason }).catch((reportError) => logger.warn(`Failure ${message.id} persisted but report repair is needed: ${reportError?.message || reportError}`));
+          await recordCampaignDispatch({ message, campaignName: campaign.name, status: "FAILED", errorMessage: reason }).catch((reportError) => logger.warn(`Failure persisted but report repair is needed: ${reportError?.message || reportError}${logContext(messageFields)}`));
+          await syncDeliveryToCrmAndInbox(job, message, { status: "FAILED" });
         }
       }
-      logger.warn(`Campaign message ${message.id} ${permanent ? "failed permanently" : "will retry"}: ${reason}`);
+      logger.warn(`Campaign message ${permanent ? "failed permanently" : "will retry"}: ${reason}${logContext(messageFields)}`);
     }
-    const complete = sent + failed;
-    await prisma.job.updateMany({ where: { id: job.id, workerId: job.workerId, leaseToken: job.leaseToken, status: "running" }, data: { progress: JSON.stringify({ stage: "sending", current: complete, total, sent, failed }) } });
-    if (params.delayMs > 0) await delay(params.delayMs);
+    const complete = sent + failed + skipped;
+    await prisma.job.updateMany({ where: { id: job.id, workerId: job.workerId, leaseToken: job.leaseToken, status: "running" }, data: { progress: JSON.stringify({ stage: "sending", current: complete, total, sent, failed, skipped }) } });
+    if (params.delayMs > 0) await delayHoldingLease(job, params.delayMs);
+  }
+}
+
+/**
+ * Fails closed. If the suppression lookup itself errors we raise, so the message
+ * goes back to retry rather than being delivered to someone who may have opted
+ * out — a compliance breach is worse than a late send.
+ */
+async function isSuppressedRecipient(job: any, message: CampaignMessageSnapshot): Promise<boolean> {
+  if (message.channel !== "email" && message.channel !== "whatsapp") return false;
+  return isSuppressed(job.tenantId, message.channel, message.recipient);
+}
+
+/**
+ * Keeps the CRM and the Inbox consistent with what the worker actually did.
+ *
+ * Without this the worker was the only sender that left the lead row untouched:
+ * reports showed a delivery the Leads table denied, and a reply arrived in a
+ * thread that had no record of the outreach it answered. Best-effort by design —
+ * the delivery already happened and must not be re-attempted because a
+ * bookkeeping write failed.
+ */
+async function syncDeliveryToCrmAndInbox(
+  job: any,
+  message: CampaignMessageSnapshot,
+  options: { status: "SENT" | "FAILED"; externalMessageId?: string }
+): Promise<void> {
+  if (message.channel !== "email" && message.channel !== "whatsapp") return;
+  const today = new Date().toISOString().split("T")[0];
+  try {
+    if (message.leadId) {
+      const data = message.channel === "email"
+        ? { emailStatus: options.status, emailSentDate: today }
+        : { whatsappStatus: options.status, whatsappSentDate: today };
+      await prisma.lead.updateMany({ where: { id: message.leadId, tenantId: job.tenantId }, data });
+    }
+    if (options.status === "SENT") {
+      await recordOutbound({
+        tenantId: job.tenantId,
+        channel: message.channel,
+        email: message.channel === "email" ? message.recipient : undefined,
+        phone: message.channel === "whatsapp" ? message.recipient : undefined,
+        leadId: message.leadId ?? undefined,
+        businessName: message.businessName,
+        text: message.body,
+        source: "campaign",
+        provider: message.channel === "email" ? "smtp" : "whatsapp",
+        providerMessageId: options.externalMessageId,
+      });
+    }
+  } catch (error: any) {
+    logger.warn(`Delivery recorded but CRM/inbox sync failed: ${error?.message || error}${logContext({ tenant: job.tenantId, job: job.id, message: message.id, lead: message.leadId })}`);
   }
 }
 
@@ -208,17 +342,43 @@ async function finishOwnedJob(job: any, status: "completed" | "failed" | "cancel
     where: { id: job.id, tenantId: job.tenantId, workerId: job.workerId, leaseToken: job.leaseToken, status: { in: ["running", "cancelling"] } },
     data: { status, result: payload.result ? JSON.stringify(payload.result) : undefined, error: payload.error?.slice(0, 2000), finishedAt: new Date(), leaseExpiresAt: null, heartbeatAt: new Date() },
   });
-  return { jobId: job.id, sent: Number(payload.result?.sent || 0), failed: Number(payload.result?.failed || 0), cancelled: status === "cancelled", deferred: false };
+  return { jobId: job.id, sent: Number(payload.result?.sent || 0), failed: Number(payload.result?.failed || 0), skipped: Number(payload.result?.skipped || 0), cancelled: status === "cancelled", deferred: false };
 }
 
+/**
+ * Cancellation is cooperative for a running job and immediate for a queued one.
+ *
+ * A queued job has no worker to observe the request, so marking it `cancelling`
+ * and waiting would strand it: nothing claims a cancelling job, and lease-expiry
+ * recovery cannot help a job that never held a lease. It is settled here instead,
+ * with the same conditional write that guarantees a job already claimed by a
+ * worker is not yanked out from under it mid-send.
+ */
 export async function cancelCampaignExecution(ctx: TenantContext, campaignId: string): Promise<{ ok: boolean; jobId?: string }> {
   const campaign = await prisma.campaign.findFirst({ where: { id: campaignId, tenantId: ctx.tenantId }, select: { id: true } });
   if (!campaign) return { ok: false };
   const jobs = await prisma.job.findMany({ where: { tenantId: ctx.tenantId, kind: "campaign", status: { in: ["queued", "running", "cancelling"] } }, orderBy: { createdAt: "desc" } });
   const job = jobs.find((row: any) => parseParams(row.params).campaignId === campaignId);
   if (!job) return { ok: false };
-  const updated = await prisma.job.updateMany({ where: { id: job.id, tenantId: ctx.tenantId, kind: "campaign", status: { in: ["queued", "running", "cancelling"] } }, data: { status: "cancelling", cancelRequestedAt: new Date() } });
-  return updated.count === 1 ? { ok: true, jobId: job.id } : { ok: false };
+  const now = new Date();
+
+  const settledWhileQueued = await prisma.job.updateMany({
+    where: { id: job.id, tenantId: ctx.tenantId, kind: "campaign", status: "queued" },
+    data: { status: "cancelled", cancelRequestedAt: now, finishedAt: now, workerId: null, leaseToken: null, leaseExpiresAt: null },
+  });
+  if (settledWhileQueued.count === 1) {
+    await recomputeCampaignCounts(campaignId, ctx.tenantId, "cancelled");
+    logger.info(`Cancelled a campaign before any worker claimed it.${logContext({ tenant: ctx.tenantId, campaign: campaignId, job: job.id })}`);
+    return { ok: true, jobId: job.id };
+  }
+
+  const requested = await prisma.job.updateMany({
+    where: { id: job.id, tenantId: ctx.tenantId, kind: "campaign", status: { in: ["running", "cancelling"] } },
+    data: { status: "cancelling", cancelRequestedAt: now },
+  });
+  if (requested.count !== 1) return { ok: false };
+  logger.info(`Requested cancellation of a running campaign.${logContext({ tenant: ctx.tenantId, campaign: campaignId, job: job.id })}`);
+  return { ok: true, jobId: job.id };
 }
 
 export async function runCampaignWorkerCycle(workerId: string): Promise<WorkerRunResult | null> {
@@ -228,8 +388,8 @@ export async function runCampaignWorkerCycle(workerId: string): Promise<WorkerRu
   try { return await runClaimedCampaignJob(job); }
   catch (error: any) {
     const reason = error instanceof Error ? error.message : String(error);
-    logger.error(`Campaign worker failed job ${job.id}: ${reason}`);
-    return finishOwnedJob(job, "failed", { error: reason, result: { campaignId: parseParams(job.params).campaignId, sent: 0, failed: 0 } });
+    logger.error(`Campaign worker failed a job: ${reason}${logContext({ tenant: job.tenantId, job: job.id, campaign: parseParams(job.params).campaignId, worker: workerId })}`);
+    return finishOwnedJob(job, "failed", { error: reason, result: { campaignId: parseParams(job.params).campaignId, sent: 0, failed: 0, skipped: 0 } });
   }
 }
 
@@ -264,8 +424,9 @@ export async function recomputeCampaignCounts(campaignId: string, tenantId: stri
   const countFor = (status: string) => counts.find((row: any) => row.status === status)?._count || 0;
   const pending = countFor("pending_review"); const queued = countFor("approved") + countFor("retry_wait") + countFor("sending");
   const rejected = countFor("rejected"); const sent = countFor("sent"); const failed = countFor("failed");
+  const skipped = countFor("suppressed");
   const status = terminal === "cancelled" ? "cancelled" : terminal === "complete" ? "sent" : pending ? (queued ? "partially_approved" : "pending_review") : queued ? "approved" : "cancelled";
-  await prisma.campaign.updateMany({ where: { id: campaignId, tenantId }, data: { status, pendingCount: pending, approvedCount: queued, rejectedCount: rejected, sentCount: sent, failedCount: failed, ...(terminal ? { completedAt: new Date() } : {}) } });
+  await prisma.campaign.updateMany({ where: { id: campaignId, tenantId }, data: { status, pendingCount: pending, approvedCount: queued, rejectedCount: rejected, sentCount: sent, failedCount: failed, skippedCount: skipped, ...(terminal ? { completedAt: new Date() } : {}) } });
 }
 function isValidEmail(value: string): boolean { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim()); }
 function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }

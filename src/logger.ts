@@ -76,6 +76,20 @@ function write(level: string, formatted: string): void {
   }
 }
 
+/**
+ * Formats correlation fields as a stable `key=value` suffix so operational logs
+ * can be grepped and parsed: `... [tenant=t_1 job=j_2 worker=w_3]`.
+ *
+ * Only identifiers belong here. Credentials must never be passed in — the
+ * redaction pass above is a safety net, not a licence to log secrets.
+ */
+export function logContext(fields: Record<string, unknown>): string {
+  const parts = Object.entries(fields)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}=${String(value).replace(/\s+/g, "_")}`);
+  return parts.length ? ` [${parts.join(" ")}]` : "";
+}
+
 export const logger = {
   log: (message: string) => {
     write("info", `[${new Date().toLocaleTimeString()}] ${message}`);

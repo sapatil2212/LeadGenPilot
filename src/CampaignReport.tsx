@@ -18,11 +18,9 @@ import {
 } from "lucide-react";
 import WhatsAppLogo from "./WhatsAppLogo";
 import AlertModal, { AlertModalType } from "./AlertModal";
-import { jsPDF } from "jspdf";
-import autoTable from "jspdf-autotable";
-import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType } from "docx";
-import { saveAs } from "file-saver";
-import * as XLSX from "xlsx";
+// Document writers are loaded on demand from the export handlers below. Opening
+// the Reports tab should not download a spreadsheet engine, a PDF engine and a
+// Word engine before the first row is visible.
 
 interface HistoryRecord {
   id: string;
@@ -299,8 +297,9 @@ export default function CampaignReport({ isLight, liveRefresh = false, alwaysExp
     document.body.appendChild(link); link.click(); document.body.removeChild(link);
   };
 
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
     if (records.length === 0) { alert("No records to export."); return; }
+    const XLSX = await import("xlsx");
     const headerRow = COLS.map(c => c.h);
     const dataRows = records.map(toRow);
     const ws = XLSX.utils.aoa_to_sheet([headerRow, ...dataRows]);
@@ -356,6 +355,8 @@ export default function CampaignReport({ isLight, liveRefresh = false, alwaysExp
           });
         }
       } catch { logoDataUrl = null; }
+
+      const [{ jsPDF }, { default: autoTable }] = await Promise.all([import("jspdf"), import("jspdf-autotable")]);
 
       const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a3" });
       const pageW = doc.internal.pageSize.getWidth();
@@ -460,9 +461,14 @@ export default function CampaignReport({ isLight, liveRefresh = false, alwaysExp
     }
   };
 
-  const handleExportWord = () => {
+  const handleExportWord = async () => {
     if (records.length === 0) { alert("No records to export."); return; }
     setIsExporting("docx");
+
+    const [{ Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType }, { saveAs }] = await Promise.all([
+      import("docx"),
+      import("file-saver"),
+    ]);
 
     const colWidths = [12, 22, 10, 8, 20, 22, 6]; // % per column (must sum to 100)
 

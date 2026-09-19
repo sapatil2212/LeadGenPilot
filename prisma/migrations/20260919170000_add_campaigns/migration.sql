@@ -29,10 +29,10 @@ CREATE TABLE IF NOT EXISTS `campaigns` (
     `updated_at` DATETIME(3) NOT NULL,
     `started_at` DATETIME(3) NULL,
     `completed_at` DATETIME(3) NULL,
-    `user_id` VARCHAR(191) NULL,
+    `userId` VARCHAR(191) NULL,
 
     CONSTRAINT `campaigns_tenant_id_fkey` FOREIGN KEY (`tenant_id`) REFERENCES `tenants`(`id`) ON DELETE CASCADE ON UPDATE CASCADE,
-    CONSTRAINT `campaigns_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT `campaigns_userId_fkey` FOREIGN KEY (`userId`) REFERENCES `users`(`id`) ON DELETE SET NULL ON UPDATE CASCADE,
     INDEX `campaigns_tenant_id_status_idx`(`tenant_id`, `status`),
     INDEX `campaigns_tenant_id_created_at_idx`(`tenant_id`, `created_at`),
     INDEX `campaigns_created_by_id_idx`(`created_by_id`),

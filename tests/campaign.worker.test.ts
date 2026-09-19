@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ prisma: null as any, sendEmail: vi.fn(), integration: vi.fn() }));
+const mocks = vi.hoisted(() => ({ prisma: null as any, sendEmail: vi.fn(), integration: vi.fn(), recordOutbound: vi.fn() }));
 vi.mock("../src/prisma", () => ({ prisma: new Proxy({}, { get: (_t, key) => mocks.prisma[key as any] }) }));
 vi.mock("../src/outreachService", () => ({ sendEmailOutreach: mocks.sendEmail }));
 vi.mock("../src/whatsappGateway", () => ({ sendWhatsAppUnified: vi.fn() }));
 vi.mock("../src/userIntegrationService", () => ({ getUserIntegration: mocks.integration }));
+vi.mock("../src/conversations/conversationService", () => ({ recordOutbound: mocks.recordOutbound }));
 const { runClaimedCampaignJob } = await import("../src/campaign/campaignExecutor");
 
 function job(overrides: any = {}) { return { id: "job-a", tenantId: "tenant-a", userId: "user-a", workerId: "worker-a", leaseToken: "lease-a", params: JSON.stringify({ campaignId: "campaign-a", delayMs: 0, batchSize: 1 }), ...overrides }; }
@@ -17,7 +18,10 @@ beforeEach(() => {
     job: { updateMany: vi.fn().mockResolvedValue({ count: 1 }), findFirst: vi.fn().mockResolvedValue({ status: "running", cancelRequestedAt: null }) },
     campaignMessage: { count: vi.fn().mockResolvedValue(1), findFirst: vi.fn(), updateMany: vi.fn().mockResolvedValue({ count: 1 }), groupBy: vi.fn().mockResolvedValue([]) },
     campaignDispatch: { upsert: vi.fn().mockResolvedValue({}) },
+    suppressionEntry: { findFirst: vi.fn().mockResolvedValue(null) },
+    lead: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
   };
+  mocks.recordOutbound.mockResolvedValue({ id: "thread-a" });
 });
 
 describe("leased campaign messages", () => {

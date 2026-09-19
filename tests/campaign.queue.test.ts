@@ -34,6 +34,9 @@ describe("Phase 7 durable campaign queue", () => {
   it("uses a conditional updateMany lease so two workers cannot both claim the same job", async () => {
     const candidate = { id: "job-a", tenantId: "tenant-a", kind: "campaign", status: "queued", createdAt: new Date(), params: "{}" };
     let claimCount = 0;
+    // One claimable candidate: the loser of the conditional write finds nothing
+    // else to fall back to and returns null.
+    mocks.prisma.job.findMany.mockResolvedValue([candidate]);
     mocks.prisma.job.findFirst.mockImplementation(async () => candidate);
     mocks.prisma.job.updateMany.mockImplementation(async () => ({ count: ++claimCount === 1 ? 1 : 0 }));
     const [first, second] = await Promise.all([queue.claimNextCampaignJob("worker-1"), queue.claimNextCampaignJob("worker-2")]);

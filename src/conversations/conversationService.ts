@@ -174,15 +174,66 @@ export function recordOutbound(input: Omit<RecordConversationInput, "direction">
   return record({ ...input, direction: "out" });
 }
 
-export async function listConversations(ctx: TenantContext): Promise<{ conversations: ConversationView[]; totalUnread: number }> {
-  const threads = await prisma.conversationThread.findMany({
-    where: { tenantId: ctx.tenantId },
-    include: { messages: { orderBy: { occurredAt: "asc" } } },
-    orderBy: { lastMessageAt: "desc" },
-  });
+export interface ListConversationsOptions {
+  page?: number;
+  pageSize?: number;
+  channel?: ConversationChannel;
+  status?: ConversationStatus;
+  search?: string;
+  /** Most recent messages returned per thread. The full thread is at GET /api/conversations/:id. */
+  messageLimit?: number;
+}
+
+/**
+ * Paginated inbox read.
+ *
+ * The unpaginated version loaded every thread for the workspace with every
+ * message inside it, so the 8-second inbox poll grew linearly with the whole
+ * conversation history — a workspace with 5,000 replies re-materialised all of
+ * them on every tick. Threads are now a page at a time and each carries only its
+ * most recent messages; `totalUnread` still aggregates across the workspace so
+ * the badge stays correct on page two.
+ */
+export async function listConversations(
+  ctx: TenantContext,
+  options: ListConversationsOptions = {}
+): Promise<{ conversations: ConversationView[]; totalUnread: number; total: number; page: number; pageSize: number }> {
+  const page = Math.max(1, Number(options.page) || 1);
+  const pageSize = Math.min(200, Math.max(1, Number(options.pageSize) || 50));
+  const messageLimit = Math.min(500, Math.max(1, Number(options.messageLimit) || 50));
+  const search = String(options.search || "").trim().slice(0, 200);
+
+  const where: Record<string, unknown> = { tenantId: ctx.tenantId };
+  if (options.channel === "email" || options.channel === "whatsapp") where.channel = options.channel;
+  if (options.status) where.status = options.status;
+  if (search) {
+    where.OR = [
+      { businessName: { contains: search } },
+      { email: { contains: search } },
+      { phone: { contains: search } },
+    ];
+  }
+
+  const [threads, total, unread] = await Promise.all([
+    prisma.conversationThread.findMany({
+      where,
+      // Newest-first at the database, then reversed for display, so a long
+      // thread returns its latest exchange rather than its oldest.
+      include: { messages: { orderBy: { occurredAt: "desc" }, take: messageLimit } },
+      orderBy: { lastMessageAt: "desc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.conversationThread.count({ where }),
+    prisma.conversationThread.aggregate({ where: { tenantId: ctx.tenantId }, _sum: { unreadCount: true } }),
+  ]);
+
   return {
-    conversations: threads.map(toView),
-    totalUnread: threads.reduce((sum: number, thread: any) => sum + thread.unreadCount, 0),
+    conversations: threads.map((thread: any) => toView({ ...thread, messages: [...(thread.messages ?? [])].reverse() })),
+    totalUnread: Number(unread?._sum?.unreadCount || 0),
+    total,
+    page,
+    pageSize,
   };
 }
 

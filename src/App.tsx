@@ -3,9 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
-import IntegrationSettings from "./IntegrationSettings";
-import EmailTemplates from "./EmailTemplates";
+import React, { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
 import WhatsAppLogo from "./WhatsAppLogo";
 import { 
   Terminal as TerminalIcon, 
@@ -78,19 +76,29 @@ import {
 } from "./outreachTemplates";
 import TemplateDropdown from "./TemplateDropdown";
 import SearchableDropdown from "./SearchableDropdown";
-import CampaignReport from "./CampaignReport";
-import Conversations from "./Conversations";
-import BusinessPanel from "./features/BusinessPanel";
-import KnowledgePanel from "./features/KnowledgePanel";
-import AssistantPanel from "./features/AssistantPanel";
-import TargetingPanel from "./features/TargetingPanel";
-import CampaignPanel from "./features/CampaignPanel";
 import AlertModal, { AlertModalType } from "./AlertModal";
-import { jsPDF } from "jspdf";
-import autoTable from "jspdf-autotable";
-import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType } from "docx";
-import { saveAs } from "file-saver";
-import * as XLSX from "xlsx";
+
+/**
+ * One tab is visible at a time, so the code for the other twelve does not need to
+ * be in the first download. Each panel is fetched when its tab is first opened.
+ *
+ * This matters most for the panels that carry libraries of their own: the report
+ * panel pulls in the charting library and the document exporters, which together
+ * were a large share of a single 2.7 MB bundle that every user paid for on first
+ * load, including users who never opened Reports.
+ */
+const IntegrationSettings = lazy(() => import("./IntegrationSettings"));
+const EmailTemplates = lazy(() => import("./EmailTemplates"));
+const CampaignReport = lazy(() => import("./CampaignReport"));
+const Conversations = lazy(() => import("./Conversations"));
+const BusinessPanel = lazy(() => import("./features/BusinessPanel"));
+const KnowledgePanel = lazy(() => import("./features/KnowledgePanel"));
+const AssistantPanel = lazy(() => import("./features/AssistantPanel"));
+const TargetingPanel = lazy(() => import("./features/TargetingPanel"));
+const CampaignPanel = lazy(() => import("./features/CampaignPanel"));
+// The spreadsheet, PDF and Word writers are only reachable from the export
+// buttons, so they are fetched at the moment a user clicks one rather than
+// shipped to every user who never exports anything.
 
 interface AuthedUser {
   id: string;
@@ -1710,11 +1718,12 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     document.body.removeChild(link);
   };
 
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
     if (crmLeads.length === 0) {
       alert("No leads available to export.");
       return;
     }
+    const XLSX = await import("xlsx");
 
     // Column definitions: header label + character-width hint (wch)
     // wch = max expected content width in characters — Google Sheets & Excel
@@ -1880,6 +1889,8 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
       // Logo load failed — fall back to text only
       logoDataUrl = null;
     }
+
+    const [{ jsPDF }, { default: autoTable }] = await Promise.all([import("jspdf"), import("jspdf-autotable")]);
 
     // ── Create A2-landscape document (594 × 420 mm) ────────────────────────
     // A2 landscape gives ~570 mm usable width which fits all 27 columns
@@ -2053,11 +2064,16 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     doc.save(`leads_export_${Date.now()}.pdf`);
   };
 
-  const handleExportWord = () => {
+  const handleExportWord = async () => {
     if (crmLeads.length === 0) {
       alert("No leads available to export.");
       return;
     }
+
+    const [{ Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType }, { saveAs }] = await Promise.all([
+      import("docx"),
+      import("file-saver"),
+    ]);
 
     // Helper: create a header cell
     const hCell = (text: string, widthPct: number) =>
@@ -2528,7 +2544,19 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
         {/* Active Tab View Frame */}
         <div className="flex-grow overflow-y-auto p-8 relative">
-          
+          {/*
+            One boundary for every lazily loaded panel. The fallback is shown only
+            on the first visit to a tab, while its chunk downloads.
+          */}
+          <Suspense
+            fallback={
+              <div className="flex items-center justify-center gap-2 py-16 text-sm text-slate-400" role="status" aria-live="polite">
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                <span>Loading…</span>
+              </div>
+            }
+          >
+
           {/* TAB 1: DASHBOARD OVERVIEW */}
           {activeTab === "dashboard" && (
             <div className="space-y-6">
@@ -4790,6 +4818,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
             </div>
           )}
 
+          </Suspense>
         </div>
       </div>
 

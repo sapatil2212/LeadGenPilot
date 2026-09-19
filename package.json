@@ -25,6 +25,7 @@
     "prisma:migrate": "prisma migrate deploy",
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:migrate:status": "prisma migrate status",
+    "verify:migrations": "node scripts/verify-migration-completeness.mjs",
     "prisma:push": "echo \"REFUSED: 'db push' bypasses migration history. Use 'npm run prisma:migrate:dev' to create a migration, or 'npm run prisma:migrate' to deploy one. Override deliberately with 'npx prisma db push'.\" && exit 1",
     "db:studio": "prisma studio",
     "setup:browsers": "playwright install --with-deps chromium",

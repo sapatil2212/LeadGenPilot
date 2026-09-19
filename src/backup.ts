@@ -9,6 +9,8 @@ import { logger } from "./logger";
 import archiver from "archiver";
 import { duplicateChecker } from "./duplicateChecker";
 import { loadFailedLeads } from "./googleSheetsWebhook";
+import { prisma } from "./prisma";
+import { Prisma } from "@prisma/client";
 
 /**
  * Automated backup system for lead data and configurations.
@@ -38,7 +40,22 @@ export interface BackupMetadata {
   failedLeadsCount: number;
   size: number;
   path: string;
+  /** Per-table row counts captured from MySQL, absent when the database was unreachable. */
+  database?: {
+    included: boolean;
+    totalRows: number;
+    tables: Record<string, { rows: number; truncated: boolean }>;
+    error?: string;
+  };
 }
+
+/**
+ * Rows dumped per table before the dump is marked truncated. A backup that
+ * exhausts the API process's memory protects nothing, so the limit is explicit
+ * and recorded in the manifest rather than silently unbounded.
+ */
+const MAX_ROWS_PER_TABLE = 100_000;
+const DB_DUMP_PAGE_SIZE = 5_000;
 
 /**
  * Backup ids are generated as `backup_<ISO timestamp with : and . replaced>`,
@@ -50,6 +67,62 @@ const BACKUP_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 function isValidBackupId(id: string): boolean {
   return BACKUP_ID_RE.test(String(id ?? ""));
+}
+
+/**
+ * Environment keys whose values are operational settings rather than secrets and
+ * are therefore kept readable in the archived copy of `.env`.
+ *
+ * This list is an allow-list on purpose. The previous approach named the secrets
+ * to hide, which fails silently the moment a new secret is introduced: a mask
+ * list containing "API_KEY" does not cover `ENCRYPTION_KEY`, so the key used to
+ * encrypt tenant integration credentials was written into every backup archive in
+ * clear text. Anything not named here is masked, so a new variable is private by
+ * default and the worst case of a mistake is a less informative backup.
+ */
+const NON_SECRET_ENV_KEYS = new Set([
+  "NODE_ENV",
+  "PORT",
+  "HOST",
+  "APP_URL",
+  "LOG_LEVEL",
+  "LOG_MAX_BYTES",
+  "AUTH_ENABLED",
+  "BODY_LIMIT",
+  "CORS_ORIGIN",
+  "CORS_ORIGINS",
+  "SMTP_HOST",
+  "SMTP_PORT",
+  "SMTP_SECURE",
+  "SMTP_FROM",
+  "SMTP_FROM_NAME",
+  "EMAIL_POLL_INTERVAL_MS",
+  "CAMPAIGN_WORKER_POLL_MS",
+  "CAMPAIGN_WORKER_DRAIN_MS",
+  "CAMPAIGN_LEASE_RENEW_MS",
+  "WORKER_ID",
+  "RATE_LIMIT_WINDOW_MS",
+  "RATE_LIMIT_MAX",
+  "BACKUP_INTERVAL_HOURS",
+]);
+
+/**
+ * Returns `.env` content with every value masked except the operational settings
+ * above. Key names and comments are preserved, because knowing which variables a
+ * deployment defined is the useful part of archiving the file at all.
+ */
+export function maskEnvContent(content: string): string {
+  return String(content ?? "")
+    .split(/\r?\n/)
+    .map((line) => {
+      const match = /^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/.exec(line);
+      if (!match) return line; // comment, blank line, or continuation
+      const [, indent, key, separator, value] = match;
+      if (!value.trim()) return line;
+      if (NON_SECRET_ENV_KEYS.has(key.toUpperCase())) return line;
+      return `${indent}${key}${separator}********`;
+    })
+    .join("\n");
 }
 
 export class BackupService {
@@ -101,6 +174,10 @@ export class BackupService {
 
     const leads = duplicateChecker.loadLeads();
     const failedLeads = loadFailedLeads();
+    // The database is the product's source of truth for workspaces, campaigns,
+    // delivery reports, conversations and suppressions. A backup of three JSON
+    // files protected none of it.
+    const dump = await this.dumpDatabase();
 
     const output = fs.createWriteStream(backupPath);
     const archive = archiver("zip", { zlib: { level: 9 } });
@@ -115,6 +192,12 @@ export class BackupService {
           failedLeadsCount: failedLeads.length,
           size,
           path: backupPath,
+          database: {
+            included: dump.included,
+            totalRows: dump.totalRows,
+            tables: dump.tables,
+            ...(dump.error ? { error: dump.error } : {}),
+          },
         };
 
         // Save metadata
@@ -132,6 +215,12 @@ export class BackupService {
       });
 
       archive.pipe(output);
+
+      // One JSON document per table, under database/, so a restore can be done
+      // table by table and a human can read what was captured.
+      for (const [table, json] of dump.documents) {
+        archive.append(json, { name: `database/${table}.json` });
+      }
 
       // Add data files
       const processedLeadsPath = path.join(process.cwd(), "processed-leads.json");
@@ -165,6 +254,12 @@ export class BackupService {
             failedLeadsCount: failedLeads.length,
             nodeVersion: process.version,
             platform: process.platform,
+            database: {
+              included: dump.included,
+              totalRows: dump.totalRows,
+              tables: dump.tables,
+              ...(dump.error ? { error: dump.error } : {}),
+            },
           },
           null,
           2
@@ -174,6 +269,65 @@ export class BackupService {
 
       archive.finalize();
     });
+  }
+
+  /**
+   * Reads every mapped table into JSON documents for the archive.
+   *
+   * The table list comes from the generated datamodel, not from a hand-written
+   * array, so a model added later is included automatically instead of being
+   * quietly omitted from every backup taken afterwards.
+   *
+   * A database outage does not fail the backup: the file-based stores are still
+   * worth capturing, and the manifest records that the database was missed so the
+   * gap is visible rather than assumed.
+   */
+  private async dumpDatabase(): Promise<{
+    included: boolean;
+    totalRows: number;
+    tables: Record<string, { rows: number; truncated: boolean }>;
+    documents: Array<[string, string]>;
+    error?: string;
+  }> {
+    const tables: Record<string, { rows: number; truncated: boolean }> = {};
+    const documents: Array<[string, string]> = [];
+    let totalRows = 0;
+
+    const models = (Prisma as any)?.dmmf?.datamodel?.models as Array<{ name: string; dbName?: string }> | undefined;
+    if (!Array.isArray(models) || models.length === 0) {
+      return { included: false, totalRows: 0, tables, documents, error: "Prisma datamodel unavailable; run prisma generate." };
+    }
+
+    try {
+      for (const model of models) {
+        const table = model.dbName || model.name;
+        const delegate = (prisma as any)[model.name.charAt(0).toLowerCase() + model.name.slice(1)];
+        if (!delegate?.findMany) continue;
+
+        const rows: unknown[] = [];
+        let truncated = false;
+        // Paged reads keep one enormous table from being materialised in a
+        // single query, and stop at an explicit ceiling.
+        for (let skip = 0; skip < MAX_ROWS_PER_TABLE; skip += DB_DUMP_PAGE_SIZE) {
+          const page = await delegate.findMany({ skip, take: DB_DUMP_PAGE_SIZE });
+          rows.push(...page);
+          if (page.length < DB_DUMP_PAGE_SIZE) break;
+          if (rows.length >= MAX_ROWS_PER_TABLE) {
+            truncated = true;
+            break;
+          }
+        }
+
+        tables[table] = { rows: rows.length, truncated };
+        totalRows += rows.length;
+        documents.push([table, JSON.stringify(rows, (_key, value) => (typeof value === "bigint" ? value.toString() : value), 2)]);
+      }
+      return { included: true, totalRows, tables, documents };
+    } catch (error: any) {
+      const message = error?.message || String(error);
+      logger.warn(`Backup could not read the database; the archive will cover files only: ${message}`);
+      return { included: false, totalRows, tables, documents, error: message };
+    }
   }
 
   /**
@@ -225,12 +379,24 @@ export class BackupService {
       const allowed = new Set<string>(BACKUP_ENTRIES);
       const directory = await unzipper.Open.file(backupPath);
       let restored = 0;
+      let databaseDumps = 0;
 
       for (const entry of directory.files) {
         if (entry.type !== "File") continue;
 
         const entryName = entry.path.replace(/\\/g, "/");
         const base = path.posix.basename(entryName);
+
+        /*
+         * Table dumps are carried by the archive but never written back from
+         * here. Overwriting live workspaces, campaigns and delivery history from
+         * an HTTP request is not a recovery procedure — it is an outage. They are
+         * restored deliberately, by an operator, against a chosen database.
+         */
+        if (entryName.startsWith("database/") && entryName.endsWith(".json")) {
+          databaseDumps++;
+          continue;
+        }
 
         if (entryName !== base || !allowed.has(base)) {
           logger.warn(`Skipped unexpected archive entry during restore: ${JSON.stringify(entryName.slice(0, 120))}`);
@@ -247,6 +413,11 @@ export class BackupService {
         restored++;
       }
 
+      if (databaseDumps > 0) {
+        logger.info(
+          `Archive also contains ${databaseDumps} database table dump(s). Database restore is a deliberate operator action and was not performed by this request.`
+        );
+      }
       logger.success(`Backup restored: ${backupId} (${restored} file(s))`);
       return restored > 0;
     } catch (error: any) {
@@ -297,24 +468,7 @@ export class BackupService {
    * Mask sensitive data in .env content.
    */
   private maskSensitiveData(content: string): string {
-    const sensitiveKeys = [
-      "DATABASE_URL",
-      "JWT_SECRET",
-      "API_KEY",
-      "SMTP_PASS",
-      "GEMINI_API_KEY",
-      "PASSWORD",
-      "SECRET",
-      "TOKEN",
-    ];
-
-    let masked = content;
-    sensitiveKeys.forEach((key) => {
-      const regex = new RegExp(`(${key}=)(.+)`, "gi");
-      masked = masked.replace(regex, "$1********");
-    });
-
-    return masked;
+    return maskEnvContent(content);
   }
 
   private formatSize(bytes: number): string {

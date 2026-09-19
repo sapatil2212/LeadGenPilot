@@ -113,6 +113,7 @@ model Tenant {
   conversationThreads  ConversationThread[]
   conversationMessages ConversationMessage[]
   campaignDispatches   CampaignDispatch[]
+  suppressions         SuppressionEntry[]
 
   @@index([status])
   @@map("tenants")
@@ -1019,6 +1020,11 @@ model Campaign {
   sentCount     Int @default(0) @map("sent_count")
   failedCount   Int @default(0) @map("failed_count")
 
+  /// Messages that were never attempted because the contact was suppressed.
+  /// Counted apart from `failedCount` so a compliance skip is never reported as
+  /// a delivery failure.
+  skippedCount  Int @default(0) @map("skipped_count")
+
   createdById String   @map("created_by_id")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
@@ -1064,13 +1070,16 @@ model CampaignMessage {
   subject String? @db.Text /// email only
   body    String  @db.Text
 
-  /// "pending_review" | "approved" | "rejected" | "sent" | "failed"
+  /// "pending_review" | "approved" | "rejected" | "sending" | "retry_wait" | "sent" | "failed" | "suppressed"
   ///
   /// - pending_review: awaiting the user's decision
   /// - approved: user said yes, queued for send
   /// - rejected: user said no, will not be sent
+  /// - sending: leased by one worker, delivery in flight
+  /// - retry_wait: a retryable error occurred; waits until nextAttemptAt
   /// - sent: delivered successfully
   /// - failed: send attempt returned an error
+  /// - suppressed: never attempted, the contact had opted out
   status String @default("pending_review")
 
   /// Why this message was rejected or failed, if applicable.
@@ -1216,4 +1225,39 @@ model CampaignDispatch {
   @@unique([campaignMessageId])
   @@index([tenantId, externalMessageId])
   @@map("campaign_dispatches")
+}
+
+/// A contact this workspace must not contact again on a given channel.
+///
+/// Compliance is per tenant and per channel: an email unsubscribe does not
+/// silence WhatsApp, and one workspace's opt-out must never leak into another
+/// workspace's audience. The unique key makes repeated opt-outs idempotent, so
+/// replying "STOP" twice does not create two records.
+model SuppressionEntry {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  /// "email" | "whatsapp"
+  channel String
+
+  /// Canonical lowercased email or normalized phone digits.
+  contactKey String @map("contact_key")
+
+  /// "unsubscribe" | "opt_out_reply" | "manual" | "bounce" | "complaint"
+  reason String @default("manual")
+
+  /// Where the opt-out came from, e.g. "inbound_whatsapp", "inbound_email", "api".
+  source String?
+
+  /// The inbound text or operator note that produced the record.
+  notes String? @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, channel, contactKey])
+  @@index([tenantId, createdAt])
+  @@map("suppression_entries")
 }

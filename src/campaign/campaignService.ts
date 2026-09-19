@@ -17,11 +17,12 @@
  */
 
 import { prisma } from "../prisma";
-import { logger } from "../logger";
+import { logger, logContext } from "../logger";
 import type { Lead } from "../types";
 import type { TenantContext } from "../tenancy/context";
 import { generateAICopy } from "../aiCopyGenerator";
 import { generateOutreachCopy } from "../outreachCopy";
+import { canonicalSuppressionKey, filterSuppressed } from "../compliance/suppressionService";
 
 export interface GenerateCampaignRequest {
   name?: string;
@@ -113,6 +114,24 @@ export async function generateCampaign(
     },
   });
 
+  // Opted-out contacts are excluded before any copy is generated, so a
+  // suppressed person never appears in the review queue for a human to approve
+  // by accident, and no AI tokens are spent writing to them.
+  const emailCandidates: string[] = [];
+  const phoneCandidates: string[] = [];
+  for (const lead of leads) {
+    if (emailOn && (lead as any).emails) {
+      const list = Array.isArray((lead as any).emails) ? (lead as any).emails : JSON.parse((lead as any).emails || "[]");
+      for (const email of list) if (typeof email === "string") emailCandidates.push(email);
+    }
+    if (whatsappOn && lead.phone) phoneCandidates.push(lead.phone);
+  }
+  const [suppressedEmails, suppressedPhones] = await Promise.all([
+    emailOn ? filterSuppressed(ctx.tenantId, "email", emailCandidates) : Promise.resolve(new Set<string>()),
+    whatsappOn ? filterSuppressed(ctx.tenantId, "whatsapp", phoneCandidates) : Promise.resolve(new Set<string>()),
+  ]);
+  let suppressedSkips = 0;
+
   const messages: Array<{
     campaignId: string;
     tenantId: string;
@@ -173,7 +192,11 @@ export async function generateCampaign(
     // Email message
     if (emailOn && lead.emails) {
       const emailList = Array.isArray(lead.emails) ? lead.emails : JSON.parse(lead.emails || "[]");
-      const email = emailList.find((e: string) => e.includes("@")) || null;
+      const deliverable = emailList.filter((e: string) => typeof e === "string" && e.includes("@"));
+      // Prefer an address this workspace is still allowed to contact; a lead
+      // with one opted-out and one open address is still reachable.
+      const email = deliverable.find((e: string) => !suppressedEmails.has(canonicalSuppressionKey("email", e))) || null;
+      if (!email && deliverable.length > 0) suppressedSkips++;
       if (email) {
         messages.push({
           campaignId: campaign.id,
@@ -195,7 +218,9 @@ export async function generateCampaign(
     }
 
     // WhatsApp message
-    if (whatsappOn && lead.phone) {
+    if (whatsappOn && lead.phone && suppressedPhones.has(canonicalSuppressionKey("whatsapp", lead.phone))) {
+      suppressedSkips++;
+    } else if (whatsappOn && lead.phone) {
       messages.push({
         campaignId: campaign.id,
         tenantId: ctx.tenantId,
@@ -228,12 +253,16 @@ export async function generateCampaign(
     },
   });
 
-  const warning =
-    aiFailures > 0
-      ? `${aiFailures} lead${aiFailures === 1 ? "" : "s"} fell back to rule-based copy because the AI provider was unavailable.`
-      : undefined;
+  const warnings: string[] = [];
+  if (aiFailures > 0) {
+    warnings.push(`${aiFailures} lead${aiFailures === 1 ? "" : "s"} fell back to rule-based copy because the AI provider was unavailable.`);
+  }
+  if (suppressedSkips > 0) {
+    warnings.push(`${suppressedSkips} contact${suppressedSkips === 1 ? " was" : "s were"} excluded because they opted out of this workspace's outreach.`);
+  }
+  const warning = warnings.length ? warnings.join(" ") : undefined;
 
-  logger.info(`Campaign ${campaign.id} generated: ${messages.length} messages for ${leads.length} leads.`);
+  logger.info(`Campaign generated: ${messages.length} messages for ${leads.length} leads${suppressedSkips ? `, ${suppressedSkips} suppressed` : ""}.${logContext({ tenant: ctx.tenantId, campaign: campaign.id })}`);
   return { campaignId: campaign.id, messageCount: messages.length, warning };
 }
 
