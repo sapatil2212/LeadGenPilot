@@ -21,6 +21,7 @@ import {
   deleteCampaign,
   type GenerateCampaignRequest,
 } from "./campaignService";
+import { executeCampaign } from "./campaignExecutor";
 
 const router = Router();
 
@@ -125,6 +126,29 @@ router.post(
       res.json(result);
     } catch (error: any) {
       res.status(400).json({ error: error.message || "Failed to approve all." });
+    }
+  }
+);
+
+/**
+ * POST /api/campaigns/:id/execute
+ *
+ * Send all approved messages in a campaign.
+ */
+router.post(
+  "/:id/execute",
+  resolveTenantContext,
+  requirePermission("SEND_CAMPAIGN"),
+  async (req: Request, res: Response) => {
+    try {
+      const ctx = ctxOf(req);
+      const result = await executeCampaign(ctx, req.params.id, {
+        delayMs: req.body.delayMs || 5000,
+        batchSize: req.body.batchSize,
+      });
+      res.json(result);
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || "Failed to execute campaign." });
     }
   }
 );

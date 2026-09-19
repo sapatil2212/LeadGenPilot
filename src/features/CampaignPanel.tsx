@@ -206,6 +206,14 @@ function CampaignReview({
     if (ok) campaign.reload();
   };
 
+  const sendCampaign = async () => {
+    const ok = await action.run(
+      () => api.post(`/api/campaigns/${campaignId}/execute`),
+      "Campaign is being sent. This may take a few minutes."
+    );
+    if (ok) campaign.reload();
+  };
+
   const deleteCampaign = async () => {
     const ok = await action.run(() => api.del(`/api/campaigns/${campaignId}`), "Campaign deleted.");
     if (ok) onBack();
@@ -249,6 +257,17 @@ function CampaignReview({
                 onClick={approveAll}
               >
                 Approve all ({pending.length})
+              </Button>
+            )}
+            {approved.length > 0 && campaign.data.status !== "sent" && campaign.data.status !== "sending" && (
+              <Button
+                isLight={isLight}
+                variant="primary"
+                icon={Send}
+                busy={action.busy}
+                onClick={sendCampaign}
+              >
+                Send campaign ({approved.length})
               </Button>
             )}
           </>

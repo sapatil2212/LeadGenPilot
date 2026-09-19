@@ -26,7 +26,15 @@ vi.mock("../src/outreachCopy");
 
 const TENANT_ID = "test-tenant-campaign";
 const USER_ID = "test-user-campaign";
-const CTX: TenantContext = { tenantId: TENANT_ID, userId: USER_ID };
+const CTX: TenantContext = {
+  tenantId: TENANT_ID,
+  userId: USER_ID,
+  membershipId: "test-membership",
+  role: "owner",
+  tenantName: "Test Tenant",
+  tenantSlug: "test-campaign",
+  permissions: new Set(["SEND_CAMPAIGN", "VIEW_ANALYTICS", "EDIT_LEADS", "DELETE_LEADS"]),
+};
 
 function createLeadData(listId: string, overrides: Partial<any> = {}) {
   return {
