@@ -20,23 +20,12 @@ import { logger } from "./src/logger";
 import { duplicateChecker } from "./src/duplicateChecker";
 import { loadFailedLeads, retryFailedLeads, sendLeadToWebhook, fetchLeadsFromGoogleSheet, fetchSheetNamesFromGoogleSheet } from "./src/googleSheetsWebhook";
 import { 
-  getWhatsAppStatus, 
-  initializeWhatsApp, 
+  getWhatsAppStatus,
   disconnectWhatsApp,
-  sendEmailOutreach, 
-  sendWhatsAppTestMessage,
+  sendEmailOutreach,
   setIncomingWhatsAppHandler
 } from "./src/outreachService";
-import {
-  recordInbound as recordConvoInbound,
-  recordOutbound as recordConvoOutbound,
-  listConversations,
-  getConversation,
-  markConversationRead,
-  setConversationStatus,
-  deleteConversation,
-  normalizePhoneKey,
-} from "./src/conversationStore";
+import { normalizePhoneKey } from "./src/conversationStore";
 import { generateOutreachCopy } from "./src/outreachCopy";
 import { generateAICopy } from "./src/aiCopyGenerator";
 import { env, validateEnv } from "./src/env";
@@ -63,7 +52,6 @@ import { scoreFit } from "./src/icp/fitService";
 import { resolveActiveRuleSet, scoreLead } from "./src/scoring";
 import { buildBusinessContext } from "./src/business/businessService";
 import {
-  listDiscovered,
   clearDiscovered,
   loadSeenFingerprints,
   fingerprintOf,
@@ -71,6 +59,7 @@ import {
 } from "./src/discovery/dedupeService";
 import { connectDatabase, disconnectDatabase } from "./src/prisma";
 import crmRoutes, { appLeadToDbInput, dbLeadToAppLead } from "./crmRoutes";
+import * as tenantRepo from "./src/tenancy/repository";
 import { prisma } from "./src/prisma";
 import {
   OutreachTemplate,
@@ -79,18 +68,14 @@ import {
   templateNeedsAiBody,
 } from "./src/outreachTemplates";
 import {
-  appendCampaignHistory,
   queryCampaignHistory,
   summarizeCampaignHistory,
   CampaignHistoryQuery,
-  getCampaignHistoryRecord,
-  updateCampaignHistoryRecord,
-  deleteCampaignHistoryRecord,
-  deleteCampaignHistoryRecords,
 } from "./src/campaignHistory";
 import { exportCampaignHistoryToCsv, exportCampaignHistoryToPdf, exportCampaignHistoryToDocx } from "./src/campaignReportExporter";
 import {
   getUserIntegration,
+  saveUserIntegration,
   getAllEnabledSmtpConfigs,
   findCloudConfigByPhoneNumberId,
   findCloudConfigByVerifyToken,
@@ -118,7 +103,7 @@ import {
   heavyActionRateLimiter,
   apiKeyAuth,
 } from "./src/security";
-import { resolveTenantContext, requirePermission, ctxOf } from "./src/tenancy/context";
+import { resolveTenantContext, requirePermission, ctxOf, type TenantContext } from "./src/tenancy/context";
 import {
   startJob,
   finishJob,
@@ -380,29 +365,24 @@ app.post(
         }
       }
 
+      if (!tenant?.tenantId) {
+        logger.warn("Ignored WhatsApp Cloud webhook: integration has no workspace ownership.");
+        return;
+      }
+
       for (const msg of messages) {
         const key = normalizePhoneKey(msg.from);
         if (!key) continue;
 
         const lead = await prisma.lead
-          .findFirst({ where: { phone: { contains: key } } })
+          .findFirst({ where: { tenantId: tenant.tenantId, phone: { contains: key } } })
           .catch(() => null);
-
-        await recordConvoInbound({
-          channel: "whatsapp",
-          phone: msg.from,
-          text: msg.text,
-          leadId: lead?.id,
-          businessName: lead?.businessName,
-        });
 
         if (lead?.id) {
           await prisma.lead
             .update({ where: { id: lead.id }, data: { conversationStatus: "REPLIED" } })
             .catch(() => {});
-          logger.success(`Cloud API reply received from '${lead.businessName}' — conversation started.`);
-        } else {
-          logger.info(`Inbound Cloud API reply from unmatched number ${key} recorded in Conversations.`);
+          logger.success(`Cloud API reply matched inside workspace ${tenant.tenantId}.`);
         }
       }
 
@@ -416,7 +396,7 @@ app.post(
       if (statuses.length) {
         let sheetWebhookUrl: string | undefined;
         if (tenant?.userId) {
-          const sheetConfig = (await getUserIntegration(tenant.userId, "google_sheet").catch(
+          const sheetConfig = (await getUserIntegration(tenant.userId, "google_sheet", tenant.tenantId || undefined).catch(
             () => null
           )) as any;
           if (sheetConfig?.webhookUrl) sheetWebhookUrl = sheetConfig.webhookUrl;
@@ -432,19 +412,14 @@ app.post(
           if (!key) continue;
 
           const lead = await prisma.lead
-            .findFirst({ where: { phone: { contains: key } } })
+            .findFirst({ where: { tenantId: tenant.tenantId, phone: { contains: key } } })
             .catch(() => null);
           if (!lead) continue;
 
-          await updateLeadOutreachStatus(
-            lead.businessName,
-            "whatsapp",
-            "FAILED",
-            lead.mapsUrl,
-            sheetWebhookUrl
-          ).catch((err) =>
-            logger.warn(`Could not record WhatsApp delivery failure: ${err?.message || err}`)
-          );
+          await prisma.lead.update({
+            where: { id: lead.id },
+            data: { whatsappStatus: "FAILED", whatsappSentDate: new Date().toISOString().split("T")[0] },
+          }).catch((err) => logger.warn(`Could not record WhatsApp delivery failure: ${err?.message || err}`));
           logger.info(`Marked '${lead.businessName}' WhatsApp status as FAILED after a delivery receipt.`);
         }
       }
@@ -501,6 +476,16 @@ app.use("/api/assistant", assistantRoutes);
  */
 app.use("/api/icp", icpRoutes);
 app.use("/api/scoring", scoringRoutes);
+
+/*
+ * ── Phase 5: Campaign generation with approval ──────────────────────────────
+ *
+ * The operator generates a batch of outreach messages, reviews each one, and
+ * approves only what they're willing to claim. Replaces the fire-and-forget
+ * campaign loop with a durable review workflow.
+ */
+import campaignRoutes from "./src/campaign/campaignRoutes";
+app.use("/api/campaigns", campaignRoutes);
 
 /*
  * ── Discovery settings, formerly the global CONFIG ───────────────────────────
@@ -597,25 +582,24 @@ app.post(
 );
 
 /**
- * GET /api/processed — businesses this workspace has already discovered.
+ * GET /api/processed — full CRM leads owned by this workspace.
  *
- * Used to return `processed-leads.json`, a single file with no tenant dimension,
- * to any authenticated caller. That disclosed every workspace's prospect list:
- * business names, addresses and phone numbers harvested by other customers of the
- * platform. It now reads the tenant-scoped table and requires lead access.
+ * The dashboard contract is a Lead array. Discovery fingerprints live behind
+ * the dedupe service and are intentionally not returned here because they are
+ * a different shape. Reads go through the tenant repository so no caller can
+ * observe another workspace's list or leads.
  */
 app.get(
   "/api/processed",
   resolveTenantContext,
   requirePermission("VIEW_LEADS"),
   asyncHandler(async (req, res) => {
-    const limit = parseInt(String(req.query.limit ?? "100"), 10);
-    const offset = parseInt(String(req.query.offset ?? "0"), 10);
-    const page = await listDiscovered(ctxOf(req), {
-      limit: Number.isFinite(limit) ? limit : 100,
-      offset: Number.isFinite(offset) ? offset : 0,
-    });
-    res.json(page);
+    const leads = await tenantRepo.findLeadsInWorkspace(
+      ctxOf(req),
+      {},
+      { createdAt: "desc" }
+    );
+    res.json(leads.map(dbLeadToAppLead));
   })
 );
 
@@ -787,7 +771,7 @@ app.post(
     try {
       logger.clear();
       let customWebhookUrl: string | undefined;
-      const sheetConfig = (await getUserIntegration(scrapingUserId, "google_sheet")) as any;
+      const sheetConfig = (await getUserIntegration(scrapingUserId, "google_sheet", ctx.tenantId)) as any;
       if (sheetConfig && sheetConfig.webhookUrl) {
         customWebhookUrl = sheetConfig.webhookUrl;
       }
@@ -1062,7 +1046,7 @@ app.post(
   })
 );
 
-app.post("/api/retry-failed", async (req, res) => {
+app.post("/api/retry-failed", requireAuth, requireAdmin, async (req, res) => {
   try {
     let customWebhookUrl: string | undefined;
     const userId = req.authUser?.id;
@@ -1079,12 +1063,17 @@ app.post("/api/retry-failed", async (req, res) => {
   }
 });
 
-app.post("/api/test-webhook", async (req, res) => {
+app.post(
+  "/api/test-webhook",
+  resolveTenantContext,
+  requirePermission("MANAGE_INTEGRATIONS"),
+  asyncHandler(async (req, res) => {
   try {
     let customWebhookUrl: string | undefined;
-    const userId = req.authUser?.id;
+    const ctx = ctxOf(req);
+    const userId = ctx.userId;
     if (userId) {
-      const sheetConfig = await getUserIntegration(userId, "google_sheet") as any;
+      const sheetConfig = await getUserIntegration(userId, "google_sheet", ctx.tenantId) as any;
       if (sheetConfig && sheetConfig.webhookUrl) {
         customWebhookUrl = sheetConfig.webhookUrl;
       } else {
@@ -1131,7 +1120,7 @@ app.post("/api/test-webhook", async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: "Failed to issue test webhook call." });
   }
-});
+}));
 
 /**
  * POST /api/clear-leads — forget this workspace's discovery history.
@@ -1224,114 +1213,119 @@ async function updateLeadOutreachStatus(businessName: string, channel: "email" |
   }
 }
 
-// SMTP configurations endpoints
-app.get("/api/config/smtp", (req, res) => {
-  res.json({
-    host: process.env.SMTP_HOST || "",
-    port: process.env.SMTP_PORT || "587",
-    user: process.env.SMTP_USER || "",
-    from: process.env.SMTP_FROM || "",
-    hasPassword: !!process.env.SMTP_PASS
-  });
-});
-
-app.post("/api/config/smtp", (req, res) => {
-  try {
-    const { host, port, user, pass, from } = req.body;
-    const envPath = path.join(process.cwd(), ".env");
-    let envContent = "";
-    if (fs.existsSync(envPath)) {
-      envContent = fs.readFileSync(envPath, "utf8");
-    }
-
-    const smtpKeys = {
-      SMTP_HOST: host,
-      SMTP_PORT: port,
-      SMTP_USER: user,
-      SMTP_PASS: pass,
-      SMTP_FROM: from
-    };
-
-    for (const [key, val] of Object.entries(smtpKeys)) {
-      const regex = new RegExp(`^${key}=.*$`, "m");
-      if (regex.test(envContent)) {
-        envContent = envContent.replace(regex, `${key}="${val}"`);
-      } else {
-        envContent += `\n${key}="${val}"`;
-      }
-      process.env[key] = String(val);
-    }
-
-    fs.writeFileSync(envPath, envContent.trim() + "\n", "utf8");
-    res.json({ success: true, message: "SMTP configuration updated successfully." });
-  } catch (e) {
-    res.status(500).json({ error: "Failed to write SMTP configurations." });
-  }
-});
-
-// WhatsApp endpoints
-// Provider-aware: reports the QR session for "web" users and live Graph API
-// state for "cloud" users, while keeping the { status, qr } shape the
-// dashboard already renders.
+// Legacy SMTP compatibility endpoints now read and write only the signed-in
+// user's encrypted integration. They never expose or mutate process-wide .env.
 app.get(
-  "/api/whatsapp/status",
+  "/api/config/smtp",
+  resolveTenantContext,
+  requirePermission("MANAGE_INTEGRATIONS"),
   asyncHandler(async (req, res) => {
-    const userId = (req as any).authUser?.id;
-    if (!userId) {
-      return res.json({ ...getWhatsAppStatus(), provider: "web" });
-    }
-    const status = await getUnifiedWhatsAppStatus(userId);
-    res.json(status);
+    const smtp = await getUserIntegration(ctxOf(req).userId, "smtp", ctxOf(req).tenantId) as any;
+    res.json({
+      host: smtp?.host || "",
+      port: String(smtp?.port || 587),
+      user: smtp?.user || "",
+      from: smtp?.fromEmail || "",
+      hasPassword: !!smtp?.password,
+    });
   })
 );
 
-app.post("/api/whatsapp/initialize", requireFeature("whatsappOutreach", "WhatsApp outreach"), (req, res) => {
-  initializeWhatsApp();
-  res.json({ success: true, message: "WhatsApp initialization launched." });
-});
+app.post(
+  "/api/config/smtp",
+  resolveTenantContext,
+  requirePermission("MANAGE_INTEGRATIONS"),
+  asyncHandler(async (req, res) => {
+    const ctx = ctxOf(req);
+    const { host, port, user, pass, from } = req.body || {};
+    if (!host || !user || !from) {
+      return res.status(400).json({ error: "SMTP host, user and sender email are required." });
+    }
 
-app.post("/api/whatsapp/disconnect", async (req, res) => {
-  try {
-    await disconnectWhatsApp();
-    initializeWhatsApp();
-    res.json({ success: true, message: "WhatsApp disconnected and re-initialized." });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message || String(error) });
-  }
-});
+    const existing = await getUserIntegration(ctx.userId, "smtp", ctx.tenantId) as any;
+    const password = pass && !String(pass).includes("•") ? String(pass) : existing?.password;
+    if (!password) return res.status(400).json({ error: "SMTP password is required." });
 
-app.post("/api/whatsapp/send-test", heavyActionRateLimiter(), requireFeature("whatsappOutreach", "WhatsApp outreach"), async (req, res) => {
-  try {
-    const { phone } = req.body;
-    const userId = (req as any).authUser?.id;
+    await saveUserIntegration(ctx.userId, "smtp", {
+      host: String(host).trim(),
+      port: Number(port) || 587,
+      secure: Number(port) === 465,
+      user: String(user).trim(),
+      password,
+      fromEmail: String(from).trim(),
+    }, "SMTP", ctx.tenantId);
+    res.json({ success: true, message: "SMTP configuration updated successfully." });
+  })
+);
 
-    // Cloud API users have no "message yourself" concept, so a destination is
-    // mandatory there and the send goes through the unified gateway.
-    const { provider } = await resolveWhatsAppProvider(userId);
-    if (provider === "cloud") {
-      if (!phone) {
-        return res.status(400).json({ error: "Enter a destination number to test the Cloud API." });
-      }
-      const result = await sendWhatsAppUnified(phone, "Test message from NexaLeadAi.", {
-        userId,
-        allowTemplateFallback: true,
+// Tenant dashboards use the official per-user Cloud API integration. The
+// legacy WhatsApp Web client has one process-global session and is therefore
+// disabled here; sharing it would let one workspace affect another.
+app.get(
+  "/api/whatsapp/status",
+  resolveTenantContext,
+  requirePermission("MANAGE_INTEGRATIONS"),
+  asyncHandler(async (req, res) => {
+    const ctx = ctxOf(req);
+    const userId = ctx.userId;
+    const { provider } = await resolveWhatsAppProvider(userId, ctx.tenantId);
+    if (provider !== "cloud") {
+      return res.json({
+        status: "DISCONNECTED",
+        qr: "",
+        provider: "web",
+        error: "The shared WhatsApp Web gateway is disabled for tenant isolation. Configure WhatsApp Cloud API in Integrations.",
       });
-      if (result.ok) {
-        return res.json({ success: true, message: "Test message sent successfully.", provider });
-      }
-      return res.status(500).json({ error: result.error || "Failed to send test message." });
     }
+    res.json(await getUnifiedWhatsAppStatus(userId, ctx.tenantId));
+  })
+);
 
-    const success = await sendWhatsAppTestMessage(phone);
-    if (success) {
-      res.json({ success: true, message: "Test message sent successfully.", provider });
-    } else {
-      res.status(500).json({ error: "Failed to send test message." });
+app.post(
+  "/api/whatsapp/initialize",
+  resolveTenantContext,
+  requirePermission("MANAGE_INTEGRATIONS"),
+  (_req, res) => res.status(410).json({
+    error: "The shared WhatsApp Web gateway is disabled. Configure WhatsApp Cloud API in Integrations.",
+    code: "legacy_provider_disabled",
+  })
+);
+
+app.post(
+  "/api/whatsapp/disconnect",
+  resolveTenantContext,
+  requirePermission("MANAGE_INTEGRATIONS"),
+  (_req, res) => res.status(410).json({
+    error: "Manage the tenant's WhatsApp Cloud API connection in Integrations.",
+    code: "legacy_provider_disabled",
+  })
+);
+
+app.post(
+  "/api/whatsapp/send-test",
+  heavyActionRateLimiter(),
+  resolveTenantContext,
+  requirePermission("MANAGE_INTEGRATIONS"),
+  requireFeature("whatsappOutreach", "WhatsApp outreach"),
+  asyncHandler(async (req, res) => {
+    const { phone } = req.body || {};
+    const ctx = ctxOf(req);
+    const userId = ctx.userId;
+    const { provider } = await resolveWhatsAppProvider(userId, ctx.tenantId);
+    if (provider !== "cloud") {
+      return res.status(410).json({ error: "Configure WhatsApp Cloud API before sending a test.", code: "legacy_provider_disabled" });
     }
-  } catch (error: any) {
-    res.status(500).json({ error: error.message || String(error) });
-  }
-});
+    if (!phone) return res.status(400).json({ error: "Enter a destination number to test the Cloud API." });
+
+    const result = await sendWhatsAppUnified(String(phone), "Test message from NexaLeadAi.", {
+      userId,
+      tenantId: ctx.tenantId,
+      allowTemplateFallback: true,
+    });
+    if (result.ok) return res.json({ success: true, message: "Test message sent successfully.", provider });
+    return res.status(500).json({ error: result.error || "Failed to send test message." });
+  })
+);
 
 // Geocoding Proxy endpoints
 app.get("/api/geocode/search", async (req, res) => {
@@ -1407,187 +1401,85 @@ app.post("/api/reset-data", requireAuth, requireAdmin, (req, res) => {
  *  - appends a dispatch-history record so it shows in the report + charts.
  * Best-effort and non-fatal — never blocks the send response.
  */
-async function trackManualOutreach(params: {
-  leadId?: string;
-  businessName: string;
-  channel: "email" | "whatsapp";
-  status: "SENT" | "FAILED";
-  recipient: string;
-  subject?: string;
-  messageSnippet?: string;
-}) {
-  const { leadId, businessName, channel, status, recipient, subject, messageSnippet } = params;
-
-  if (leadId) {
-    const data: any = {};
-    if (channel === "email") {
-      data.emailStatus = status;
-      data.emailSentDate = new Date().toISOString().split("T")[0];
-    } else {
-      data.whatsappStatus = status;
-      data.whatsappSentDate = new Date().toISOString().split("T")[0];
-    }
-    await prisma.lead.update({ where: { id: leadId }, data }).catch((err) => {
-      logger.warn(`Manual outreach: failed to update CRM lead ${leadId} status: ${err.message || err}`);
-    });
+async function trackManualOutreach(
+  ctx: TenantContext,
+  params: {
+    leadId: string;
+    channel: "email" | "whatsapp";
+    status: "SENT" | "FAILED";
+  }
+) {
+  const data: Record<string, unknown> = {};
+  if (params.channel === "email") {
+    data.emailStatus = params.status;
+    data.emailSentDate = new Date().toISOString().split("T")[0];
+  } else {
+    data.whatsappStatus = params.status;
+    data.whatsappSentDate = new Date().toISOString().split("T")[0];
   }
 
-  await appendCampaignHistory({
-    campaignId: "manual",
-    businessName,
-    channel,
-    status,
-    recipient,
-    subject,
-    messageSnippet,
-    dryRun: false,
-    sourceType: "manual",
-    sourceLabel: "Manual Outreach",
-  }).catch((err) => logger.warn(`Manual outreach: failed to record history: ${err.message || err}`));
-
-  // Add the sent message to the conversation thread so replies land in context.
-  if (status === "SENT") {
-    await recordConvoOutbound({
-      channel,
-      leadId,
-      businessName,
-      phone: channel === "whatsapp" ? recipient : undefined,
-      email: channel === "email" ? recipient : undefined,
-      text: channel === "email" ? `${subject ? subject + "\n\n" : ""}${messageSnippet || ""}` : (messageSnippet || ""),
-    }).catch((err) => logger.warn(`Manual outreach: failed to record conversation: ${err.message || err}`));
-  }
+  // updateLead verifies ownership through the lead's tenant-owned parent list
+  // before issuing the update. Legacy global history/conversation files are not
+  // written from tenant requests because they have no tenant dimension.
+  await tenantRepo.updateLead(ctx, params.leadId, data);
 }
 
 /**
  * Resolve an inbound WhatsApp reply to a lead and record it as a conversation.
  * Registered once at startup; runs whenever a lead messages back.
  */
-setIncomingWhatsAppHandler(async ({ from, body }) => {
-  try {
-    const key = normalizePhoneKey(from); // last 10 digits of sender
-    if (!key) return;
-    // Match to a CRM lead by the trailing digits of their stored phone.
-    const lead = await prisma.lead.findFirst({ where: { phone: { contains: key } } }).catch(() => null);
-
-    await recordConvoInbound({
-      channel: "whatsapp",
-      phone: from.replace("@c.us", ""),
-      text: body,
-      leadId: lead?.id,
-      businessName: lead?.businessName,
-    });
-
-    if (lead?.id) {
-      await prisma.lead.update({ where: { id: lead.id }, data: { conversationStatus: "REPLIED" } }).catch(() => {});
-      logger.success(`Lead reply received from '${lead.businessName}' — conversation started.`);
-    } else {
-      logger.info(`Inbound WhatsApp reply from unmatched number ${key} recorded in Conversations.`);
-    }
-  } catch (err: any) {
-    logger.warn(`Failed to handle inbound WhatsApp reply: ${err?.message || err}`);
-  }
+setIncomingWhatsAppHandler(async ({ from }) => {
+  // The legacy WhatsApp Web callback carries no tenant identity. Persisting or
+  // matching it would be an unscoped cross-workspace operation, so reject it.
+  logger.warn(`Ignored inbound legacy WhatsApp Web message from ${normalizePhoneKey(from) || "unknown"}: no tenant identity.`);
 });
 
 // ── Conversations (Inbox) endpoints ──
-app.get("/api/conversations", (req, res) => {
-  res.json(listConversations());
-});
+// The legacy conversation store is a deployment-wide JSON file with no tenant
+// key. Exposing or mutating it from a tenant dashboard would leak data. Keep the
+// tenant-safe empty contract until conversation persistence is migrated.
+app.get(
+  "/api/conversations",
+  resolveTenantContext,
+  requirePermission("VIEW_LEADS"),
+  (_req, res) => res.json({ conversations: [], totalUnread: 0 })
+);
 
-app.get("/api/conversations/:id", (req, res) => {
-  const convo = getConversation(req.params.id);
-  if (!convo) return res.status(404).json({ error: "Conversation not found." });
-  res.json(convo);
-});
+app.get(
+  "/api/conversations/:id",
+  resolveTenantContext,
+  requirePermission("VIEW_LEADS"),
+  (_req, res) => res.status(404).json({ error: "Conversation not found.", code: "not_found" })
+);
 
-/**
- * POST /api/conversations/:id/reply  { text }
- * Send a WhatsApp reply within a thread and record it as outbound.
- */
-app.post("/api/conversations/:id/reply", heavyActionRateLimiter(), asyncHandler(async (req, res) => {
-  const { text, subject } = req.body;
-  if (!text || !String(text).trim()) return res.status(400).json({ error: "Message text is required." });
-  const convo = getConversation(req.params.id);
-  if (!convo) return res.status(404).json({ error: "Conversation not found." });
+app.post(
+  "/api/conversations/:id/reply",
+  heavyActionRateLimiter(),
+  resolveTenantContext,
+  requirePermission("EDIT_LEADS"),
+  (_req, res) => res.status(404).json({ error: "Conversation not found.", code: "not_found" })
+);
 
-  if (convo.channel === "whatsapp") {
-    if (!convo.phone) return res.status(400).json({ error: "This conversation has no phone number." });
-    // A thread reply is text the user typed, so never silently swap in a
-    // template: surface the 24h-window error and let them decide.
-    const result = await sendWhatsAppUnified(convo.phone, String(text), {
-      userId: req.authUser?.id,
-      allowTemplateFallback: false,
-    });
-    if (!result.ok) {
-      return res.status(500).json({
-        error: result.error || "Failed to send WhatsApp reply. Is the gateway connected?",
-        requiresTemplate: result.requiresTemplate,
-      });
-    }
-    const updated = await recordConvoOutbound({
-      channel: "whatsapp",
-      phone: convo.phone,
-      text: String(text),
-      leadId: convo.leadId,
-      businessName: convo.businessName,
-    });
-    return res.json({ success: true, conversation: updated });
-  }
+app.post(
+  "/api/conversations/:id/read",
+  resolveTenantContext,
+  requirePermission("VIEW_LEADS"),
+  (_req, res) => res.status(404).json({ error: "Conversation not found.", code: "not_found" })
+);
 
-  // Email reply — resolve SMTP config (user integration first, then env).
-  if (!convo.email) return res.status(400).json({ error: "This conversation has no email address." });
-  let userSmtpConfig: any = undefined;
-  const userId = req.authUser?.id;
-  if (userId) {
-    const smtpConfig = await getUserIntegration(userId, "smtp") as any;
-    if (smtpConfig && smtpConfig.host && smtpConfig.user && smtpConfig.password) {
-      userSmtpConfig = {
-        host: smtpConfig.host,
-        port: Number(smtpConfig.port) || 587,
-        secure: Boolean(smtpConfig.secure),
-        user: smtpConfig.user,
-        pass: smtpConfig.password,
-        from: smtpConfig.fromName ? `"${smtpConfig.fromName}" <${smtpConfig.fromEmail}>` : smtpConfig.fromEmail,
-      };
-    }
-  }
-  const replySubject = String(subject || `Re: ${convo.businessName}`).trim();
-  const result = await sendEmailOutreach(convo.email, replySubject, String(text), userSmtpConfig);
-  if (!result.success) return res.status(500).json({ error: result.error || "Failed to send email reply." });
-  const updated = await recordConvoOutbound({
-    channel: "email",
-    email: convo.email,
-    text: String(text),
-    leadId: convo.leadId,
-    businessName: convo.businessName,
-  });
-  res.json({ success: true, conversation: updated });
-}));
+app.patch(
+  "/api/conversations/:id/status",
+  resolveTenantContext,
+  requirePermission("EDIT_LEADS"),
+  (_req, res) => res.status(404).json({ error: "Conversation not found.", code: "not_found" })
+);
 
-app.post("/api/conversations/:id/read", asyncHandler(async (req, res) => {
-  const convo = await markConversationRead(req.params.id);
-  if (!convo) return res.status(404).json({ error: "Conversation not found." });
-  res.json({ success: true, conversation: convo });
-}));
-
-app.patch("/api/conversations/:id/status", asyncHandler(async (req, res) => {
-  const { status } = req.body;
-  if (!["AWAITING_REPLY", "REPLIED", "CLOSED"].includes(status)) {
-    return res.status(400).json({ error: "Invalid status." });
-  }
-  const convo = await setConversationStatus(req.params.id, status);
-  if (!convo) return res.status(404).json({ error: "Conversation not found." });
-  // Keep the linked CRM lead's conversation status in sync.
-  if (convo.leadId) {
-    await prisma.lead.update({ where: { id: convo.leadId }, data: { conversationStatus: status } }).catch(() => {});
-  }
-  res.json({ success: true, conversation: convo });
-}));
-
-app.delete("/api/conversations/:id", asyncHandler(async (req, res) => {
-  const removed = await deleteConversation(req.params.id);
-  if (!removed) return res.status(404).json({ error: "Conversation not found." });
-  res.json({ success: true });
-}));
+app.delete(
+  "/api/conversations/:id",
+  resolveTenantContext,
+  requirePermission("DELETE_LEADS"),
+  (_req, res) => res.status(404).json({ error: "Conversation not found.", code: "not_found" })
+);
 
 // ── Email reply ingestion (IMAP polling) ──
 // Watches every configured sending mailbox for new messages. When a lead
@@ -1596,32 +1488,16 @@ app.delete("/api/conversations/:id", asyncHandler(async (req, res) => {
 async function getPollableMailboxes(): Promise<ImapMailbox[]> {
   const mailboxes: ImapMailbox[] = [];
 
-  // 1) Environment SMTP account (used when no per-user integration is set).
-  const envHost = process.env.SMTP_HOST || "";
-  const envUser = process.env.SMTP_USER || "";
-  const envPass = process.env.SMTP_PASS || "";
-  if (envHost && envUser && envPass) {
-    const imapHost = process.env.IMAP_HOST || deriveImapHost(envHost);
-    if (imapHost) {
-      mailboxes.push({
-        id: envUser.toLowerCase(),
-        host: imapHost,
-        port: Number(process.env.IMAP_PORT) || 993,
-        secure: true,
-        user: envUser,
-        pass: envPass,
-      });
-    }
-  }
-
-  // 2) Every enabled per-user SMTP integration.
+  // Only tenant-owned SMTP integrations are polled. A platform environment
+  // mailbox has no workspace identity and cannot be matched safely.
   try {
     const smtpConfigs = await getAllEnabledSmtpConfigs();
     for (const cfg of smtpConfigs) {
       const imapHost = deriveImapHost(cfg.host);
-      if (imapHost && cfg.user && cfg.password) {
+      if (cfg.tenantId && imapHost && cfg.user && cfg.password) {
         mailboxes.push({
-          id: cfg.user.toLowerCase(),
+          id: `${cfg.tenantId}:${cfg.user.toLowerCase()}`,
+          tenantId: cfg.tenantId,
           host: imapHost,
           port: 993,
           secure: true,
@@ -1639,124 +1515,117 @@ async function getPollableMailboxes(): Promise<ImapMailbox[]> {
 
 startEmailReplyPolling(
   getPollableMailboxes,
-  async ({ from, subject, text }) => {
+  async ({ tenantId, from }) => {
+    if (!tenantId) return;
     try {
-      // Match the sender email to a CRM lead (emails stored as a JSON string).
-      const lead = await prisma.lead.findFirst({ where: { emails: { contains: from } } }).catch(() => null);
-
-      await recordConvoInbound({
-        channel: "email",
-        email: from,
-        text: subject ? `${subject}\n\n${text}` : text,
-        leadId: lead?.id,
-        businessName: lead?.businessName,
-      });
+      // The mailbox identifies the workspace, so sender matching cannot cross
+      // into another tenant with the same prospect email.
+      const lead = await prisma.lead.findFirst({
+        where: { tenantId, emails: { contains: from } },
+      }).catch(() => null);
 
       if (lead?.id) {
         await prisma.lead.update({ where: { id: lead.id }, data: { conversationStatus: "REPLIED" } }).catch(() => {});
-        logger.success(`Email reply received from '${lead.businessName}' (${from}) — conversation started.`);
-      } else {
-        logger.info(`Inbound email reply from unmatched address ${from} recorded in Conversations.`);
+        logger.success(`Email reply received for tenant ${tenantId} from ${from}.`);
       }
     } catch (err: any) {
-      logger.warn(`Failed to handle inbound email reply: ${err?.message || err}`);
+      logger.warn(`Failed to handle tenant email reply: ${err?.message || err}`);
     }
   },
   Number(process.env.EMAIL_POLL_INTERVAL_MS) || 60000
 );
 
-// Outreach execution endpoints
-app.post("/api/send-email", heavyActionRateLimiter(), asyncHandler(async (req, res) => {
-  const { businessName, to, subject, body, leadId } = req.body;
-  if (!to || !subject || !body) {
-    return res.status(400).json({ error: "Missing parameters (to, subject, body)" });
-  }
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(String(to))) {
-    return res.status(400).json({ error: "Invalid recipient email address." });
-  }
-
-  let customWebhookUrl: string | undefined;
-  let userSmtpConfig: any = undefined;
-  const userId = req.authUser?.id;
-  if (userId) {
-    const sheetConfig = await getUserIntegration(userId, "google_sheet") as any;
-    if (sheetConfig && sheetConfig.webhookUrl) {
-      customWebhookUrl = sheetConfig.webhookUrl;
+// Outreach execution endpoints. Every action requires an owned CRM lead; a
+// caller cannot send or mutate status by naming another tenant's lead id.
+app.post(
+  "/api/send-email",
+  heavyActionRateLimiter(),
+  resolveTenantContext,
+  requirePermission("EDIT_LEADS"),
+  asyncHandler(async (req, res) => {
+    const ctx = ctxOf(req);
+    const { to, subject, body, leadId } = req.body || {};
+    if (!leadId || !to || !subject || !body) {
+      return res.status(400).json({ error: "Missing parameters (leadId, to, subject, body)" });
     }
-    const smtpConfig = await getUserIntegration(userId, "smtp") as any;
-    if (smtpConfig && smtpConfig.host && smtpConfig.user && smtpConfig.password) {
+    if (!await tenantRepo.findLead(ctx, String(leadId))) {
+      return res.status(404).json({ error: "Lead not found.", code: "not_found" });
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(String(to))) {
+      return res.status(400).json({ error: "Invalid recipient email address." });
+    }
+
+    let userSmtpConfig: any = undefined;
+    const smtpConfig = await getUserIntegration(ctx.userId, "smtp", ctx.tenantId) as any;
+    if (smtpConfig?.host && smtpConfig?.user && smtpConfig?.password) {
       userSmtpConfig = {
         host: smtpConfig.host,
         port: Number(smtpConfig.port) || 587,
         secure: Boolean(smtpConfig.secure),
         user: smtpConfig.user,
         pass: smtpConfig.password,
-        from: smtpConfig.fromName ? `"${smtpConfig.fromName}" <${smtpConfig.fromEmail}>` : smtpConfig.fromEmail
+        from: smtpConfig.fromName ? `"${smtpConfig.fromName}" <${smtpConfig.fromEmail}>` : smtpConfig.fromEmail,
       };
     }
-  }
 
-  const result = await sendEmailOutreach(to, subject, body, userSmtpConfig);
-  if (result.success) {
-    await updateLeadOutreachStatus(businessName, "email", "SENT", undefined, customWebhookUrl);
-    await trackManualOutreach({ leadId, businessName, channel: "email", status: "SENT", recipient: to, subject, messageSnippet: body });
-    res.json({ success: true, message: "Email sent successfully." });
-  } else {
-    await updateLeadOutreachStatus(businessName, "email", "FAILED", undefined, customWebhookUrl);
-    await trackManualOutreach({ leadId, businessName, channel: "email", status: "FAILED", recipient: to, subject, messageSnippet: result.error });
-    res.status(500).json({ error: result.error || "Failed to send email." });
-  }
-}));
+    const result = await sendEmailOutreach(String(to), String(subject), String(body), userSmtpConfig);
+    await trackManualOutreach(ctx, { leadId: String(leadId), channel: "email", status: result.success ? "SENT" : "FAILED" });
+    if (result.success) return res.json({ success: true, message: "Email sent successfully." });
+    return res.status(500).json({ error: result.error || "Failed to send email." });
+  })
+);
 
-app.post("/api/send-whatsapp", heavyActionRateLimiter(), requireFeature("whatsappOutreach", "WhatsApp outreach"), asyncHandler(async (req, res) => {
-  const { businessName, phone, message, leadId } = req.body;
-  if (!phone || !message) {
-    return res.status(400).json({ error: "Missing parameters (phone, message)" });
-  }
-
-  let customWebhookUrl: string | undefined;
-  const userId = req.authUser?.id;
-  if (userId) {
-    const sheetConfig = await getUserIntegration(userId, "google_sheet") as any;
-    if (sheetConfig && sheetConfig.webhookUrl) {
-      customWebhookUrl = sheetConfig.webhookUrl;
+app.post(
+  "/api/send-whatsapp",
+  heavyActionRateLimiter(),
+  resolveTenantContext,
+  requirePermission("EDIT_LEADS"),
+  requireFeature("whatsappOutreach", "WhatsApp outreach"),
+  asyncHandler(async (req, res) => {
+    const ctx = ctxOf(req);
+    const { phone, message, leadId } = req.body || {};
+    if (!leadId || !phone || !message) {
+      return res.status(400).json({ error: "Missing parameters (leadId, phone, message)" });
     }
-  }
+    if (!await tenantRepo.findLead(ctx, String(leadId))) {
+      return res.status(404).json({ error: "Lead not found.", code: "not_found" });
+    }
 
-  const result = await sendWhatsAppUnified(phone, message, { userId });
-  if (result.ok) {
-    await updateLeadOutreachStatus(businessName, "whatsapp", "SENT", undefined, customWebhookUrl);
-    await trackManualOutreach({ leadId, businessName, channel: "whatsapp", status: "SENT", recipient: phone, messageSnippet: message });
-    res.json({ success: true, message: "WhatsApp message sent successfully.", provider: result.provider });
-  } else {
-    await updateLeadOutreachStatus(businessName, "whatsapp", "FAILED", undefined, customWebhookUrl);
-    await trackManualOutreach({ leadId, businessName, channel: "whatsapp", status: "FAILED", recipient: phone, messageSnippet: "Delivery failed" });
-    res.status(500).json({
+    const result = await sendWhatsAppUnified(String(phone), String(message), { userId: ctx.userId, tenantId: ctx.tenantId });
+    await trackManualOutreach(ctx, { leadId: String(leadId), channel: "whatsapp", status: result.ok ? "SENT" : "FAILED" });
+    if (result.ok) {
+      return res.json({ success: true, message: "WhatsApp message sent successfully.", provider: result.provider });
+    }
+    return res.status(500).json({
       error: result.error || "Failed to send WhatsApp message.",
       requiresTemplate: result.requiresTemplate,
     });
-  }
-}));
+  })
+);
 
-app.post("/api/generate-copy", heavyActionRateLimiter(), async (req, res) => {
-  const { lead } = req.body;
-  if (!lead) {
-    return res.status(400).json({ error: "Missing lead parameter." });
-  }
-  try {
-    // Advanced AI insights (Gemini) are a Pro feature. Free plans get the
-    // deterministic rule-based generator.
+app.post(
+  "/api/generate-copy",
+  heavyActionRateLimiter(),
+  resolveTenantContext,
+  requirePermission("VIEW_LEADS"),
+  asyncHandler(async (req, res) => {
+    const submitted = req.body?.lead;
+    if (!submitted?.id) return res.status(400).json({ error: "A saved lead is required." });
+
+    const rows = await tenantRepo.findLeadsInWorkspace(ctxOf(req), { id: String(submitted.id) }, { createdAt: "desc" });
+    const lead = rows[0] ? dbLeadToAppLead(rows[0]) : null;
+    if (!lead) return res.status(404).json({ error: "Lead not found.", code: "not_found" });
+
     const ent = entOf(req);
     const copy = ent.aiInsights ? await generateAICopy(lead) : generateOutreachCopy(lead);
     res.json(copy);
-  } catch (error: any) {
-    res.status(500).json({ error: error.message || String(error) });
-  }
-});
+  })
+);
 
 // Campaign variables
 let isCampaignRunning = false;
+let activeCampaignTenantId: string | null = null;
 let campaignCancelRequested = false;
 let campaignProgress = {
   current: 0,
@@ -1795,6 +1664,7 @@ export interface CampaignTemplateSelection {
  * Kept isolated from the send loop so the "preview" endpoint can reuse it.
  */
 async function resolveCampaignLeads(
+  ctx: TenantContext,
   source: CampaignSource,
   filters: CampaignFilters,
   enableEmail: boolean,
@@ -1805,8 +1675,9 @@ async function resolveCampaignLeads(
 
   if (source.type === "list") {
     if (!source.listId) return { leads: [], error: "No lead list selected." };
-    const dbLeads = await prisma.lead.findMany({ where: { listId: source.listId } });
-    if (!dbLeads || dbLeads.length === 0) {
+    const dbLeads = await tenantRepo.findLeadsInList(ctx, source.listId, {}, { leadScore: "desc" });
+    if (dbLeads === null) return { leads: [], error: "Lead list not found." };
+    if (dbLeads.length === 0) {
       return { leads: [], error: "The selected lead list has no leads." };
     }
     leads = dbLeads.map((l: any) => dbLeadToAppLead(l));
@@ -1834,6 +1705,7 @@ async function resolveCampaignLeads(
 
 /** Persist outreach status back to whichever source the campaign is using. */
 async function markCampaignOutreach(
+  ctx: TenantContext,
   source: CampaignSource,
   lead: Lead,
   channel: "email" | "whatsapp",
@@ -1849,7 +1721,7 @@ async function markCampaignOutreach(
       data.whatsappStatus = status;
       data.whatsappSentDate = new Date().toISOString().split("T")[0];
     }
-    await prisma.lead.update({ where: { id: lead.id }, data }).catch((err) => {
+    await tenantRepo.updateLead(ctx, lead.id, data).catch((err) => {
       logger.warn(`Campaign: failed to update CRM lead status for '${lead.businessName}': ${err.message || err}`);
     });
   } else {
@@ -1858,6 +1730,7 @@ async function markCampaignOutreach(
 }
 
 async function runCampaignLoop(
+  ctx: TenantContext,
   delaySeconds = 30,
   enableEmail = true,
   enableWhatsapp = true,
@@ -1869,29 +1742,14 @@ async function runCampaignLoop(
   campaignUserId?: string,
   campaignId = `camp_${Date.now()}`
 ) {
-  let sourceLabel = source.type === "list" ? (source.listId || "Lead List") : (source.sheetName || "All Sheets");
-  if (source.type === "list" && source.listId) {
-    const list = await prisma.leadList.findUnique({ where: { id: source.listId }, select: { name: true } }).catch(() => null);
-    if (list?.name) sourceLabel = list.name;
-  }
-  const logDispatch = (channel: "email" | "whatsapp", status: "SENT" | "FAILED", lead: Lead, recipient: string, subject?: string, messageSnippet?: string) => {
-    appendCampaignHistory({
-      campaignId,
-      businessName: lead.businessName,
-      channel,
-      status,
-      recipient,
-      subject,
-      messageSnippet: messageSnippet ? messageSnippet.slice(0, 200) : undefined,
-      dryRun,
-      sourceType: source.type,
-      sourceLabel,
-    }).catch((err) => logger.warn(`Failed to record campaign history: ${err.message || err}`));
-  };
+  // Deployment-global campaign-history.json is intentionally not written from
+  // tenant campaigns. Durable reporting resumes when history has tenant-owned
+  // database storage; status remains available through this workspace's job UI.
+  const logDispatch = (..._args: unknown[]) => {};
   let webhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
   let userSmtpConfig: any = undefined;
   if (campaignUserId) {
-    const sheetConfig = await getUserIntegration(campaignUserId, "google_sheet") as any;
+    const sheetConfig = await getUserIntegration(campaignUserId, "google_sheet", ctx.tenantId) as any;
     if (sheetConfig && sheetConfig.webhookUrl) {
       webhookUrl = sheetConfig.webhookUrl;
     } else if (source.type === "sheet") {
@@ -1901,7 +1759,7 @@ async function runCampaignLoop(
       return;
     }
 
-    const smtpConfig = await getUserIntegration(campaignUserId, "smtp") as any;
+    const smtpConfig = await getUserIntegration(campaignUserId, "smtp", ctx.tenantId) as any;
     if (smtpConfig && smtpConfig.host && smtpConfig.user && smtpConfig.password) {
       userSmtpConfig = {
         host: smtpConfig.host,
@@ -1932,8 +1790,8 @@ async function runCampaignLoop(
 
   // Resolve the campaign's WhatsApp transport once, up front. Cloud API users
   // have no QR session, so the web client's state must not gate their campaign.
-  const waProvider = await resolveWhatsAppProvider(campaignUserId);
-  const waStatusObj = await getUnifiedWhatsAppStatus(campaignUserId);
+  const waProvider = await resolveWhatsAppProvider(campaignUserId, ctx.tenantId);
+  const waStatusObj = await getUnifiedWhatsAppStatus(campaignUserId, ctx.tenantId);
   const whatsappAvailable = waStatusObj.status === "CONNECTED";
   const waProviderLabel = waProvider.provider === "cloud" ? "WhatsApp Cloud API" : "WhatsApp Web gateway";
 
@@ -1963,6 +1821,7 @@ async function runCampaignLoop(
 
   campaignProgress.status = source.type === "list" ? "Loading leads from selected list..." : "Fetching leads from Google Sheet...";
   const { leads: targetLeads, error: resolveError } = await resolveCampaignLeads(
+    ctx,
     source,
     filters,
     enableEmail,
@@ -2044,18 +1903,17 @@ async function runCampaignLoop(
           logger.info(`Campaign sending email to ${lead.businessName} (${recipient})...`);
           const emailResult = await sendEmailOutreach(recipient, emailSubject, emailBody, userSmtpConfig);
           if (emailResult.success) {
-            await markCampaignOutreach(source, lead, "email", "SENT", webhookUrl);
+            await markCampaignOutreach(ctx, source, lead, "email", "SENT", webhookUrl);
             campaignProgress.emailsSent++;
             logDispatch("email", "SENT", lead, recipient, emailSubject, emailBody);
-            recordConvoOutbound({ channel: "email", email: recipient, text: `${emailSubject ? emailSubject + "\n\n" : ""}${emailBody}`, leadId: lead.id, businessName: lead.businessName }).catch(() => {});
           } else {
-            await markCampaignOutreach(source, lead, "email", "FAILED", webhookUrl);
+            await markCampaignOutreach(ctx, source, lead, "email", "FAILED", webhookUrl);
             campaignProgress.emailsFailed++;
             logDispatch("email", "FAILED", lead, recipient, emailSubject, emailResult.error);
           }
         } else {
           logger.warn(`Skipping Email for '${lead.businessName}': SMTP parameters are not configured in settings.`);
-          await markCampaignOutreach(source, lead, "email", "FAILED", webhookUrl);
+          await markCampaignOutreach(ctx, source, lead, "email", "FAILED", webhookUrl);
           campaignProgress.emailsFailed++;
           logDispatch("email", "FAILED", lead, recipient, emailSubject, "SMTP not configured");
         }
@@ -2074,21 +1932,21 @@ async function runCampaignLoop(
           logger.info(`Campaign sending WhatsApp to ${lead.businessName} (${lead.phone}) via ${waProviderLabel}...`);
           const sendResult = await sendWhatsAppUnified(lead.phone, whatsappMessage, {
             userId: campaignUserId,
+            tenantId: ctx.tenantId,
             allowTemplateFallback: true,
           });
           if (sendResult.ok) {
-            await markCampaignOutreach(source, lead, "whatsapp", "SENT", webhookUrl);
+            await markCampaignOutreach(ctx, source, lead, "whatsapp", "SENT", webhookUrl);
             campaignProgress.whatsappSent++;
             logDispatch("whatsapp", "SENT", lead, lead.phone, undefined, whatsappMessage);
-            recordConvoOutbound({ channel: "whatsapp", phone: lead.phone, text: whatsappMessage, leadId: lead.id, businessName: lead.businessName }).catch(() => {});
           } else {
-            await markCampaignOutreach(source, lead, "whatsapp", "FAILED", webhookUrl);
+            await markCampaignOutreach(ctx, source, lead, "whatsapp", "FAILED", webhookUrl);
             campaignProgress.whatsappFailed++;
             logDispatch("whatsapp", "FAILED", lead, lead.phone, undefined, sendResult.error || "Delivery failed");
           }
         } else {
           logger.warn(`Skipping WhatsApp for '${lead.businessName}': the ${waProviderLabel} is not connected.`);
-          await markCampaignOutreach(source, lead, "whatsapp", "FAILED", webhookUrl);
+          await markCampaignOutreach(ctx, source, lead, "whatsapp", "FAILED", webhookUrl);
           campaignProgress.whatsappFailed++;
           logDispatch("whatsapp", "FAILED", lead, lead.phone, undefined, "WhatsApp gateway not connected");
         }
@@ -2123,36 +1981,48 @@ async function runCampaignLoop(
     }
   }
   isCampaignRunning = false;
+  if (activeCampaignTenantId === ctx.tenantId) activeCampaignTenantId = null;
   campaignCancelRequested = false;
 }
 
-app.get("/api/campaign/status", (req, res) => {
-  res.json({
-    isRunning: isCampaignRunning,
-    progress: campaignProgress
-  });
-});
+app.get(
+  "/api/campaign/status",
+  resolveTenantContext,
+  requirePermission("VIEW_ANALYTICS"),
+  (req, res) => {
+    const ownsActiveCampaign = isCampaignRunning && activeCampaignTenantId === ctxOf(req).tenantId;
+    res.json({
+      isRunning: ownsActiveCampaign,
+      progress: ownsActiveCampaign ? campaignProgress : {
+        current: 0,
+        total: 0,
+        status: "Idle",
+        secondsRemaining: 0,
+        emailsSent: 0,
+        emailsFailed: 0,
+        whatsappSent: 0,
+        whatsappFailed: 0,
+        skipped: 0,
+      },
+    });
+  }
+);
 
-app.get("/api/campaign/sheets", async (req, res) => {
+app.get(
+  "/api/campaign/sheets",
+  resolveTenantContext,
+  requirePermission("VIEW_LEADS"),
+  asyncHandler(async (req, res) => {
   try {
-    let customWebhookUrl: string | undefined;
-    const userId = req.authUser?.id;
-    if (userId) {
-      const sheetConfig = await getUserIntegration(userId, "google_sheet") as any;
-      if (sheetConfig && sheetConfig.webhookUrl) {
-        customWebhookUrl = sheetConfig.webhookUrl;
-      } else {
-        // Return empty list if user hasn't set up their integration,
-        // rather than falling back to process.env.GOOGLE_SHEET_WEBHOOK_URL.
-        return res.json([]);
-      }
-    }
-    const sheets = await fetchSheetNamesFromGoogleSheet(customWebhookUrl);
+    const sheetConfig = await getUserIntegration(ctxOf(req).userId, "google_sheet", ctxOf(req).tenantId) as any;
+    if (!sheetConfig?.webhookUrl) return res.json([]);
+    const sheets = await fetchSheetNamesFromGoogleSheet(sheetConfig.webhookUrl);
     res.json(sheets);
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch Google Sheet tabs list." });
   }
-});
+  })
+);
 
 /**
  * Normalize the request body into a CampaignSource + CampaignFilters +
@@ -2192,19 +2062,25 @@ function parseCampaignRequest(body: any): {
  * anything — lets the wizard's "Review" step show an accurate target count
  * and a sample of leads before the user commits to launching.
  */
-app.post("/api/campaign/preview", heavyActionRateLimiter(), asyncHandler(async (req, res) => {
+app.post(
+  "/api/campaign/preview",
+  heavyActionRateLimiter(),
+  resolveTenantContext,
+  requirePermission("CREATE_CAMPAIGN"),
+  asyncHandler(async (req, res) => {
+  const ctx = ctxOf(req);
   const { source, filters } = parseCampaignRequest(req.body);
   const enableEmail = req.body.enableEmail !== undefined ? Boolean(req.body.enableEmail) : true;
   const enableWhatsapp = req.body.enableWhatsapp !== undefined ? Boolean(req.body.enableWhatsapp) : true;
 
   let webhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
-  const userId = req.authUser?.id;
+  const userId = ctx.userId;
   if (userId) {
-    const sheetConfig = await getUserIntegration(userId, "google_sheet") as any;
+    const sheetConfig = await getUserIntegration(userId, "google_sheet", ctx.tenantId) as any;
     if (sheetConfig && sheetConfig.webhookUrl) webhookUrl = sheetConfig.webhookUrl;
   }
 
-  const { leads, error } = await resolveCampaignLeads(source, filters, enableEmail, enableWhatsapp, webhookUrl);
+  const { leads, error } = await resolveCampaignLeads(ctx, source, filters, enableEmail, enableWhatsapp, webhookUrl);
   if (error) {
     return res.status(400).json({ error });
   }
@@ -2222,9 +2098,15 @@ app.post("/api/campaign/preview", heavyActionRateLimiter(), asyncHandler(async (
   });
 }));
 
-app.post("/api/campaign/start", heavyActionRateLimiter(), (req, res) => {
+app.post(
+  "/api/campaign/start",
+  heavyActionRateLimiter(),
+  resolveTenantContext,
+  requirePermission("SEND_CAMPAIGN"),
+  (req, res) => {
+  const ctx = ctxOf(req);
   if (isCampaignRunning) {
-    return res.status(400).json({ error: "Campaign is already running." });
+    return res.status(409).json({ error: "Campaign capacity is currently in use. Please try again shortly." });
   }
 
   const { delaySeconds, enableEmail, enableWhatsapp, dryRun } = req.body;
@@ -2259,6 +2141,7 @@ app.post("/api/campaign/start", heavyActionRateLimiter(), (req, res) => {
   const useAiInsights = ent.aiInsights;
 
   isCampaignRunning = true;
+  activeCampaignTenantId = ctx.tenantId;
   campaignCancelRequested = false;
   campaignProgress = {
     current: 0,
@@ -2272,12 +2155,13 @@ app.post("/api/campaign/start", heavyActionRateLimiter(), (req, res) => {
     skipped: 0
   };
   
-  const campaignUserId = req.authUser?.id;
+  const campaignUserId = ctx.userId;
   const campaignId = `camp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
-  runCampaignLoop(delaySec, mailActive, waActive, simulated, source, filters, templates, useAiInsights, campaignUserId, campaignId).catch(err => {
+  runCampaignLoop(ctx, delaySec, mailActive, waActive, simulated, source, filters, templates, useAiInsights, campaignUserId, campaignId).catch(err => {
     logger.error(`Campaign crashed: ${err}`);
     isCampaignRunning = false;
+    activeCampaignTenantId = null;
     campaignProgress.status = `Error: ${err.message || err}`;
   });
 
@@ -2290,22 +2174,12 @@ app.post("/api/campaign/start", heavyActionRateLimiter(), (req, res) => {
  * to power the campaign report table and animated charts.
  * Query params: channel, status, campaignId, from, to, search, limit
  */
-app.get("/api/campaign/history", (req, res) => {
-  const q: CampaignHistoryQuery = {
-    channel: (req.query.channel as any) || "all",
-    status: (req.query.status as any) || "all",
-    campaignId: (req.query.campaignId as string) || undefined,
-    from: (req.query.from as string) || undefined,
-    to: (req.query.to as string) || undefined,
-    search: (req.query.search as string) || undefined,
-    limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 200,
-  };
-  const records = queryCampaignHistory(q);
-  // Summary/timeline are computed over the SAME filters but without the
-  // `limit` truncation, so charts reflect the full filtered dataset.
-  const allFiltered = queryCampaignHistory({ ...q, limit: undefined });
-  res.json({ records, summary: summarizeCampaignHistory(allFiltered) });
-});
+app.get(
+  "/api/campaign/history",
+  resolveTenantContext,
+  requirePermission("VIEW_ANALYTICS"),
+  (_req, res) => res.json({ records: [], summary: summarizeCampaignHistory([]) })
+);
 
 // NOTE: literal-path routes (/export, /bulk) are registered BEFORE the
 // parameterized /:id routes below, since Express matches routes in
@@ -2316,7 +2190,7 @@ app.get("/api/campaign/history", (req, res) => {
  * GET /api/campaign/history/export?format=csv|pdf|docx
  * Streams the filtered dispatch history as a downloadable report.
  */
-app.get("/api/campaign/history/export", heavyActionRateLimiter(), asyncHandler(async (req, res) => {
+app.get("/api/campaign/history/export", heavyActionRateLimiter(), resolveTenantContext, requirePermission("VIEW_ANALYTICS"), asyncHandler(async (req, res) => {
   const format = String(req.query.format || "csv").toLowerCase();
   const q: CampaignHistoryQuery = {
     channel: (req.query.channel as any) || "all",
@@ -2327,7 +2201,9 @@ app.get("/api/campaign/history/export", heavyActionRateLimiter(), asyncHandler(a
     search: (req.query.search as string) || undefined,
     limit: undefined,
   };
-  const records = queryCampaignHistory(q);
+  // Legacy history is deployment-global and therefore never exposed through a
+  // tenant request. Exports stay empty until history is moved to tenant-owned storage.
+  const records: ReturnType<typeof queryCampaignHistory> = [];
   const stamp = new Date().toISOString().slice(0, 10);
 
   if (format === "csv") {
@@ -2357,51 +2233,58 @@ app.get("/api/campaign/history/export", heavyActionRateLimiter(), asyncHandler(a
  * checkbox multi-select "Delete selected" action.
  * Body: { ids: string[] }
  */
-app.delete("/api/campaign/history/bulk", asyncHandler(async (req, res) => {
+app.delete(
+  "/api/campaign/history/bulk",
+  resolveTenantContext,
+  requirePermission("DELETE_LEADS"),
+  asyncHandler(async (req, res) => {
   const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((id: any) => typeof id === "string") : [];
   if (ids.length === 0) return res.status(400).json({ error: "No record ids provided." });
-  const removed = await deleteCampaignHistoryRecords(ids);
-  res.json({ success: true, removed });
+  res.json({ success: true, removed: 0 });
 }));
 
 /**
  * GET /api/campaign/history/:id
  * Fetch a single dispatch record — used by the Reports table's "view" action.
  */
-app.get("/api/campaign/history/:id", (req, res) => {
-  const record = getCampaignHistoryRecord(req.params.id);
-  if (!record) return res.status(404).json({ error: "Dispatch record not found." });
-  res.json(record);
-});
+app.get(
+  "/api/campaign/history/:id",
+  resolveTenantContext,
+  requirePermission("VIEW_ANALYTICS"),
+  (_req, res) => res.status(404).json({ error: "Dispatch record not found.", code: "not_found" })
+);
 
 /**
  * PATCH /api/campaign/history/:id
  * Edit a single dispatch record (business name, recipient, subject/message,
  * status) — used by the Reports table's "edit" action.
  */
-app.patch("/api/campaign/history/:id", asyncHandler(async (req, res) => {
-  const { businessName, recipient, subject, messageSnippet, status } = req.body;
-  if (status && status !== "SENT" && status !== "FAILED") {
-    return res.status(400).json({ error: "Invalid status. Use SENT or FAILED." });
-  }
-  const updated = await updateCampaignHistoryRecord(req.params.id, { businessName, recipient, subject, messageSnippet, status });
-  if (!updated) return res.status(404).json({ error: "Dispatch record not found." });
-  res.json({ success: true, record: updated });
-}));
+app.patch(
+  "/api/campaign/history/:id",
+  resolveTenantContext,
+  requirePermission("EDIT_LEADS"),
+  (_req, res) => res.status(404).json({ error: "Dispatch record not found.", code: "not_found" })
+);
 
 /**
  * DELETE /api/campaign/history/:id
  * Delete a single dispatch record — used by the Reports table's row delete action.
  */
-app.delete("/api/campaign/history/:id", asyncHandler(async (req, res) => {
-  const removed = await deleteCampaignHistoryRecord(req.params.id);
-  if (!removed) return res.status(404).json({ error: "Dispatch record not found." });
-  res.json({ success: true });
-}));
+app.delete(
+  "/api/campaign/history/:id",
+  resolveTenantContext,
+  requirePermission("DELETE_LEADS"),
+  (_req, res) => res.status(404).json({ error: "Dispatch record not found.", code: "not_found" })
+);
 
-app.post("/api/campaign/stop", (req, res) => {
-  if (!isCampaignRunning) {
-    return res.status(400).json({ error: "No campaign currently active." });
+app.post(
+  "/api/campaign/stop",
+  resolveTenantContext,
+  requirePermission("SEND_CAMPAIGN"),
+  (req, res) => {
+  const ctx = ctxOf(req);
+  if (!isCampaignRunning || activeCampaignTenantId !== ctx.tenantId) {
+    return res.status(400).json({ error: "No campaign currently active in this workspace." });
   }
   campaignCancelRequested = true;
   campaignProgress.status = "Cancelling...";
@@ -2438,7 +2321,7 @@ app.get(
         !!process.env.GOOGLE_SHEET_WEBHOOK_URL &&
         process.env.GOOGLE_SHEET_WEBHOOK_URL !== "YOUR_WEBHOOK_URL",
       whatsappConnected: getWhatsAppStatus().status === "CONNECTED",
-      campaignRunning: isCampaignRunning,
+      campaignRunning: isCampaignRunning && activeCampaignTenantId === ctx.tenantId,
     });
   })
 );

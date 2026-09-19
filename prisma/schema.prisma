@@ -11,33 +11,37 @@ datasource db {
 }
 
 model User {
-  id            String    @id @default(cuid())
-  email         String    @unique
+  id            String  @id @default(cuid())
+  email         String  @unique
   name          String?
-  passwordHash  String    @map("password_hash")
-  emailVerified Boolean   @default(false) @map("email_verified")
-  role          String    @default("user")
+  passwordHash  String  @map("password_hash")
+  emailVerified Boolean @default(false) @map("email_verified")
+  role          String  @default("user")
+
+  // Phone number with verification status
+  phone         String? @unique
+  phoneVerified Boolean @default(false) @map("phone_verified")
 
   // Subscription plan: "free" | "pro" | "custom"
-  plan          String    @default("free")
+  plan String @default("free")
 
   // Monthly lead-usage tracking. usagePeriod is "YYYY-MM"; leadsUsed resets
   // when a new period begins.
-  leadsUsed     Int       @default(0) @map("leads_used")
-  usagePeriod   String?   @map("usage_period")
+  leadsUsed   Int     @default(0) @map("leads_used")
+  usagePeriod String? @map("usage_period")
 
   // Brute-force protection.
-  failedLoginAttempts Int      @default(0) @map("failed_login_attempts")
+  failedLoginAttempts Int       @default(0) @map("failed_login_attempts")
   lockedUntil         DateTime? @map("locked_until")
 
-  lastLoginAt   DateTime? @map("last_login_at")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
+  lastLoginAt DateTime? @map("last_login_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
 
-  otps       EmailOtp[]
-  auditLogs  AuditLog[]
+  otps         EmailOtp[]
+  auditLogs    AuditLog[]
   integrations UserIntegration[]
-  leadLists  LeadList[]
+  leadLists    LeadList[]
 
   memberships TenantMember[]
   jobs        Job[]
@@ -47,6 +51,8 @@ model User {
 
   icpProfiles     IcpProfile[]
   scoringRuleSets ScoringRuleSet[]
+
+  campaigns Campaign[]
 
   @@map("users")
 }
@@ -90,18 +96,20 @@ model Tenant {
   auditLogs    AuditLog[]
   jobs         Job[]
 
-  businessProfile   BusinessProfile?
-  products          BusinessProduct[]
-  services          BusinessService[]
+  businessProfile    BusinessProfile?
+  products           BusinessProduct[]
+  services           BusinessService[]
   knowledgeDocuments KnowledgeDocument[]
-  knowledgeChunks   KnowledgeChunk[]
-  knowledgeItems    KnowledgeItem[]
-  aiConversations   AiConversation[]
-  aiMessages        AiMessage[]
+  knowledgeChunks    KnowledgeChunk[]
+  knowledgeItems     KnowledgeItem[]
+  aiConversations    AiConversation[]
+  aiMessages         AiMessage[]
 
   icpProfiles          IcpProfile[]
   scoringRuleSets      ScoringRuleSet[]
   discoveredBusinesses DiscoveredBusiness[]
+  campaigns            Campaign[]
+  campaignMessages     CampaignMessage[]
 
   @@index([status])
   @@map("tenants")
@@ -123,9 +131,9 @@ model TenantMember {
   /// "active" | "invited" | "suspended".
   status String @default("active")
 
-  invitedById String?   @map("invited_by_id")
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
+  invitedById String?  @map("invited_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -200,24 +208,24 @@ model Job {
 
 /// User-specific integration settings (SMTP, Google Sheets, WhatsApp, etc.)
 model UserIntegration {
-  id        String   @id @default(cuid())
-  userId    String   @map("user_id")
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   // Integration type: "smtp" | "google_sheet" | "whatsapp"
-  type      String
+  type String
 
   // Integration configuration (encrypted JSON)
-  config    String   @db.Text
+  config String @db.Text
 
   // Is this integration active/enabled?
-  enabled   Boolean  @default(true)
+  enabled Boolean @default(true)
 
   // Metadata for tracking
-  label     String?  // User-friendly name like "Gmail SMTP" or "Leads Sheet"
+  label      String? // User-friendly name like "Gmail SMTP" or "Leads Sheet"
   lastUsedAt DateTime? @map("last_used_at")
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
 
   // Integrations belong to the workspace, not the individual: a teammate must
   // be able to use the tenant's SMTP account. Nullable until backfilled.
@@ -254,13 +262,14 @@ model AuditLog {
   @@map("audit_logs")
 }
 
-/// One-time passwords sent to an email address for verification / login.
+/// One-time passwords sent to an email or phone for verification / login.
 /// The code itself is stored hashed; only the hash is persisted.
 model EmailOtp {
   id        String   @id @default(cuid())
-  email     String
+  email     String?
+  phone     String?
   codeHash  String   @map("code_hash")
-  purpose   String   @default("verify") // "verify" | "login" | "reset"
+  purpose   String   @default("verify") // "verify" | "login" | "reset" | "phone_verify"
   attempts  Int      @default(0)
   consumed  Boolean  @default(false)
   expiresAt DateTime @map("expires_at")
@@ -270,6 +279,7 @@ model EmailOtp {
   user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([email])
+  @@index([phone])
   @@index([expiresAt])
   // MySQL auto-created this index to back the user_id foreign key when the
   // schema was applied with `db push`. Declared here with its existing name so
@@ -328,24 +338,24 @@ model Lead {
   dateAdded      String  @map("date_added")
 
   // Digital presence
-  websiteStatus     String @default("MISSING") @map("website_status")
-  instagramUrl      String @map("instagram_url") @db.Text
-  instagramStatus   String @default("NOT_FOUND") @map("instagram_status")
-  instagramLastPost String @default("") @map("instagram_last_post")
-  facebookUrl       String @map("facebook_url") @db.Text
-  facebookStatus    String @default("NOT_FOUND") @map("facebook_status")
-  facebookLastPost  String @default("") @map("facebook_last_post")
+  websiteStatus     String  @default("MISSING") @map("website_status")
+  instagramUrl      String  @map("instagram_url") @db.Text
+  instagramStatus   String  @default("NOT_FOUND") @map("instagram_status")
+  instagramLastPost String  @default("") @map("instagram_last_post")
+  facebookUrl       String  @map("facebook_url") @db.Text
+  facebookStatus    String  @default("NOT_FOUND") @map("facebook_status")
+  facebookLastPost  String  @default("") @map("facebook_last_post")
   whatsappPresent   Boolean @default(false) @map("whatsapp_present")
   appointmentSystem Boolean @default(false) @map("appointment_system")
   leadPriority      String  @default("COLD") @map("lead_priority")
   aiInsight         String  @map("ai_insight") @db.Text
 
   // Extended audit
-  emails                String  @db.Text  // JSON array stored as string
-  linkedinUrl           String  @map("linkedin_url") @db.Text
-  linkedinStatus        String  @default("NOT_FOUND") @map("linkedin_status")
+  emails                 String  @db.Text // JSON array stored as string
+  linkedinUrl            String  @map("linkedin_url") @db.Text
+  linkedinStatus         String  @default("NOT_FOUND") @map("linkedin_status")
   googleAnalyticsPresent Boolean @default(false) @map("google_analytics_present")
-  metaPixelPresent      Boolean @default(false) @map("meta_pixel_present")
+  metaPixelPresent       Boolean @default(false) @map("meta_pixel_present")
 
   // Outreach tracking
   emailStatus      String? @map("email_status")
@@ -364,11 +374,11 @@ model Lead {
   // different weights, and could not be explained to the user. These columns
   // make a score self-describing: what it was out of, which rules fired, and
   // which version of which rule set produced it.
-  scoreMax          Int?    @map("score_max")
+  scoreMax         Int?    @map("score_max")
   /// JSON array of { signal, label, points } for the rules that fired.
-  scoreBreakdown    String? @map("score_breakdown") @db.Text
-  scoringRuleSetId  String? @map("scoring_rule_set_id")
-  scoringVersion    Int?    @map("scoring_version")
+  scoreBreakdown   String? @map("score_breakdown") @db.Text
+  scoringRuleSetId String? @map("scoring_rule_set_id")
+  scoringVersion   Int?    @map("scoring_version")
 
   /// Fit against the workspace's ICP, 0-100, with the reason given.
   /// Separate from `leadScore`: that measures opportunity signals on the
@@ -389,13 +399,15 @@ model Lead {
   notes String? @db.Text
 
   // Relations
-  listId String @map("list_id")
+  listId String   @map("list_id")
   list   LeadList @relation(fields: [listId], references: [id], onDelete: Cascade)
 
   userId String? @map("user_id")
 
   tenantId String? @map("tenant_id")
   tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  campaignMessages CampaignMessage[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -422,8 +434,8 @@ model Lead {
 /// Tracks individual page views for website visitor analytics.
 model PageView {
   id        String   @id @default(cuid())
-  path      String                         // e.g. "/", "/app", "/superadmin"
-  ip        String?                        // visitor IP (for unique visitor counting)
+  path      String // e.g. "/", "/app", "/superadmin"
+  ip        String? // visitor IP (for unique visitor counting)
   userAgent String?  @map("user_agent") @db.Text
   referrer  String?  @db.Text
   createdAt DateTime @default(now()) @map("created_at")
@@ -433,7 +445,6 @@ model PageView {
   @@index([ip])
   @@map("page_views")
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BUSINESS KNOWLEDGE
@@ -496,9 +507,9 @@ model BusinessProfile {
 
   /// Provenance of the last AI-assisted update. Lets a surprising value be
   /// traced back to the exact prompt wording that produced it.
-  lastExtractedAt      DateTime? @map("last_extracted_at")
-  lastPromptName       String?   @map("last_prompt_name")
-  lastPromptVersion    Int?      @map("last_prompt_version")
+  lastExtractedAt   DateTime? @map("last_extracted_at")
+  lastPromptName    String?   @map("last_prompt_name")
+  lastPromptVersion Int?      @map("last_prompt_version")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -566,11 +577,11 @@ model KnowledgeDocument {
   tenantId String @map("tenant_id")
 
   title        String
-  originalName String  @map("original_name")
-  mimeType     String  @map("mime_type")
+  originalName String @map("original_name")
+  mimeType     String @map("mime_type")
   /// "pdf" | "docx" | "pptx" | "txt" | "md"
-  fileType     String  @map("file_type")
-  sizeBytes    Int     @map("size_bytes")
+  fileType     String @map("file_type")
+  sizeBytes    Int    @map("size_bytes")
   /// SHA-256 of the file, so re-uploading the same document is detectable.
   checksum     String
 
@@ -594,7 +605,7 @@ model KnowledgeDocument {
   /// Optional knowledge category, e.g. "product_catalogue", "company_profile".
   category String?
 
-  uploadedById String? @map("uploaded_by_id")
+  uploadedById String?   @map("uploaded_by_id")
   processedAt  DateTime? @map("processed_at")
   createdAt    DateTime  @default(now()) @map("created_at")
   updatedAt    DateTime  @updatedAt @map("updated_at")
@@ -602,8 +613,8 @@ model KnowledgeDocument {
   tenant     Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   uploadedBy User?  @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
 
-  chunks        KnowledgeChunk[]
-  derivedItems  KnowledgeItem[]
+  chunks       KnowledgeChunk[]
+  derivedItems KnowledgeItem[]
 
   @@index([tenantId, status])
   @@index([tenantId, createdAt])
@@ -672,7 +683,7 @@ model KnowledgeItem {
   value    String @db.Text
 
   /// 0-1. Extraction confidence, or 1 when a human entered it.
-  confidence Float @default(1)
+  confidence Float  @default(1)
   /// "user" | "document" | "conversation"
   source     String @default("user")
 
@@ -707,8 +718,8 @@ model AiConversation {
   createdAt  DateTime  @default(now()) @map("created_at")
   updatedAt  DateTime  @updatedAt @map("updated_at")
 
-  tenant   Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  user     User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  tenant   Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user     User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
   messages AiMessage[]
 
   @@index([tenantId, updatedAt])
@@ -782,10 +793,10 @@ model IcpProfile {
   /// medical equipment manufacturer targets ("Multispecialty Hospital",
   /// "Diagnostic Centre") have nothing in common with a gym's, and any fixed
   /// vocabulary would exclude somebody's actual market.
-  targetCategories String? @map("target_categories") @db.Text
-  targetIndustries String? @map("target_industries") @db.Text
+  targetCategories   String? @map("target_categories") @db.Text
+  targetIndustries   String? @map("target_industries") @db.Text
   /// Places to search, e.g. ["Pune", "Nashik"]. One run fans out across them.
-  targetLocations  String? @map("target_locations") @db.Text
+  targetLocations    String? @map("target_locations") @db.Text
   /// Roles worth reaching inside a target, e.g. ["Hospital Administrator"].
   decisionMakerRoles String? @map("decision_maker_roles") @db.Text
 
@@ -823,7 +834,7 @@ model IcpProfile {
   lastPromptName    String?   @map("last_prompt_name")
   lastPromptVersion Int?      @map("last_prompt_version")
 
-  createdById String? @map("created_by_id")
+  createdById String?  @map("created_by_id")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -923,4 +934,156 @@ model DiscoveredBusiness {
   @@unique([tenantId, fingerprint])
   @@index([tenantId, lastSeenAt])
   @@map("discovered_businesses")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CAMPAIGN GENERATION WITH APPROVAL GATE
+//
+// Replaces the in-memory campaign loop with a durable two-phase model:
+//   1. Generate a batch of outreach messages, each with AI-generated copy.
+//   2. Store them as "pending_review", show them in the approval UI.
+//   3. The user approves/rejects/edits each one.
+//   4. Only approved messages are sent.
+//
+// This is what turns the product from "spray and pray" into "reviewed outreach",
+// which is the only mode that works for a business where the operator is
+// accountable for every claim made to a prospect.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A batch of outreach messages generated together, awaiting review.
+///
+/// One Campaign maps to what the user thinks of as "one campaign run": they
+/// clicked Generate, the system produced 50 messages, and now they're deciding
+/// which to send. The status field tracks where in the workflow it is.
+model Campaign {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  /// Human-facing name, shown in the campaign list. Generated if not provided.
+  name String
+
+  /// "draft" | "pending_review" | "partially_approved" | "approved" | "sending" | "sent" | "cancelled"
+  ///
+  /// - draft: created but not yet submitted for review (unused today)
+  /// - pending_review: generation completed, awaiting the user's approval decisions
+  /// - partially_approved: some messages approved, others pending or rejected
+  /// - approved: every message approved, ready to send
+  /// - sending: execution in progress
+  /// - sent: all approved messages delivered
+  /// - cancelled: discarded by the user
+  status String @default("pending_review")
+
+  /// The ICP profile used to select leads for this campaign.
+  icpProfileId String? @map("icp_profile_id")
+
+  /// How leads were selected: "icp" | "list" | "manual"
+  sourceType String @map("source_type")
+
+  /// The lead list ID if sourceType is "list".
+  sourceListId String? @map("source_list_id")
+
+  /// Filters applied on top of the source, stored as JSON.
+  filters String? @db.Text
+
+  /// Which channels were requested: { email: boolean, whatsapp: boolean }
+  channels String @db.Text
+
+  /// Template IDs selected at generation time, stored as JSON: { email?: string, whatsapp?: string }
+  templates String? @db.Text
+
+  /// Model and prompt version used to generate the copy, for reproducibility.
+  aiProvider    String? @map("ai_provider")
+  aiModel       String? @map("ai_model")
+  promptName    String? @map("prompt_name")
+  promptVersion Int?    @map("prompt_version")
+
+  /// Summary counts, recomputed whenever messages change state.
+  totalMessages Int @default(0) @map("total_messages")
+  pendingCount  Int @default(0) @map("pending_count")
+  approvedCount Int @default(0) @map("approved_count")
+  rejectedCount Int @default(0) @map("rejected_count")
+  sentCount     Int @default(0) @map("sent_count")
+  failedCount   Int @default(0) @map("failed_count")
+
+  createdById String   @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  /// Timestamp of the first send attempt. Null until execution starts.
+  startedAt DateTime? @map("started_at")
+
+  /// Timestamp when every approved message finished (success or failure).
+  completedAt DateTime? @map("completed_at")
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  messages CampaignMessage[]
+  user     User?             @relation(fields: [userId], references: [id])
+  userId   String?
+
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+  @@index([createdById])
+  @@map("campaigns")
+}
+
+/// One outreach message, generated for one lead on one channel.
+///
+/// The user can approve, reject or edit it before it's sent. Once approved and
+/// sent, the result (success/failure, timestamp, tracking data) is recorded here.
+model CampaignMessage {
+  id         String @id @default(cuid())
+  campaignId String @map("campaign_id")
+  tenantId   String @map("tenant_id")
+
+  /// The lead this message targets. Nullable so a deleted lead doesn't cascade-delete sent campaign history.
+  leadId String? @map("lead_id")
+
+  /// Denormalised from the lead at generation time, so we still know who this
+  /// was sent to even if the lead is later deleted or edited.
+  businessName String @map("business_name")
+  recipient    String /// email address or phone number
+  channel      String /// "email" | "whatsapp"
+
+  /// AI-generated copy, editable before approval.
+  subject String? @db.Text /// email only
+  body    String  @db.Text
+
+  /// "pending_review" | "approved" | "rejected" | "sent" | "failed"
+  ///
+  /// - pending_review: awaiting the user's decision
+  /// - approved: user said yes, queued for send
+  /// - rejected: user said no, will not be sent
+  /// - sent: delivered successfully
+  /// - failed: send attempt returned an error
+  status String @default("pending_review")
+
+  /// Why this message was rejected or failed, if applicable.
+  rejectionReason String? @map("rejection_reason") @db.Text
+  errorMessage    String? @map("error_message") @db.Text
+
+  /// Metadata for the AI generation that produced this copy.
+  aiProvider    String? @map("ai_provider")
+  aiModel       String? @map("ai_model")
+  promptName    String? @map("prompt_name")
+  promptVersion Int?    @map("prompt_version")
+  tokensUsed    Int?    @map("tokens_used")
+  latencyMs     Int?    @map("latency_ms")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// Timestamp when the user approved this message.
+  approvedAt DateTime? @map("approved_at")
+
+  /// Timestamp when the send attempt started.
+  sentAt DateTime? @map("sent_at")
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  lead     Lead?    @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([campaignId, status])
+  @@index([tenantId, status])
+  @@index([leadId])
+  @@map("campaign_messages")
 }
