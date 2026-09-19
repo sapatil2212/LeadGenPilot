@@ -51,6 +51,23 @@ const DEFAULT_ORDER: AiProviderId[] = ["openrouter", "gemini", "openai", "anthro
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_ATTEMPTS_PER_PROVIDER = 2;
 
+/**
+ * Output ceiling applied when a caller does not name one.
+ *
+ * Not a micro-optimisation. Leaving `max_tokens` unset makes OpenRouter reserve
+ * the model's entire output window — 65,535 tokens for Gemini 2.5 Flash — and
+ * check the caller's credit balance against that reservation. On a free or
+ * low-balance account every single request is refused before the model runs,
+ * with "This request requires more credits, or fewer max_tokens". Observed
+ * against a real account during Phase 4 verification.
+ *
+ * 4096 comfortably covers what any prompt here asks for: an insight is a
+ * sentence, outreach copy is a short email, an assistant turn is a few
+ * paragraphs, structured extraction is a compact JSON object.
+ */
+const DEFAULT_MAX_TOKENS = 4_096;
+const STRUCTURED_MAX_TOKENS = 4_096;
+
 function parseOrder(): AiProviderId[] {
   const raw = (process.env.AI_PROVIDER_ORDER || "").trim();
   if (!raw) return DEFAULT_ORDER;
@@ -166,6 +183,7 @@ export async function generateText(
   }
 
   const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const maxTokens = request.maxTokens ?? DEFAULT_MAX_TOKENS;
   const attempts: { provider: AiProviderId; message: string }[] = [];
 
   for (const provider of chain) {
@@ -173,7 +191,7 @@ export async function generateText(
       const started = Date.now();
       try {
         const result = await withTimeout(
-          provider.generate({ ...request, timeoutMs }),
+          provider.generate({ ...request, timeoutMs, maxTokens }),
           timeoutMs + 2_000,
           `${provider.id} generate`
         );
@@ -270,7 +288,11 @@ export async function generateStructuredOutput<T>(
   request: GenerateRequest,
   options: StructuredOptions<T>
 ): Promise<{ value: T; result: GenerateResult }> {
-  const jsonRequest: GenerateRequest = { ...request, json: true };
+  const jsonRequest: GenerateRequest = {
+    ...request,
+    json: true,
+    maxTokens: request.maxTokens ?? STRUCTURED_MAX_TOKENS,
+  };
 
   const attemptOnce = async (req: GenerateRequest) => {
     const result = await generateText(req, options);

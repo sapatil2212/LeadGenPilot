@@ -142,6 +142,24 @@ describe("generateText", () => {
     expect(all.gemini.generate).not.toHaveBeenCalled();
   });
 
+  it("always sends an output ceiling, even when the caller names none", async () => {
+    /*
+     * Leaving max_tokens unset makes OpenRouter reserve the model's whole output
+     * window — 65,535 tokens for Gemini 2.5 Flash — and check the account's
+     * credit against that reservation. On a free or low-balance account every
+     * request is then refused before the model runs, reported as "requires more
+     * credits", which looks like a billing problem rather than a request-shape
+     * one. Observed against a real account during Phase 4 verification.
+     */
+    await generateText(REQ, OPTS);
+    expect(all.openrouter.generate.mock.calls[0][0].maxTokens).toBe(4_096);
+  });
+
+  it("lets the caller override the ceiling", async () => {
+    await generateText({ ...REQ, maxTokens: 512 }, OPTS);
+    expect(all.openrouter.generate.mock.calls[0][0].maxTokens).toBe(512);
+  });
+
   it("falls back to the next provider on a non-retryable failure", async () => {
     all.openrouter.generate = vi.fn(async () => {
       throw new AiProviderError("openrouter", "bad api key", { status: 401, retryable: false });
@@ -271,6 +289,19 @@ describe("generateStructuredOutput", () => {
 
     await generateStructuredOutput(REQ, { ...OPTS, validate });
     expect(spy.mock.calls[0][0]).toMatchObject({ json: true });
+  });
+
+  it("applies the output ceiling to structured output too", async () => {
+    // Structured output produces compact JSON, so the same 4,096 token ceiling
+    // used for text completions is appropriate. The earlier value of 8,192 was
+    // refused on the OpenRouter free tier before the model ever ran.
+    const spy = vi.fn(async (_req: unknown) => ({
+      text: '{"name":"Acme"}', provider: "openrouter", model: "or-model", latencyMs: 1,
+    }));
+    all.openrouter.generate = spy as any;
+
+    await generateStructuredOutput(REQ, { ...OPTS, validate });
+    expect((spy.mock.calls[0][0] as any).maxTokens).toBe(4_096);
   });
 
   it("asks the model to correct unparseable output, then succeeds", async () => {

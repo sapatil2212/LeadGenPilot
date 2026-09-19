@@ -62,7 +62,11 @@ import {
   BarChart3,
   Save,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Building2,
+  Library,
+  Bot,
+  Target
 } from "lucide-react";
 import { Lead, LeadList } from "./types";
 import { generateOutreachCopy } from "./outreachCopy";
@@ -76,6 +80,10 @@ import TemplateDropdown from "./TemplateDropdown";
 import SearchableDropdown from "./SearchableDropdown";
 import CampaignReport from "./CampaignReport";
 import Conversations from "./Conversations";
+import BusinessPanel from "./features/BusinessPanel";
+import KnowledgePanel from "./features/KnowledgePanel";
+import AssistantPanel from "./features/AssistantPanel";
+import TargetingPanel from "./features/TargetingPanel";
 import AlertModal, { AlertModalType } from "./AlertModal";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -124,7 +132,7 @@ export default function App({ currentUser, entitlements, usage, onLogout, onRefr
   const planName = entitlements?.planName || (currentUser?.plan ? currentUser.plan : "");
   const isFreePlan = !!entitlements && !entitlements.whatsappOutreach;
   // Navigation
-  const [activeTab, setActiveTab] = useState<"dashboard" | "finder" | "leads" | "outreach" | "templates" | "reports" | "conversations" | "settings">(() => {
+  const [activeTab, setActiveTab] = useState<"dashboard" | "finder" | "leads" | "outreach" | "templates" | "reports" | "conversations" | "settings" | "business" | "knowledge" | "assistant" | "targeting">(() => {
     const saved = typeof window !== "undefined" ? localStorage.getItem("nexaleadai_activeTab") : null;
     return (saved as any) || "dashboard";
   });
@@ -2292,6 +2300,10 @@ export default function App({ currentUser, entitlements, usage, onLogout, onRefr
           <nav className="p-2.5 space-y-0.5">
             {([
               { tab: "dashboard", icon: LayoutDashboard, label: "Overview", pulse: false, badge: undefined },
+              { tab: "business", icon: Building2, label: "Business", pulse: false, badge: undefined },
+              { tab: "knowledge", icon: Library, label: "Knowledge", pulse: false, badge: undefined },
+              { tab: "assistant", icon: Bot, label: "Assistant", pulse: false, badge: undefined },
+              { tab: "targeting", icon: Target, label: "Targeting", pulse: false, badge: undefined },
               { tab: "finder", icon: MapPin, label: "Lead Finder", pulse: isRunning, badge: undefined },
               { tab: "leads", icon: Database, label: "Leads", pulse: false, badge: totalProcessed as number | undefined },
               { tab: "outreach", icon: Send, label: "Campaigns", pulse: campaignRunning, badge: undefined },
@@ -2396,6 +2408,10 @@ export default function App({ currentUser, entitlements, usage, onLogout, onRefr
             {activeTab === "reports" && <BarChart3 className="h-5 w-5 text-indigo-500" />}
             {activeTab === "conversations" && <MessageSquare className="h-5 w-5 text-indigo-500" />}
             {activeTab === "settings" && <Settings className="h-5 w-5 text-indigo-500" />}
+            {activeTab === "business" && <Building2 className="h-5 w-5 text-indigo-500" />}
+            {activeTab === "knowledge" && <Library className="h-5 w-5 text-indigo-500" />}
+            {activeTab === "assistant" && <Bot className="h-5 w-5 text-indigo-500" />}
+            {activeTab === "targeting" && <Target className="h-5 w-5 text-indigo-500" />}
             <span className={`text-base font-semibold tracking-tight ${isLight ? "text-slate-800" : "text-white"}`}>
               {activeTab === "dashboard" && "Dashboard Overview"}
               {activeTab === "finder" && "Geo Lead Finder"}
@@ -2405,6 +2421,10 @@ export default function App({ currentUser, entitlements, usage, onLogout, onRefr
               {activeTab === "reports" && "Outreach Reports"}
               {activeTab === "conversations" && "Conversations"}
               {activeTab === "settings" && "Outreach & Integrations"}
+              {activeTab === "business" && "Business Profile"}
+              {activeTab === "knowledge" && "Knowledge Base"}
+              {activeTab === "assistant" && "AI Assistant"}
+              {activeTab === "targeting" && "Targeting & Scoring"}
             </span>
           </div>
 
@@ -4735,6 +4755,39 @@ export default function App({ currentUser, entitlements, usage, onLogout, onRefr
           {activeTab === "conversations" && (
             <div className="animate-fadeIn">
               <Conversations isLight={isLight} onUnreadChange={setConversationsUnread} />
+            </div>
+          )}
+
+          {/*
+            TAB 9-12: the Phase 3 and Phase 4 surfaces.
+
+            Each is a self-contained panel rather than more markup in this file.
+            App.tsx is already 5,000 lines; weaving four feature areas into it
+            would make every one of them harder to change than it needs to be.
+            They share src/ui/primitives.tsx for theming so they still look like
+            the rest of the dashboard.
+          */}
+          {activeTab === "business" && (
+            <div className="animate-fadeIn">
+              <BusinessPanel isLight={isLight} />
+            </div>
+          )}
+
+          {activeTab === "knowledge" && (
+            <div className="animate-fadeIn">
+              <KnowledgePanel isLight={isLight} />
+            </div>
+          )}
+
+          {activeTab === "assistant" && (
+            <div className="animate-fadeIn">
+              <AssistantPanel isLight={isLight} />
+            </div>
+          )}
+
+          {activeTab === "targeting" && (
+            <div className="animate-fadeIn">
+              <TargetingPanel isLight={isLight} />
             </div>
           )}
 

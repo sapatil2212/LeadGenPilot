@@ -102,9 +102,19 @@ export const openRouterProvider: AiProvider = {
       const status = err?.response?.status;
       const detail =
         err?.response?.data?.error?.message || err?.message || "OpenRouter request failed.";
+
+      // "requires more credits" is a 402 — the request shape is fine but the
+      // account balance is too low to serve the reserved token window. Retrying
+      // with the same budget burns the second attempt for nothing and looks like
+      // a network problem when it is actually a billing one. Surfacing it as
+      // non-retryable lets the service fall back to the next provider immediately
+      // (Gemini direct, which does not front-load a token reservation check).
+      const isCredits =
+        status === 402 ||
+        /requires more credits|fewer max_tokens/i.test(detail);
       throw new AiProviderError("openrouter", detail, {
         status,
-        retryable: isRetryableStatus(status),
+        retryable: isCredits ? false : isRetryableStatus(status),
         cause: err,
       });
     }
