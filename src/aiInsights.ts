@@ -3,9 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GoogleGenAI } from "@google/genai";
 import { logger } from "./logger";
-import axios from "axios";
+import { generateText } from "./ai/aiService";
+import { leadInsightPrompt, promptRef } from "./prompts";
+import type { AiProviderId } from "./ai/types";
+
+export interface InsightOptions {
+  tenantId?: string;
+  userId?: string;
+  preferredProvider?: AiProviderId | null;
+}
 
 export async function generateSalesInsight(lead: {
   businessName: string;
@@ -29,87 +36,39 @@ export async function generateSalesInsight(lead: {
   linkedinUrl?: string;
   website?: string;
   category?: string;
-}): Promise<string> {
-  const currentDate = new Date().toISOString().split("T")[0];
-  const prompt = `Perform a comprehensive digital presence audit and create improvement insights for the business '${lead.businessName}'.
-Analyze all of the following digital presence audit metrics:
-- Business Category: ${lead.category || "Local Business"}
-- Google Maps Rating: ${lead.rating} (${lead.reviews} reviews)
-- Website Status: ${lead.websiteStatus} (Website URL: ${lead.website || "None"})
-- Instagram Status: ${lead.instagramStatus} (URL: ${lead.instagramUrl || "None"}, Last Post Date: ${lead.instagramLastPost || "None"})
-- Facebook Status: ${lead.facebookStatus} (URL: ${lead.facebookUrl || "None"}, Last Post Date: ${lead.facebookLastPost || "None"})
-- LinkedIn Status: ${lead.linkedinStatus || "NOT_FOUND"} (URL: ${lead.linkedinUrl || "None"})
-- Emails Found: ${lead.emails && lead.emails.length > 0 ? lead.emails.join(", ") : "None"}
-- WhatsApp Chat Button on Site: ${lead.whatsappPresent ? "Present" : "Missing"}
-- Online Booking System: ${lead.appointmentSystem ? "Present" : "Missing"}
-- Google Analytics (GA4): ${lead.googleAnalyticsPresent ? "Present" : "Missing"}
-- Meta Pixel: ${lead.metaPixelPresent ? "Present" : "Missing"}
-- Digital Presence Score: ${lead.leadScore}/200 (Priority: ${lead.leadPriority})
-- Current Date: ${currentDate}
-
-Audit Formatting Instructions:
-1. **Summary Audit Draft**: Start the output with a single paragraph summarizing their current assets and activity. Use phrases like "Having website!", "Having instagram account but X months since last posted", "Fb account is active/inactive but Y months since last posted", etc. Compute the time differences between the Current Date (${currentDate}) and their last post dates.
-2. **Business Improvement Recommendations**: Provide a detailed list of actionable suggestions explaining how they can grow their business and improve their digital presence (e.g., website creation/redesign, booking automation, pixel tracking, social media active posting). Keep the tone helpful, professional, and business-focused. Do not use placeholders or markdown bolding. Keep the whole audit under 150 words.`;
-
-  // 1. Try OpenRouter API Key
-  const openRouterKey = process.env.OPENROUTER_API_KEY;
-  if (openRouterKey && openRouterKey.trim() !== "" && openRouterKey !== "YOUR_OPENROUTER_API_KEY") {
-    try {
-      logger.info(`Generating AI Insight via OpenRouter for: '${lead.businessName}'`);
-      const response = await axios.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        {
-          model: "google/gemini-2.5-flash",
-          messages: [
-            {
-              role: "user",
-              content: prompt
-            }
-          ]
-        },
-        {
-          headers: {
-            "Authorization": `Bearer ${openRouterKey}`,
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://nexaleadai.com",
-            "X-Title": "NexaLeadAi"
-          },
-          timeout: 15000
-        }
-      );
-      
-      if (response.data && response.data.choices && response.data.choices[0]?.message?.content) {
-        const insight = response.data.choices[0].message.content.trim();
-        if (insight) {
-          return insight.replace(/^["']|["']$/g, "");
-        }
+}, options?: InsightOptions): Promise<string> {
+  /*
+   * Provider selection, retry, timeout and fallback now live in the AI service,
+   * and the prompt lives in the registry. This function keeps only what is
+   * specific to lead insights: the input mapping and the deterministic
+   * rule-based fallback used when no provider can answer.
+   *
+   * Behaviour change worth knowing: the OpenRouter branch actually runs now.
+   * It used to read process.env.OPENROUTER_API_KEY while every .env in this
+   * project defines OPEN_ROUTER_API, so the configured key was never seen and
+   * every call fell through to Gemini. The adapter accepts both names.
+   */
+  try {
+    const result = await generateText(
+      { messages: leadInsightPrompt.build(lead), timeoutMs: 15_000 },
+      {
+        operation: "lead.insight",
+        tenantId: options?.tenantId,
+        userId: options?.userId,
+        preferredProvider: options?.preferredProvider,
+        ...promptRef(leadInsightPrompt),
       }
-    } catch (e: any) {
-      logger.warn(`OpenRouter API Insight generation failed: ${e.message || e}. Trying Gemini fallback...`);
-    }
+    );
+    // Strip stray wrapping quotes, as the previous implementation did.
+    const insight = result.text.replace(/^["']|["']$/g, "").trim();
+    if (insight) return insight;
+    logger.warn("AI insight came back empty. Falling back to the rule-based engine.");
+  } catch (err: any) {
+    logger.warn(
+      `AI insight generation unavailable (${err?.message || err}). Using the rule-based engine.`
+    );
   }
 
-  // 2. Try Gemini API Key
-  const geminiKey = process.env.GEMINI_API_KEY;
-  if (geminiKey && geminiKey.trim() !== "" && geminiKey !== "MY_GEMINI_API_KEY") {
-    try {
-      logger.info(`Generating AI Insight via Gemini for: '${lead.businessName}'`);
-      const ai = new GoogleGenAI({ apiKey: geminiKey });
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt
-      });
-
-      const insight = response.text ? response.text.trim() : "";
-      if (insight) {
-        return insight.replace(/^["']|["']$/g, "");
-      }
-    } catch (e) {
-      logger.warn(`Gemini API Insight generation failed: ${e}. Falling back to rule-based engine.`);
-    }
-  }
-
-  // 3. Rule-based fallback engine
   return getRuleBasedInsight(lead);
 }
 
