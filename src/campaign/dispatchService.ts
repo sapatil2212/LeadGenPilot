@@ -5,7 +5,7 @@ export interface DispatchInput {
   businessName: string; recipient: string; channel: "email" | "whatsapp";
   status: "SENT" | "FAILED"; sourceType: string; sourceLabel: string;
   subject?: string | null; messageSnippet?: string; errorMessage?: string;
-  externalMessageId?: string; dryRun?: boolean; occurredAt?: Date;
+  externalMessageId?: string; idempotencyKey?: string | null; dryRun?: boolean; occurredAt?: Date;
 }
 
 function dataFor(input: DispatchInput) {
@@ -15,6 +15,7 @@ function dataFor(input: DispatchInput) {
     status: input.status, sourceType: input.sourceType, sourceLabel: input.sourceLabel, dryRun: input.dryRun ?? false,
     subject: input.subject ?? null, messageSnippet: input.messageSnippet?.slice(0, 500) ?? null,
     errorMessage: input.errorMessage?.slice(0, 500) ?? null, externalMessageId: input.externalMessageId ?? null,
+    idempotencyKey: input.idempotencyKey ?? null,
     occurredAt: input.occurredAt ?? new Date(),
   };
 }
@@ -36,6 +37,7 @@ export async function recordCampaignDispatch(input: { message: any; campaignName
     channel: input.message.channel as "email" | "whatsapp", status: input.status, sourceType: "reviewed_campaign",
     sourceLabel: input.campaignName, subject: input.message.subject, messageSnippet: input.message.body,
     externalMessageId: input.externalMessageId, errorMessage: input.errorMessage,
+    idempotencyKey: input.message.idempotencyKey ?? null,
   });
   await (prisma.campaignDispatch as any).upsert({ where: { campaignMessageId: input.message.id }, create: data, update: data });
 }

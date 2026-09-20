@@ -77,6 +77,19 @@ database returns.
 claimable job (up to ten candidates) instead of idling until the next tick, so N
 replicas drain N jobs per cycle rather than one between them.
 
+**Every attempt carries one identity.** Each message gets a derived
+`idempotencyKey` (`sha256(tenantId:messageId)`, persisted on first use) that never
+changes across retries or recovery. For email it becomes the `Message-ID` header,
+so a resend after an unknown outcome carries the id the first attempt used and
+receiving servers that deduplicate on it collapse the duplicate. The key is also
+written to the delivery report, so a duplicate is identifiable afterwards.
+
+This narrows at-least-once delivery; it does not eliminate it. A crash between
+"the provider accepted this" and "the database recorded it" is unobservable from
+our side, and WhatsApp Cloud exposes no equivalent key, so a WhatsApp duplicate
+after a crash in that window remains possible. Choosing a possible duplicate over
+a possible silent non-delivery is deliberate.
+
 **Cancelling a queued run is immediate.** A queued job has no worker to observe a
 cancellation request, so it is settled to `cancelled` at request time. A job
 already claimed by a worker is cancelled cooperatively, between messages, so an
@@ -104,7 +117,12 @@ Inbound opt-outs are recorded automatically from WhatsApp Cloud webhooks and the
 IMAP reply poller. Detection distinguishes unambiguous phrases ("unsubscribe",
 "do not contact") from bare commands: a lone "stop" counts only when it is
 essentially the whole message, so "can you stop by on Tuesday?" does not silence a
-warm lead. Operators can list, add and clear entries at `/api/suppressions`.
+warm lead.
+
+Operators work with the list on the **Do Not Contact** tab: search and filter by
+channel, see when and how each opt-out was recorded, add one that arrived by phone,
+and remove one that was recorded in error. The same operations are available at
+`/api/suppressions` for scripted use.
 
 ## Reporting and CRM reconciliation
 
@@ -149,21 +167,93 @@ run reported success.
 ## Migrations
 
 ```powershell
-npm run prisma:migrate        # deploy
+npm run prisma:migrate         # deploy
 npm run prisma:migrate:status  # must print "Database schema is up to date!"
-npm run verify:migrations      # migration history vs. datamodel
+npm run verify:migrations      # migration history vs. datamodel, no database needed
+npm run verify:fresh-db -- --url "mysql://root:@127.0.0.1:3307/freshtest"
 ```
 
-`npm run verify:migrations` replays the committed SQL symbolically and compares
-tables, columns and indexes against the DDL Prisma would generate for the current
-datamodel. It exists because a fresh deploy can be broken while the live database
-looks perfectly healthy: Phase 8 found that `campaigns` was created by migration
-with a `user_id` column while the datamodel expects `userId`, so a brand-new
-database would have failed at runtime on the first campaign query even though
-`migrate status` was clean. The check also rejects a UTF-8 BOM in a migration file
-(MySQL fails the first statement) and identifiers over MySQL's 64-character limit.
+`verify:migrations` replays the committed SQL symbolically and compares tables,
+columns and indexes against the DDL Prisma would generate for the current
+datamodel. `verify:fresh-db` goes further: it deploys the history to an empty
+database and asserts `prisma migrate diff` between the result and the datamodel is
+empty. It refuses to run against anything that is not empty, so it cannot be
+pointed at production by accident.
 
-Run it in CI alongside `prisma migrate status`.
+Both exist because a fresh deploy can be broken while the live database looks
+perfectly healthy. That was real here: `campaigns` was created by migration with a
+`user_id` column while the datamodel expects `userId`, so every existing
+deployment worked and a brand-new one would have failed on its first campaign
+query — with `migrate status` reporting a clean schema throughout. The checks also
+reject a UTF-8 BOM in a migration file (MySQL fails the first statement) and
+identifiers over MySQL's 64-character limit.
+
+Run both in CI alongside `prisma migrate status`.
+
+## Test suites
+
+| Command | Needs | Covers |
+| --- | --- | --- |
+| `npm run test:run` | nothing | Unit and API-level tests, all doubles |
+| `npm run test:integration` | `TEST_DATABASE_URL` | Real Prisma queries against a real schema |
+| `npm run test:e2e` | `E2E_DATABASE_URL` | The built dashboard in Chromium against the built server |
+| `npm run test:all` | both | All three in order |
+
+`test:run` is the suite that must stay green on every machine, so it depends on no
+infrastructure and a failure always means a real defect. The other two declare
+their dependency and refuse to run without a disposable database named explicitly,
+because they delete rows during setup.
+
+### A disposable MySQL for the two database suites
+
+Any empty MySQL works. To get one from an existing MySQL installation without
+touching its service or data (Windows paths shown; adjust for your install):
+
+```powershell
+$mysql = "C:\Program Files\MySQL\MySQL Server 8.4\bin"
+$dir   = "$env:TEMP\leadgen-testdb"
+
+& "$mysql\mysqld.exe" --initialize-insecure --datadir="$dir\data"
+Start-Process "$mysql\mysqld.exe" -ArgumentList @(
+  "--datadir=$dir\data", "--port=3307", "--mysqlx=0",
+  "--socket=$dir\my.sock", "--pid-file=$dir\my.pid"
+)
+& "$mysql\mysql.exe" -u root -h 127.0.0.1 -P 3307 -e @"
+CREATE DATABASE leadgen_test;
+CREATE DATABASE leadgen_e2e;
+"@
+
+$env:TEST_DATABASE_URL = "mysql://root:@127.0.0.1:3307/leadgen_test"
+$env:E2E_DATABASE_URL  = "mysql://root:@127.0.0.1:3307/leadgen_e2e"
+npx prisma migrate deploy   # with DATABASE_URL pointed at leadgen_test
+npm run test:integration
+npm run test:e2e            # applies migrations and seeds leadgen_e2e itself
+```
+
+Shut it down with `& "$mysql\mysqladmin.exe" -u root -h 127.0.0.1 -P 3307 shutdown`
+and delete `$dir`.
+
+### The browser suite
+
+`npm run test:e2e` builds the production bundle, applies migrations to
+`E2E_DATABASE_URL`, seeds two workspaces (`tests/e2e/seed.mjs`), starts
+`dist/server.cjs`, and drives Chromium against it. It tests the built artefact
+rather than the dev server, so it is a deployment check.
+
+Note that `vite build` empties `dist/`, so running it alone removes the server
+bundle esbuild wrote there. `npm run build` does both in the correct order, which
+is why it runs automatically before the browser suite.
+
+The suite deliberately raises the API rate limit for its own server: 24 specs
+signing in, each with a dashboard polling status and inbox on timers, exceeds the
+production limit of 300 requests/minute from one address. The limiter itself is
+covered by `tests/security.middleware.test.ts`.
+
+What the browser adds over the layers beneath it: a lazily loaded panel whose
+dynamic import fails, a fetch that omits its credentials, and a route the UI calls
+with a shape the API rejects all typecheck, build and pass unit tests. One spec
+walks every sidebar destination and fails on a chunk-load error or a Suspense
+fallback that never resolves.
 
 ## Observability
 
@@ -180,9 +270,21 @@ password/token/key patterns as a safety net.
 
 ## Dashboard performance
 
-Each dashboard tab is now a lazily loaded chunk, and the spreadsheet, PDF and Word
-writers are imported at the moment an export button is used. Initial load dropped
-from 2,734 kB (702 kB gzip) to 784 kB (178 kB gzip). The remaining large chunks
-(`CampaignReport` with the charting library, `xlsx`, `jspdf`) are fetched on
-demand, so Vite still prints its 500 kB chunk warning for them; that is expected
-and is not part of the first paint.
+Three changes, in order of effect:
+
+1. Each dashboard tab is a lazily loaded chunk, so opening the app no longer
+   downloads the code for twelve screens nobody is looking at.
+2. The spreadsheet, PDF and Word writers are imported at the moment an export
+   button is used, and the ~560 lines of lead-export layout live in
+   `src/exports/leadExports.ts` rather than in `App.tsx`.
+3. The React runtime and the icon set are their own chunks, so a deploy does not
+   invalidate them and no single chunk sits above Rollup's 500 kB warning.
+
+| | Before Phase 8 | Now |
+| --- | --- | --- |
+| Largest application chunk | 2,734 kB | 357 kB |
+| First-load JavaScript (gzip) | 702 kB | 178 kB |
+| Chunks over 500 kB | 1 | 0 |
+
+Everything above 400 kB that remains (`CampaignReport` with the charting library,
+`xlsx`, `jspdf`, `docx`) is fetched on demand and is not part of the first paint.

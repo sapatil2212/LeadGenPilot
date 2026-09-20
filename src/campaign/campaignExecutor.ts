@@ -46,6 +46,7 @@ interface CampaignMessageSnapshot {
   id: string; campaignId: string; tenantId: string; leadId: string | null;
   businessName: string; recipient: string; channel: string; subject: string | null;
   body: string; attemptCount: number; leaseToken: string | null;
+  idempotencyKey?: string | null;
 }
 interface TenantSmtpConfig { host: string; port: number; secure: boolean; user: string; pass: string; from: string }
 
@@ -194,7 +195,20 @@ async function claimNextCampaignMessage(job: any, now = new Date()): Promise<Cam
     data: { status: "sending", leaseOwner: job.workerId, leaseToken, leaseExpiresAt: new Date(now.getTime() + MESSAGE_LEASE_MS), lastAttemptAt: now, nextAttemptAt: null, attemptCount: { increment: 1 } },
   });
   if (claimed.count !== 1) return null;
-  return prisma.campaignMessage.findFirst({ where: { id: candidate.id, tenantId: job.tenantId, leaseOwner: job.workerId, leaseToken } }) as Promise<CampaignMessageSnapshot | null>;
+  const claimedMessage = (await prisma.campaignMessage.findFirst({
+    where: { id: candidate.id, tenantId: job.tenantId, leaseOwner: job.workerId, leaseToken },
+  })) as CampaignMessageSnapshot | null;
+  if (!claimedMessage) return null;
+
+  // Persist the derived key on first use so the value that was sent is auditable
+  // from the row itself, not only recomputable from it.
+  const idempotencyKey = claimedMessage.idempotencyKey || deliveryIdempotencyKey(job.tenantId, claimedMessage.id);
+  if (!claimedMessage.idempotencyKey) {
+    await prisma.campaignMessage
+      .updateMany({ where: { id: claimedMessage.id, tenantId: job.tenantId, idempotencyKey: null }, data: { idempotencyKey } })
+      .catch(() => undefined);
+  }
+  return { ...claimedMessage, idempotencyKey };
 }
 
 async function finishLeasedMessage(message: CampaignMessageSnapshot, job: any, status: "sent" | "failed" | "retry_wait" | "suppressed", error?: string, externalMessageId?: string): Promise<boolean> {
@@ -211,6 +225,17 @@ function parseParams(value: string | null | undefined): NormalizedExecutionOptio
 }
 
 function retryDelayMs(attempt: number): number { return Math.min(60_000 * 2 ** Math.max(0, attempt - 1), 15 * 60_000); }
+
+/**
+ * One stable identity per message, unchanged by retries or recovery.
+ *
+ * Derived rather than random so that a worker which crashed before it could
+ * persist anything computes exactly the same key on the next attempt. The tenant
+ * is mixed in so the key is meaningless outside the workspace that produced it.
+ */
+export function deliveryIdempotencyKey(tenantId: string, messageId: string): string {
+  return crypto.createHash("sha256").update(`${tenantId}:${messageId}`).digest("hex").slice(0, 32);
+}
 function isPermanentError(reason: string): boolean {
   return /not configured|authentication failed|invalid.*(email|recipient|address)|no valid email|no phone recipient|unknown campaign channel|not on whatsapp/i.test(reason);
 }
@@ -406,7 +431,12 @@ async function deliverMessage(ctx: TenantContext, message: CampaignMessageSnapsh
   if (message.channel === "email") {
     if (!smtp) throw new Error("Email is not configured for this workspace. Add an enabled SMTP integration before sending.");
     if (!isValidEmail(message.recipient)) throw new Error("The approved message has no valid email recipient.");
-    const result = await sendEmailOutreach(message.recipient, message.subject || "Outreach", message.body, smtp);
+    const result = await sendEmailOutreach(message.recipient, message.subject || "Outreach", message.body, smtp, {
+      // Same key on every attempt, so a retry after an unknown outcome carries
+      // the Message-ID the first attempt used and receiving servers can collapse
+      // the duplicate.
+      idempotencyKey: message.idempotencyKey || deliveryIdempotencyKey(message.tenantId, message.id),
+    });
     if (!result.success) throw new Error(result.error || "Email send failed");
     return result.messageId;
   }

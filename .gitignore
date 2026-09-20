@@ -46,6 +46,16 @@ scan-history.json
 .*.tmp
 
 # ─────────────────────────────────────────────────────────────
+# Test artefacts
+# ─────────────────────────────────────────────────────────────
+# Playwright writes traces, screenshots and HTML reports for failed runs. They
+# can contain seeded data and are regenerated on every run.
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
+# ─────────────────────────────────────────────────────────────
 # Logs
 # ─────────────────────────────────────────────────────────────
 *.log

@@ -2,12 +2,19 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Campaign service tests.
+ * Campaign service tests — INTEGRATION.
+ *
+ * These exercise generation, review and approval against a real MySQL schema
+ * rather than a double, which is the only way to catch a Prisma query that is
+ * valid TypeScript and invalid SQL. They therefore require a disposable database
+ * in TEST_DATABASE_URL and run from vitest.integration.config.ts:
+ *
+ *   npm run test:integration
  */
 
-import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { prisma } from "../src/prisma";
-import type { TenantContext } from "../src/tenancy/context";
+import { describe, it, expect, beforeAll, beforeEach, vi, afterEach } from "vitest";
+import { prisma } from "../../src/prisma";
+import type { TenantContext } from "../../src/tenancy/context";
 import {
   generateCampaign,
   listCampaigns,
@@ -17,12 +24,12 @@ import {
   editMessage,
   approveAllMessages,
   deleteCampaign,
-} from "../src/campaign/campaignService";
-import * as aiCopyGenerator from "../src/aiCopyGenerator";
-import * as outreachCopy from "../src/outreachCopy";
+} from "../../src/campaign/campaignService";
+import * as aiCopyGenerator from "../../src/aiCopyGenerator";
+import * as outreachCopy from "../../src/outreachCopy";
 
-vi.mock("../src/aiCopyGenerator");
-vi.mock("../src/outreachCopy");
+vi.mock("../../src/aiCopyGenerator");
+vi.mock("../../src/outreachCopy");
 
 const TENANT_ID = "test-tenant-campaign";
 const USER_ID = "test-user-campaign";
@@ -61,6 +68,19 @@ function createLeadData(listId: string, overrides: Partial<any> = {}) {
 }
 
 describe("Campaign Service", () => {
+  /**
+   * Refuse to run against whatever `.env` points at. Without this, a developer
+   * running the integration suite locally would delete tenants out of the
+   * production database, because the fixtures start by clearing their own rows.
+   */
+  beforeAll(() => {
+    if (!process.env.TEST_DATABASE_URL?.trim()) {
+      throw new Error(
+        "TEST_DATABASE_URL is not set. The integration suite writes and deletes rows, so it must be pointed at a disposable database. See docs/PHASE8-OPERATIONS.md."
+      );
+    }
+  });
+
   beforeEach(async () => {
     // Clean up campaign data
     await prisma.campaignMessage.deleteMany({ where: { tenantId: TENANT_ID } });

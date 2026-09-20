@@ -17,11 +17,26 @@ export interface EmailSendResult {
   error?: string;
 }
 
+export interface EmailSendOptions {
+  /**
+   * Stable per-message identity, reused on every retry of the same message.
+   *
+   * SMTP has no idempotency parameter, but it does have `Message-ID`, and that is
+   * the closest thing available: a resend after an unknown outcome carries the
+   * same Message-ID, so receiving servers and mail clients that deduplicate on it
+   * collapse the duplicate instead of showing the recipient two copies. It also
+   * makes a duplicate detectable afterwards, because the id is recorded on the
+   * delivery report.
+   */
+  idempotencyKey?: string;
+}
+
 export async function sendEmailOutreach(
   to: string, 
   subject: string, 
   body: string,
-  smtpConfig?: { host: string; port: number; secure: boolean; user: string; pass: string; from: string }
+  smtpConfig?: { host: string; port: number; secure: boolean; user: string; pass: string; from: string },
+  options?: EmailSendOptions
 ): Promise<EmailSendResult> {
   const host = smtpConfig ? smtpConfig.host : (process.env.SMTP_HOST || "");
   const rawPort = smtpConfig ? String(smtpConfig.port) : (process.env.SMTP_PORT || "587");
@@ -69,6 +84,8 @@ export async function sendEmailOutreach(
       to,
       subject,
     };
+    const stableMessageId = buildStableMessageId(options?.idempotencyKey, user);
+    if (stableMessageId) mailOptions.messageId = stableMessageId;
     if (isHtml) {
       mailOptions.html = body;
       // Provide a plain-text fallback by stripping HTML tags
@@ -84,6 +101,21 @@ export async function sendEmailOutreach(
     logger.error(`Failed to send email to ${to}: ${error}`);
     return { success: false, error: classifyEmailError(error) };
   }
+}
+
+/**
+ * Builds an RFC 5322 Message-ID from a delivery idempotency key.
+ *
+ * Returns null for a missing or unusable key rather than guessing, because an
+ * invalid Message-ID header is rejected by some servers and would turn a
+ * deliverable message into a hard failure.
+ */
+export function buildStableMessageId(idempotencyKey: string | undefined, senderAddress: string): string | null {
+  const key = String(idempotencyKey || "").trim().toLowerCase();
+  if (!/^[a-z0-9-]{8,128}$/.test(key)) return null;
+  const domain = senderAddress.includes("@") ? senderAddress.split("@").pop()!.trim().toLowerCase() : "";
+  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)) return null;
+  return `<campaign-${key}@${domain}>`;
 }
 
 /** Turn a raw nodemailer/SMTP error into an actionable, user-facing message. */

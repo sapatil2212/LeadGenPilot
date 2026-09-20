@@ -44,6 +44,7 @@ const {
   runCampaignWorkerCycle,
   recoverStaleCampaignLeases,
   cancelCampaignExecution,
+  deliveryIdempotencyKey,
 } = await import("../src/campaign/campaignExecutor");
 
 const CTX_A: any = {
@@ -435,6 +436,93 @@ describe("cancellation", () => {
 
     expect(await cancelCampaignExecution(otherTenant, "campaign-a")).toEqual({ ok: false });
     expect(db.state.jobs[0].status).toBe("queued");
+  });
+});
+
+// ── Delivery idempotency ───────────────────────────────────────────────────
+
+describe("delivery idempotency", () => {
+  it("derives a stable key and persists it on the message and the report", async () => {
+    seed({ jobs: [jobRow({ id: "job-1" })], messages: [messageRow({ id: "m1" })] });
+
+    await runCampaignWorkerCycle("worker-1");
+
+    const stored = db.state.campaignMessages[0].idempotencyKey;
+    expect(stored).toMatch(/^[0-9a-f]{32}$/);
+    expect(stored).toBe(deliveryIdempotencyKey("tenant-a", "m1"));
+    // The report carries it too, so a duplicate can be recognised afterwards.
+    expect(db.state.campaignDispatches[0].idempotencyKey).toBe(stored);
+  });
+
+  it("reuses the same key on a retry instead of minting a new one", async () => {
+    seed({ jobs: [jobRow({ id: "job-1" })], messages: [messageRow({ id: "m1" })] });
+    mocks.sendEmail.mockResolvedValueOnce({ success: false, error: "connection reset by peer" });
+
+    await runCampaignWorkerCycle("worker-1");
+    const firstKey = mocks.sendEmail.mock.calls[0][4]?.idempotencyKey;
+
+    // Make the retry due and run another cycle, as recovery would.
+    db.state.campaignMessages[0].nextAttemptAt = new Date(Date.now() - 1_000);
+    db.state.jobs.push(jobRow({ id: "job-2" }));
+    await runCampaignWorkerCycle("worker-2");
+
+    const secondKey = mocks.sendEmail.mock.calls[1][4]?.idempotencyKey;
+    expect(firstKey).toBeTruthy();
+    expect(secondKey).toBe(firstKey);
+    expect(db.state.campaignMessages[0].status).toBe("sent");
+  });
+
+  it("gives two messages different keys", async () => {
+    seed({
+      jobs: [jobRow({ id: "job-1" })],
+      messages: [messageRow({ id: "m1", recipient: "a@acme.test" }), messageRow({ id: "m2", recipient: "b@acme.test" })],
+    });
+
+    await runCampaignWorkerCycle("worker-1");
+
+    const keys = db.state.campaignMessages.map((message: any) => message.idempotencyKey);
+    expect(new Set(keys).size).toBe(2);
+  });
+
+  it("scopes the key to the workspace that produced it", () => {
+    expect(deliveryIdempotencyKey("tenant-a", "m1")).not.toBe(deliveryIdempotencyKey("tenant-b", "m1"));
+  });
+
+  it("passes the key to the email transport on every send", async () => {
+    seed({ jobs: [jobRow({ id: "job-1" })], messages: [messageRow({ id: "m1" })] });
+
+    await runCampaignWorkerCycle("worker-1");
+
+    expect(mocks.sendEmail).toHaveBeenCalledWith(
+      "owner@acme.test",
+      "Hello",
+      "Body copy",
+      expect.objectContaining({ host: "smtp.test" }),
+      expect.objectContaining({ idempotencyKey: deliveryIdempotencyKey("tenant-a", "m1") })
+    );
+  });
+
+  it("keeps the key it was generated with when a message is recovered after a lease expiry", async () => {
+    const existingKey = deliveryIdempotencyKey("tenant-a", "m1");
+    seed({
+      jobs: [jobRow({ id: "job-1" })],
+      messages: [
+        messageRow({
+          id: "m1",
+          status: "sending",
+          attemptCount: 1,
+          idempotencyKey: existingKey,
+          leaseOwner: "worker-dead",
+          leaseToken: "token-dead",
+          leaseExpiresAt: new Date(Date.now() - 1_000),
+        }),
+      ],
+    });
+
+    await runCampaignWorkerCycle("worker-2");
+
+    expect(mocks.sendEmail.mock.calls[0][4]?.idempotencyKey).toBe(existingKey);
+    expect(db.state.campaignMessages[0].idempotencyKey).toBe(existingKey);
   });
 });
 

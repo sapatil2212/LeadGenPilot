@@ -1117,6 +1117,15 @@ model CampaignMessage {
   /// a durable external ID.
   externalMessageId String? @map("external_message_id")
 
+  /// Stable delivery identity, derived once and reused by every attempt.
+  ///
+  /// A crash between "the provider accepted this" and "the database recorded it"
+  /// cannot be closed by leases alone, so recovery re-attempts and delivery is
+  /// at-least-once. Carrying one unchanging key across attempts is what makes a
+  /// duplicate collapsible by the transport (as the SMTP Message-ID) and
+  /// detectable afterwards, because the same key appears on the delivery report.
+  idempotencyKey String? @map("idempotency_key")
+
   campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   lead     Lead?    @relation(fields: [leadId], references: [id], onDelete: SetNull)
   tenant   Tenant   @relation(fields: [tenantId], references: [id])
@@ -1126,6 +1135,7 @@ model CampaignMessage {
   @@index([tenantId, status])
   @@index([leadId])
   @@index([campaignId, status, nextAttemptAt, leaseExpiresAt, createdAt], map: "camp_msg_worker_claim_idx")
+  @@index([tenantId, idempotencyKey], map: "camp_msg_idempotency_idx")
   @@map("campaign_messages")
 }
 
@@ -1207,6 +1217,9 @@ model CampaignDispatch {
   messageSnippet String? @map("message_snippet") @db.Text
   errorMessage String? @map("error_message") @db.Text
   externalMessageId String? @map("external_message_id")
+  /// The delivery idempotency key the attempt carried, so two receipts for the
+  /// same logical send can be recognised as one.
+  idempotencyKey String? @map("idempotency_key")
   occurredAt DateTime @map("occurred_at")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -1224,6 +1237,7 @@ model CampaignDispatch {
   // permits many NULLs here, so manual dispatches remain append-only.
   @@unique([campaignMessageId])
   @@index([tenantId, externalMessageId])
+  @@index([tenantId, idempotencyKey], map: "campaign_dispatches_idempotency_idx")
   @@map("campaign_dispatches")
 }
 

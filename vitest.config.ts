@@ -17,10 +17,21 @@ export default defineConfig({
     environment: "node",
     globals: false,
     include: ["tests/**/*.test.ts"],
-    exclude: ["node_modules/**", "dist/**", "leadfinder-landing/**", "backups/**"],
-    // Tests must never reach the network, the filesystem stores or the
-    // database. Anything needing those belongs in an integration suite with
-    // explicit setup, added in a later phase.
+    // tests/integration/** needs a real MySQL and its own timeouts; it runs from
+    // vitest.integration.config.ts via `npm run test:integration`. Excluding it
+    // here keeps `npm run test:run` runnable with no infrastructure at all, so a
+    // red default suite always means a real defect.
+    exclude: [
+      "node_modules/**",
+      "dist/**",
+      "leadfinder-landing/**",
+      "backups/**",
+      "tests/integration/**",
+      "tests/e2e/**",
+    ],
+    setupFiles: ["tests/setup/database.ts"],
+    // These tests must never reach the network, the filesystem stores or the
+    // database, so a slow test is a broken test.
     testTimeout: 10_000,
     coverage: {
       provider: "v8",
