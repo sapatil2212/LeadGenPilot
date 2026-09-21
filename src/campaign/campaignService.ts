@@ -23,6 +23,8 @@ import type { TenantContext } from "../tenancy/context";
 import { generateAICopy } from "../aiCopyGenerator";
 import { generateOutreachCopy } from "../outreachCopy";
 import { canonicalSuppressionKey, filterSuppressed } from "../compliance/suppressionService";
+import { compileTemplateSubject, compileTemplateText, templateNeedsAiBody } from "../outreachTemplates";
+import { resolveTemplateSelection } from "../templates/templateService";
 
 export interface GenerateCampaignRequest {
   name?: string;
@@ -91,6 +93,14 @@ export async function generateCampaign(
     throw new Error("At least one channel (email or whatsapp) must be enabled.");
   }
 
+  const selectedTemplates = await resolveTemplateSelection(ctx, request.templateIds);
+  if (!emailOn && selectedTemplates.email) {
+    throw new Error("An email template was selected but the email channel is disabled.");
+  }
+  if (!whatsappOn && selectedTemplates.whatsapp) {
+    throw new Error("A WhatsApp template was selected but the WhatsApp channel is disabled.");
+  }
+
   // Resolve the lead pool.
   const leads = await resolveLeads(ctx, request);
   if (leads.length === 0) {
@@ -108,7 +118,12 @@ export async function generateCampaign(
       sourceListId: request.sourceListId || null,
       filters: request.filters ? JSON.stringify(request.filters) : null,
       channels: JSON.stringify(request.channels),
-      templates: request.templateIds ? JSON.stringify(request.templateIds) : null,
+      templates: request.templateIds
+        ? JSON.stringify({
+            ...(selectedTemplates.email ? { email: selectedTemplates.email.id } : {}),
+            ...(selectedTemplates.whatsapp ? { whatsapp: selectedTemplates.whatsapp.id } : {}),
+          })
+        : null,
       createdById: ctx.userId,
       totalMessages: 0, // will be updated after message creation
     },
@@ -152,9 +167,20 @@ export async function generateCampaign(
   let aiFailures = 0;
 
   for (const lead of leads) {
-    // Generate copy for this lead. If AI is requested but unavailable,
-    // fall back to the rule-based generator rather than blocking the campaign.
-    let copy: { emailSubject: string; emailBody: string; whatsappMessage: string };
+    const emailNeedsGeneratedBody = emailOn &&
+      (!selectedTemplates.email || templateNeedsAiBody(selectedTemplates.email));
+    const whatsappNeedsGeneratedBody = whatsappOn &&
+      (!selectedTemplates.whatsapp || templateNeedsAiBody(selectedTemplates.whatsapp));
+    const needsGeneratedCopy = emailNeedsGeneratedBody || whatsappNeedsGeneratedBody;
+
+    // A reviewed static template bypasses AI entirely. Missing/AI-body channels
+    // retain the existing AI-or-rule fallback and are still reviewed as final
+    // CampaignMessage snapshots before anything can be sent.
+    let copy: { emailSubject: string; emailBody: string; whatsappMessage: string } = {
+      emailSubject: "",
+      emailBody: "",
+      whatsappMessage: "",
+    };
     let aiMeta: {
       provider: string | null;
       model: string | null;
@@ -171,13 +197,9 @@ export async function generateCampaign(
       latencyMs: null,
     };
 
-    if (request.useAi) {
+    if (needsGeneratedCopy && request.useAi) {
       try {
-        const aiResult = await generateAICopy(lead);
-        copy = aiResult;
-        // generateAICopy doesn't return the provenance, so we mark it as AI
-        // but can't record which model was used. A future refactor could thread
-        // the provenance through the aiCopyGenerator.
+        copy = await generateAICopy(lead);
         aiMeta.provider = "openrouter";
         aiMeta.promptName = "lead_outreach";
       } catch (err: any) {
@@ -185,9 +207,19 @@ export async function generateCampaign(
         copy = generateOutreachCopy(lead);
         aiFailures++;
       }
-    } else {
+    } else if (needsGeneratedCopy) {
       copy = generateOutreachCopy(lead);
     }
+
+    const emailSubject = selectedTemplates.email
+      ? compileTemplateSubject(selectedTemplates.email, lead, copy.emailSubject)
+      : copy.emailSubject;
+    const emailBody = selectedTemplates.email
+      ? compileTemplateText(selectedTemplates.email, lead, copy.emailBody)
+      : copy.emailBody;
+    const whatsappBody = selectedTemplates.whatsapp
+      ? compileTemplateText(selectedTemplates.whatsapp, lead, copy.whatsappMessage)
+      : copy.whatsappMessage;
 
     // Email message
     if (emailOn && lead.emails) {
@@ -205,8 +237,8 @@ export async function generateCampaign(
           businessName: lead.businessName,
           recipient: email,
           channel: "email",
-          subject: copy.emailSubject || "Unlock your growth potential",
-          body: copy.emailBody,
+          subject: emailSubject || "A relevant idea for your business",
+          body: emailBody,
           aiProvider: aiMeta.provider,
           aiModel: aiMeta.model,
           promptName: aiMeta.promptName,
@@ -229,7 +261,7 @@ export async function generateCampaign(
         recipient: lead.phone,
         channel: "whatsapp",
         subject: null,
-        body: copy.whatsappMessage,
+        body: whatsappBody,
         aiProvider: aiMeta.provider,
         aiModel: aiMeta.model,
         promptName: aiMeta.promptName,
@@ -238,6 +270,11 @@ export async function generateCampaign(
         latencyMs: aiMeta.latencyMs,
       });
     }
+  }
+
+  if (messages.length === 0) {
+    await prisma.campaign.delete({ where: { id: campaign.id } });
+    throw new Error("None of the selected leads has an eligible, unsuppressed contact for the enabled channels.");
   }
 
   // Bulk insert the messages.

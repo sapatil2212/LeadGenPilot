@@ -17,6 +17,7 @@
  */
 
 import React, { useState } from "react";
+import type { OutreachTemplate } from "../outreachTemplates";
 import {
   Check,
   CheckCircle,
@@ -516,13 +517,23 @@ function MessageCard({
 function GenerateTab({ isLight }: Themed) {
   const t = tokens(isLight);
   const action = useAction();
+  const templates = useAsync<OutreachTemplate[]>(() => api.get("/api/templates"));
 
+  const initialManualLeadIds = (() => {
+    try {
+      const value = JSON.parse(sessionStorage.getItem("nexaleadai_campaign_lead_ids") || "[]");
+      return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+    } catch { return [] as string[]; }
+  })();
+  const [manualLeadIds, setManualLeadIds] = useState<string[]>(initialManualLeadIds);
   const [name, setName] = useState("");
-  const [sourceType, setSourceType] = useState<"icp" | "list" | "manual">("icp");
+  const [sourceType, setSourceType] = useState<"icp" | "list" | "manual">(initialManualLeadIds.length ? "manual" : "icp");
   const [sourceListId, setSourceListId] = useState("");
   const [icpProfileId, setIcpProfileId] = useState("");
   const [emailOn, setEmailOn] = useState(true);
   const [whatsappOn, setWhatsappOn] = useState(false);
+  const [emailTemplateId, setEmailTemplateId] = useState("");
+  const [whatsappTemplateId, setWhatsappTemplateId] = useState("");
   const [useAi, setUseAi] = useState(true);
 
   const generate = async () => {
@@ -532,6 +543,10 @@ function GenerateTab({ isLight }: Themed) {
     }
     if (sourceType === "icp" && !icpProfileId) {
       await action.run(() => Promise.reject(new Error("Select an ICP profile.")));
+      return;
+    }
+    if (sourceType === "manual" && manualLeadIds.length === 0) {
+      await action.run(() => Promise.reject(new Error("Select leads from the Leads workspace first.")));
       return;
     }
     if (!emailOn && !whatsappOn) {
@@ -546,7 +561,12 @@ function GenerateTab({ isLight }: Themed) {
           sourceType,
           sourceListId: sourceType === "list" ? sourceListId : undefined,
           icpProfileId: sourceType === "icp" ? icpProfileId : undefined,
+          leadIds: sourceType === "manual" ? manualLeadIds : undefined,
           channels: { email: emailOn, whatsapp: whatsappOn },
+          templateIds: {
+            ...(emailOn && emailTemplateId ? { email: emailTemplateId } : {}),
+            ...(whatsappOn && whatsappTemplateId ? { whatsapp: whatsappTemplateId } : {}),
+          },
           useAi,
         }),
       "Campaign generated. Review and approve each message before sending."
@@ -606,6 +626,17 @@ function GenerateTab({ isLight }: Themed) {
             />
           </Field>
         )}
+
+        {sourceType === "manual" && (
+          <Field isLight={isLight} label="Selected leads">
+            <div className={`rounded-lg border px-3 py-2 text-sm ${t.body} ${t.border}`}>
+              {manualLeadIds.length} lead{manualLeadIds.length === 1 ? "" : "s"} selected from the Leads workspace
+              {manualLeadIds.length > 0 && (
+                <button type="button" className="ml-2 text-xs text-rose-400" onClick={() => { setManualLeadIds([]); sessionStorage.removeItem("nexaleadai_campaign_lead_ids"); }}>Clear</button>
+              )}
+            </div>
+          </Field>
+        )}
       </div>
 
       <div className={`mt-5 pt-4 border-t ${t.border}`}>
@@ -634,6 +665,43 @@ function GenerateTab({ isLight }: Themed) {
             <span className={`text-sm ${t.body}`}>WhatsApp</span>
           </label>
         </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2">
+          {emailOn && (
+            <Field isLight={isLight} label="Email template" hint="Optional. Saved AI templates are compiled for each lead.">
+              <Select
+                isLight={isLight}
+                value={emailTemplateId}
+                onChange={(event) => setEmailTemplateId(event.target.value)}
+              >
+                <option value="">Generate a new message for each lead</option>
+                {(templates.data ?? [])
+                  .filter((template) => template.templateType === "email")
+                  .map((template) => (
+                    <option key={template.id} value={template.id}>{template.name}</option>
+                  ))}
+              </Select>
+            </Field>
+          )}
+          {whatsappOn && (
+            <Field isLight={isLight} label="WhatsApp template" hint="Optional. Uses the reviewed template as the message shell.">
+              <Select
+                isLight={isLight}
+                value={whatsappTemplateId}
+                onChange={(event) => setWhatsappTemplateId(event.target.value)}
+              >
+                <option value="">Generate a new message for each lead</option>
+                {(templates.data ?? [])
+                  .filter((template) => template.templateType === "whatsapp")
+                  .map((template) => (
+                    <option key={template.id} value={template.id}>{template.name}</option>
+                  ))}
+              </Select>
+            </Field>
+          )}
+        </div>
+        {templates.loading && <div className={`mt-2 text-[10px] ${t.faint}`}>Loading workspace templates…</div>}
+        {templates.error && <div className="mt-2"><ErrorNotice isLight={isLight} error={templates.error} /></div>}
       </div>
 
       <div className={`mt-5 pt-4 border-t ${t.border}`}>

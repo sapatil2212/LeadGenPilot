@@ -30,6 +30,7 @@ import { Lead as LeadType } from "./src/types";
 import { logger } from "./src/logger";
 import { resolveTenantContext, requirePermission, ctxOf } from "./src/tenancy/context";
 import * as repo from "./src/tenancy/repository";
+import { suppressContact } from "./src/compliance/suppressionService";
 
 const router = express.Router();
 
@@ -59,6 +60,16 @@ const LIMITS = {
   /** Cap on a single bulk import. Each item costs two queries. */
   bulkLeads: 5_000,
 } as const;
+
+const LEAD_SOURCES = ["GOOGLE_MAPS", "WEB_DISCOVERY", "IMPORTED", "GOOGLE_SHEETS", "AI_DISCOVERED", "API", "MANUAL"] as const;
+const LEAD_STATUSES = ["NEW", "CONTACTED", "REPLIED", "QUALIFIED", "MEETING", "NOT_INTERESTED", "SUPPRESSED"] as const;
+const MAX_PAGE_SIZE = 100;
+const MAX_BULK_ACTION = 500;
+
+function parseJson<T>(value: unknown, fallback: T): T {
+  if (!value) return fallback;
+  try { return JSON.parse(String(value)) as T; } catch { return fallback; }
+}
 
 function trimTo(value: unknown, max: number): string {
   return String(value ?? "").slice(0, max);
@@ -108,6 +119,15 @@ function dbLeadToAppLead(l: any): LeadType & { id: string; listId: string; notes
     lat: l.lat ?? undefined,
     lng: l.lng ?? undefined,
     notes: l.notes ?? undefined,
+    contactName: l.contactName ?? undefined,
+    source: l.source ?? "GOOGLE_MAPS",
+    status: l.status ?? "NEW",
+    assignedUserId: l.assignedUserId ?? undefined,
+    assignedUserName: l.assignedUser?.name ?? undefined,
+    tags: parseJson<string[]>(l.tags, []),
+    customFields: parseJson<Record<string, unknown>>(l.customFields, {}),
+    productFit: parseJson<any[]>(l.productFit, []),
+    serviceFit: parseJson<any[]>(l.serviceFit, []),
     // Score provenance. Without scoreMax a stored leadScore cannot be read as a
     // proportion, which is why the dashboard could only ever show a bare number.
     scoreMax: l.scoreMax ?? undefined,
@@ -139,6 +159,13 @@ function appLeadToDbInput(lead: LeadType, listId: string, userId?: string | null
   return {
     listId,
     userId: userId ?? null,
+    contactName: trimTo((lead as any).contactName ?? "", 200) || null,
+    source: LEAD_SOURCES.includes((lead as any).source) ? (lead as any).source : ((lead.mapsUrl || "").trim() ? "GOOGLE_MAPS" : "IMPORTED"),
+    status: LEAD_STATUSES.includes((lead as any).status) ? (lead as any).status : "NEW",
+    tags: JSON.stringify(Array.isArray((lead as any).tags) ? (lead as any).tags.slice(0, 50) : []),
+    customFields: (lead as any).customFields ? JSON.stringify((lead as any).customFields) : null,
+    productFit: Array.isArray((lead as any).productFit) ? JSON.stringify((lead as any).productFit) : null,
+    serviceFit: Array.isArray((lead as any).serviceFit) ? JSON.stringify((lead as any).serviceFit) : null,
     businessName: trimTo(lead.businessName, LIMITS.businessName),
     phone: trimTo(lead.phone ?? "", LIMITS.phone),
     address: trimTo(lead.address ?? "", LIMITS.address),
@@ -202,71 +229,107 @@ function appLeadToDbInput(lead: LeadType, listId: string, userId?: string | null
  *   dateFrom      — ISO date string
  *   dateTo        — ISO date string
  */
-function buildLeadWhere(query: Record<string, string>): Record<string, unknown> {
-  const {
-    search = "",
-    priority = "ALL",
-    websiteStatus = "ALL",
-    emailStatus = "ALL",
-    whatsappStatus = "ALL",
-    dateFrom,
-    dateTo,
-  } = query;
-
+function buildLeadWhere(query: Record<string, string>, currentUserId?: string): Record<string, unknown> {
   const where: any = {};
+  const and: any[] = [];
+  const search = String(query.search || "").trim().slice(0, 200);
+  const selectedIds = String(query.ids || "").split(",").map((id) => id.trim()).filter(Boolean).slice(0, MAX_BULK_ACTION);
+  if (selectedIds.length) where.id = { in: selectedIds };
 
-  // Allow-list the enum filters so an unexpected value cannot reach Prisma and
-  // surface as an unhandled 500.
-  const PRIORITIES = ["HOT", "WARM", "COLD"];
-  const WEBSITE_STATUSES = ["MISSING", "WORKING", "BROKEN", "OUTDATED"];
-  if (priority !== "ALL" && PRIORITIES.includes(priority)) where.leadPriority = priority;
-  if (websiteStatus !== "ALL" && WEBSITE_STATUSES.includes(websiteStatus)) where.websiteStatus = websiteStatus;
-
-  // Outreach status filtering
-  if (emailStatus === "SENT") where.emailStatus = "SENT";
-  else if (emailStatus === "PENDING") where.emailStatus = null;
-  else if (emailStatus === "NONE") where.emails = "";
-
-  if (whatsappStatus === "SENT") where.whatsappStatus = "SENT";
-  else if (whatsappStatus === "PENDING") where.whatsappStatus = null;
-
-  // Date range filtering (on dateAdded string — ISO format)
-  if (dateFrom || dateTo) {
-    where.dateAdded = {};
-    if (dateFrom) where.dateAdded.gte = String(dateFrom);
-    if (dateTo) where.dateAdded.lte = String(dateTo) + "T23:59:59.999Z";
-  }
-
-  // Text search
-  if (search && search.trim()) {
-    const s = search.trim().slice(0, 200);
+  if (search) {
     where.OR = [
-      { businessName: { contains: s } },
-      { address: { contains: s } },
-      { phone: { contains: s } },
-      { emails: { contains: s } },
-      { category: { contains: s } },
-      { aiInsight: { contains: s } },
+      { businessName: { contains: search } },
+      { contactName: { contains: search } },
+      { address: { contains: search } },
+      { phone: { contains: search } },
+      { emails: { contains: search } },
+      { category: { contains: search } },
+      { website: { contains: search } },
+      { source: { contains: search.replace(/\s+/g, "_").toUpperCase() } },
     ];
   }
 
+  const fit = String(query.fit || query.priority || "ALL").toUpperCase();
+  if (fit === "HIGH") where.icpFitScore = { gte: 75 };
+  else if (fit === "MEDIUM") where.icpFitScore = { gte: 40, lt: 75 };
+  else if (fit === "LOW") where.icpFitScore = { gte: 0, lt: 40 };
+  else if (fit === "UNSCORED") where.icpFitScore = null;
+  // Legacy priority remains available to old consumers, but is never presented
+  // as universal AI Fit in the new workspace.
+  else if (["HOT", "WARM", "COLD"].includes(fit)) where.leadPriority = fit;
+
+  const source = String(query.source || "ALL").toUpperCase();
+  if ((LEAD_SOURCES as readonly string[]).includes(source)) where.source = source;
+  const status = String(query.status || "ALL").toUpperCase();
+  if ((LEAD_STATUSES as readonly string[]).includes(status)) where.status = status;
+  if (query.mine === "true" && currentUserId) and.push({ OR: [{ assignedUserId: currentUserId }, { AND: [{ assignedUserId: null }, { userId: currentUserId }] }] });
+
+  const industry = String(query.industry || "").trim().slice(0, 200);
+  const location = String(query.location || "").trim().slice(0, 300);
+  if (industry) where.category = { contains: industry };
+  if (location) where.address = { contains: location };
+
+  const contact = String(query.contact || "ALL").toUpperCase();
+  if (contact === "EMAIL") and.push({ emails: { not: "[]" } }, { emails: { not: "" } });
+  else if (contact === "PHONE") where.phone = { not: "" };
+  else if (contact === "WHATSAPP") and.push({ phone: { not: "" } }, { whatsappPresent: true });
+  else if (contact === "WEBSITE") where.website = { not: "" };
+  else if (contact === "SOCIAL") and.push({ OR: [
+    { instagramUrl: { not: "" } }, { facebookUrl: { not: "" } }, { linkedinUrl: { not: "" } },
+  ] });
+
+  const outreach = String(query.outreach || "ALL").toUpperCase();
+  if (outreach === "NOT_CONTACTED") and.push({ emailStatus: { not: "SENT" } }, { whatsappStatus: { not: "SENT" } }, { conversationStatus: { not: "REPLIED" } });
+  else if (outreach === "EMAIL_SENT") where.emailStatus = "SENT";
+  else if (outreach === "WHATSAPP_SENT") where.whatsappStatus = "SENT";
+  else if (outreach === "REPLIED") where.conversationStatus = "REPLIED";
+  else if (outreach === "FAILED") and.push({ OR: [{ emailStatus: "FAILED" }, { whatsappStatus: "FAILED" }] });
+
+  // Backward-compatible legacy filters.
+  const websiteStatus = String(query.websiteStatus || "ALL").toUpperCase();
+  if (["MISSING", "WORKING", "BROKEN", "OUTDATED"].includes(websiteStatus)) where.websiteStatus = websiteStatus;
+  const emailStatus = String(query.emailStatus || "ALL").toUpperCase();
+  if (["SENT", "PENDING", "FAILED"].includes(emailStatus)) where.emailStatus = emailStatus;
+  const whatsappStatus = String(query.whatsappStatus || "ALL").toUpperCase();
+  if (["SENT", "PENDING", "FAILED"].includes(whatsappStatus)) where.whatsappStatus = whatsappStatus;
+
+  const dateFrom = query.dateFrom;
+  const dateTo = query.dateTo;
+  if (dateFrom || dateTo) {
+    where.createdAt = {};
+    if (dateFrom) where.createdAt.gte = new Date(String(dateFrom));
+    if (dateTo) where.createdAt.lte = new Date(`${dateTo}T23:59:59.999Z`);
+  }
+
+  if (and.length) where.AND = and;
   return where;
 }
 
-/** Build a Prisma `orderBy` from the shared sort params. */
-function buildLeadOrderBy(query: Record<string, string>): Record<string, unknown> {
-  const { sortBy = "leadScore", sortDir = "desc" } = query;
+/** Build a stable Prisma orderBy for server-side sorting and pagination. */
+function buildLeadOrderBy(query: Record<string, string>): Array<Record<string, unknown>> {
+  const sortBy = String(query.sortBy || "aiFit");
+  const direction = query.sortDir === "asc" ? "asc" : "desc";
   const allowedSorts: Record<string, string> = {
-    businessName: "businessName",
+    aiFit: "icpFitScore",
     leadScore: "leadScore",
-    leadPriority: "leadPriority",
-    rating: "rating",
-    reviews: "reviews",
-    dateAdded: "dateAdded",
+    recentlyAdded: "createdAt",
+    dateAdded: "createdAt",
+    recentlyContacted: "updatedAt",
+    lastActivity: "updatedAt",
+    businessName: "businessName",
   };
-  const orderField = allowedSorts[sortBy] ?? "leadScore";
-  const direction = sortDir === "asc" ? "asc" : "desc";
-  return { [orderField]: direction };
+  const orderField = allowedSorts[sortBy] ?? "icpFitScore";
+  return [{ [orderField]: direction }, { id: "asc" }];
+}
+
+function pageOptions(query: Record<string, string>) {
+  const page = Math.max(1, Number(query.page) || 1);
+  const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, Number(query.pageSize) || 25));
+  return { page, pageSize };
+}
+
+function wantsPaginatedResponse(query: Record<string, string>) {
+  return query.paginated === "true" || query.page !== undefined || query.pageSize !== undefined;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -358,40 +421,103 @@ router.delete("/lists/:id", requirePermission("DELETE_LEADS"), async (req: Reque
 // ──────────────────────────────────────────────────────────────────────────────
 
 /**
+ * GET /api/crm/summary — real tenant-scoped smart-view counts and capabilities.
+ */
+router.get("/summary", requirePermission("VIEW_LEADS"), async (req: Request, res: Response) => {
+  try {
+    const ctx = ctxOf(req);
+    const recentCutoff = new Date();
+    recentCutoff.setDate(recentCutoff.getDate() - 30);
+    const listIds = await repo.leadListIds(ctx);
+    const count = (where: Record<string, unknown> = {}) => repo.countWorkspaceLeadsForLists(listIds, where);
+    const [
+      all, newLeads, mine, highFit, mediumFit, lowFit, unscored, recent,
+      googleMaps, webDiscovery, imported, googleSheets, aiDiscovered,
+      contacted, replied, qualified, meeting, notInterested, suppressed,
+      notContacted, emailAvailable, whatsappAvailable, phoneAvailable, failed,
+      assignees,
+    ] = await Promise.all([
+      count(), count({ status: "NEW" }), count({ OR: [{ assignedUserId: ctx.userId }, { AND: [{ assignedUserId: null }, { userId: ctx.userId }] }] }),
+      count({ icpFitScore: { gte: 75 } }), count({ icpFitScore: { gte: 40, lt: 75 } }),
+      count({ icpFitScore: { gte: 0, lt: 40 } }), count({ icpFitScore: null }), count({ createdAt: { gte: recentCutoff } }),
+      count({ source: "GOOGLE_MAPS" }), count({ source: "WEB_DISCOVERY" }), count({ source: "IMPORTED" }),
+      count({ source: "GOOGLE_SHEETS" }), count({ source: "AI_DISCOVERED" }),
+      count({ status: "CONTACTED" }), count({ status: "REPLIED" }), count({ status: "QUALIFIED" }),
+      count({ status: "MEETING" }), count({ status: "NOT_INTERESTED" }), count({ status: "SUPPRESSED" }),
+      count({ AND: [{ emailStatus: { not: "SENT" } }, { whatsappStatus: { not: "SENT" } }, { conversationStatus: { not: "REPLIED" } }] }),
+      count({ AND: [{ emails: { not: "[]" } }, { emails: { not: "" } }] }),
+      count({ phone: { not: "" }, whatsappPresent: true }), count({ phone: { not: "" } }),
+      count({ OR: [{ emailStatus: "FAILED" }, { whatsappStatus: "FAILED" }] }),
+      repo.listWorkspaceAssignees(ctx),
+    ]);
+    res.json({
+      counts: {
+        all, new: newLeads, mine, highFit, mediumFit, lowFit, unscored, recent,
+        sources: { GOOGLE_MAPS: googleMaps, WEB_DISCOVERY: webDiscovery, IMPORTED: imported, GOOGLE_SHEETS: googleSheets, AI_DISCOVERED: aiDiscovered },
+        statuses: { NEW: newLeads, CONTACTED: contacted, REPLIED: replied, QUALIFIED: qualified, MEETING: meeting, NOT_INTERESTED: notInterested, SUPPRESSED: suppressed },
+        outreach: { NOT_CONTACTED: notContacted, EMAIL_AVAILABLE: emailAvailable, WHATSAPP_AVAILABLE: whatsappAvailable, PHONE_AVAILABLE: phoneAvailable, REPLIED: replied, FAILED: failed },
+      },
+      permissions: Array.from(ctx.permissions),
+      assignees: assignees.map((m: any) => ({ id: m.userId, name: m.user?.name || m.user?.email || "Workspace member", email: m.user?.email, role: m.role })),
+    });
+  } catch (err: any) {
+    logger.error("CRM: Failed to fetch lead summary", err);
+    res.status(500).json({ error: "Failed to fetch lead summary." });
+  }
+});
+
+/**
  * GET /api/crm/leads
- * Every lead across the workspace's lists, annotated with its list name.
+ * Legacy calls receive an array. paginated=true (or page/pageSize) enables the
+ * universal response contract without breaking existing consumers.
  */
 router.get("/leads", requirePermission("VIEW_LEADS"), async (req: Request, res: Response) => {
   try {
     const ctx = ctxOf(req);
+    const query = req.query as Record<string, string>;
+    const where = buildLeadWhere(query, ctx.userId);
+    const orderBy = buildLeadOrderBy(query);
     const lists = await repo.listLeadLists(ctx);
     const listNameById = new Map(lists.map((l: any) => [l.id, l.name]));
 
-    const leads = await repo.findLeadsInWorkspace(
-      ctx,
-      buildLeadWhere(req.query as Record<string, string>),
-      buildLeadOrderBy(req.query as Record<string, string>)
-    );
+    if (wantsPaginatedResponse(query)) {
+      const { page, pageSize } = pageOptions(query);
+      const result = await repo.findLeadPageInWorkspace(ctx, { page, pageSize, where, orderBy });
+      return res.json({
+        leads: result.rows.map((l: any) => ({ ...dbLeadToAppLead(l), listName: listNameById.get(l.listId) ?? "" })),
+        total: result.total,
+        page: result.page,
+        pageSize: result.pageSize,
+        totalPages: Math.max(1, Math.ceil(result.total / result.pageSize)),
+      });
+    }
 
-    res.json(leads.map((l: any) => ({
-      ...dbLeadToAppLead(l),
-      listName: listNameById.get(l.listId) ?? "",
-    })));
+    const leads = await repo.findLeadsInWorkspace(ctx, where, orderBy);
+    res.json(leads.map((l: any) => ({ ...dbLeadToAppLead(l), listName: listNameById.get(l.listId) ?? "" })));
   } catch (err: any) {
     logger.error("CRM: Failed to fetch all leads", err);
     res.status(500).json({ error: "Failed to fetch leads." });
   }
 });
 
-/** GET /api/crm/lists/:id/leads — leads in one owned list. */
+/** GET /api/crm/lists/:id/leads — legacy array or opt-in paged response. */
 router.get("/lists/:id/leads", requirePermission("VIEW_LEADS"), async (req: Request, res: Response) => {
   try {
-    const leads = await repo.findLeadsInList(
-      ctxOf(req),
-      req.params.id,
-      buildLeadWhere(req.query as Record<string, string>),
-      buildLeadOrderBy(req.query as Record<string, string>)
-    );
+    const ctx = ctxOf(req);
+    const query = req.query as Record<string, string>;
+    const where = buildLeadWhere(query, ctx.userId);
+    const orderBy = buildLeadOrderBy(query);
+    if (wantsPaginatedResponse(query)) {
+      const { page, pageSize } = pageOptions(query);
+      const result = await repo.findLeadPageInList(ctx, req.params.id, { page, pageSize, where, orderBy });
+      if (result === null) return res.status(404).json(NOT_FOUND_LIST);
+      return res.json({
+        leads: result.rows.map(dbLeadToAppLead), total: result.total,
+        page: result.page, pageSize: result.pageSize,
+        totalPages: Math.max(1, Math.ceil(result.total / result.pageSize)),
+      });
+    }
+    const leads = await repo.findLeadsInList(ctx, req.params.id, where, orderBy);
     if (leads === null) return res.status(404).json(NOT_FOUND_LIST);
     res.json(leads.map(dbLeadToAppLead));
   } catch (err: any) {
@@ -437,6 +563,109 @@ router.post("/lists/:id/leads", requirePermission("EDIT_LEADS"), async (req: Req
   }
 });
 
+/** GET /api/crm/leads/:id — universal detail, outreach history and CRM context. */
+router.get("/leads/:id", requirePermission("VIEW_LEADS"), async (req: Request, res: Response) => {
+  try {
+    const row: any = await repo.findLeadDetail(ctxOf(req), req.params.id);
+    if (!row) return res.status(404).json(NOT_FOUND_LEAD);
+    const lead = dbLeadToAppLead(row);
+    res.json({
+      lead: { ...lead, listName: row.list?.name || "" },
+      list: row.list,
+      outreach: {
+        messages: (row.campaignMessages || []).map((m: any) => ({
+          id: m.id, campaignId: m.campaignId, channel: m.channel, recipient: m.recipient,
+          subject: m.subject, body: m.body, status: m.status, sentAt: m.sentAt, createdAt: m.createdAt,
+        })),
+        dispatches: (row.campaignDispatches || []).map((d: any) => ({
+          id: d.id, channel: d.channel, status: d.status, recipient: d.recipient,
+          occurredAt: d.occurredAt, errorMessage: d.errorMessage,
+        })),
+        conversations: (row.conversationThreads || []).map((t: any) => ({
+          id: t.id, channel: t.channel, status: t.status, unreadCount: t.unreadCount,
+          lastMessageAt: t.lastMessageAt, messages: (t.messages || []).map((m: any) => ({
+            id: m.id, direction: m.direction, channel: m.channel, text: m.text, occurredAt: m.occurredAt,
+          })),
+        })),
+      },
+      ai: {
+        fitScore: row.icpFitScore,
+        fitReason: row.icpFitReason,
+        scoreBreakdown: parseJson<any[]>(row.scoreBreakdown, []),
+        productFit: parseJson<any[]>(row.productFit, []),
+        serviceFit: parseJson<any[]>(row.serviceFit, []),
+        recommendation: row.aiInsight || null,
+      },
+    });
+  } catch (err: any) {
+    logger.error("CRM: Failed to fetch lead detail", err);
+    res.status(500).json({ error: "Failed to fetch lead detail." });
+  }
+});
+
+/** POST /api/crm/bulk/leads — tenant-safe composable bulk CRM actions. */
+router.post("/bulk/leads", requirePermission("EDIT_LEADS"), async (req: Request, res: Response) => {
+  try {
+    const ctx = ctxOf(req);
+    const ids: string[] = Array.from(new Set<string>((Array.isArray(req.body?.ids) ? req.body.ids : []).map((id: unknown) => String(id)).filter(Boolean)));
+    if (!ids.length) return res.status(400).json({ error: "Select at least one lead." });
+    if (ids.length > MAX_BULK_ACTION) return res.status(413).json({ error: `Bulk actions are limited to ${MAX_BULK_ACTION} leads.` });
+    const action = String(req.body?.action || "").toUpperCase();
+
+    if (action === "DELETE") {
+      if (!ctx.permissions.has("DELETE_LEADS")) return res.status(403).json({ error: "Your role in this workspace does not allow this action.", code: "permission_denied" });
+      const affected = await repo.bulkDeleteLeads(ctx, ids);
+      return res.json({ success: true, affected });
+    }
+    if (action === "CHANGE_STATUS") {
+      const status = String(req.body?.status || "").toUpperCase();
+      if (!(LEAD_STATUSES as readonly string[]).includes(status)) return res.status(400).json({ error: "Invalid lead status." });
+      const affected = await repo.bulkUpdateLeads(ctx, ids, { status });
+      return res.json({ success: true, affected });
+    }
+    if (action === "ASSIGN") {
+      const assignedUserId = req.body?.assignedUserId ? String(req.body.assignedUserId) : null;
+      if (assignedUserId && !(await repo.isActiveWorkspaceMember(ctx, assignedUserId))) return res.status(400).json({ error: "Assignee is not an active workspace member." });
+      const affected = await repo.bulkUpdateLeads(ctx, ids, { assignedUserId });
+      return res.json({ success: true, affected });
+    }
+    if (action === "ADD_TO_LIST") {
+      const listId = String(req.body?.listId || "");
+      if (!listId || !(await repo.findLeadList(ctx, listId))) return res.status(400).json({ error: "Destination list is not available in this workspace." });
+      const affected = await repo.bulkUpdateLeads(ctx, ids, { listId });
+      return res.json({ success: true, affected });
+    }
+    if (action === "ADD_TAG") {
+      const tag = trimTo(req.body?.tag, 80).trim();
+      if (!tag) return res.status(400).json({ error: "Tag is required." });
+      const rows: any[] = await repo.findWorkspaceLeadsByIds(ctx, ids);
+      await Promise.all(rows.map((row) => repo.updateLead(ctx, row.id, { tags: JSON.stringify(Array.from(new Set([...parseJson<string[]>(row.tags, []), tag])).slice(0, 50)) })));
+      return res.json({ success: true, affected: rows.length });
+    }
+    if (action === "SUPPRESS") {
+      const rows: any[] = await repo.findWorkspaceLeadsByIds(ctx, ids);
+      let contactsSuppressed = 0;
+      for (const row of rows) {
+        for (const email of parseJson<string[]>(row.emails, [])) {
+          if (!email) continue;
+          await suppressContact({ tenantId: ctx.tenantId, channel: "email", contact: email, reason: "manual", source: "leads_bulk" });
+          contactsSuppressed++;
+        }
+        if (row.phone) {
+          await suppressContact({ tenantId: ctx.tenantId, channel: "whatsapp", contact: row.phone, reason: "manual", source: "leads_bulk" });
+          contactsSuppressed++;
+        }
+      }
+      const affected = await repo.bulkUpdateLeads(ctx, ids, { status: "SUPPRESSED" });
+      return res.json({ success: true, affected, contactsSuppressed });
+    }
+    return res.status(400).json({ error: "Unsupported bulk action." });
+  } catch (err: any) {
+    logger.error("CRM: Bulk action failed", err);
+    res.status(500).json({ error: "Bulk action failed." });
+  }
+});
+
 /**
  * PATCH /api/crm/leads/:id
  * Quick outreach-status patches and full core-field edits.
@@ -445,7 +674,8 @@ router.patch("/leads/:id", requirePermission("EDIT_LEADS"), async (req: Request,
   try {
     const {
       notes, emailStatus, whatsappStatus, emailSentDate, whatsappSentDate,
-      businessName, phone, address, category, website, rating, reviews, leadPriority,
+      businessName, contactName, phone, address, category, website, rating, reviews,
+      source, status, assignedUserId, tags, customFields, productFit, serviceFit,
     } = req.body || {};
     const updateData: any = {};
 
@@ -467,15 +697,35 @@ router.patch("/leads/:id", requirePermission("EDIT_LEADS"), async (req: Request,
     if (whatsappSentDate !== undefined) updateData.whatsappSentDate = whatsappSentDate;
 
     if (businessName !== undefined) updateData.businessName = trimTo(businessName, LIMITS.businessName);
+    if (contactName !== undefined) updateData.contactName = trimTo(contactName, 200) || null;
     if (phone !== undefined) updateData.phone = trimTo(phone, LIMITS.phone);
     if (address !== undefined) updateData.address = trimTo(address, LIMITS.address);
     if (category !== undefined) updateData.category = trimTo(category, LIMITS.category);
     if (website !== undefined) updateData.website = trimTo(website, LIMITS.website);
     if (rating !== undefined) updateData.rating = Number(rating) || 0;
     if (reviews !== undefined) updateData.reviews = Number(reviews) || 0;
-    if (leadPriority !== undefined && ["HOT", "WARM", "COLD"].includes(leadPriority)) {
-      updateData.leadPriority = leadPriority;
+    if (source !== undefined) {
+      const value = String(source).toUpperCase();
+      if (!(LEAD_SOURCES as readonly string[]).includes(value)) return res.status(400).json({ error: "Invalid lead source." });
+      updateData.source = value;
     }
+    if (status !== undefined) {
+      const value = String(status).toUpperCase();
+      if (!(LEAD_STATUSES as readonly string[]).includes(value)) return res.status(400).json({ error: "Invalid lead status." });
+      updateData.status = value;
+    }
+    if (assignedUserId !== undefined) {
+      const value = assignedUserId ? String(assignedUserId) : null;
+      if (value && !(await repo.isActiveWorkspaceMember(ctxOf(req), value))) return res.status(400).json({ error: "Assignee is not an active workspace member." });
+      updateData.assignedUserId = value;
+    }
+    if (tags !== undefined) {
+      if (!Array.isArray(tags)) return res.status(400).json({ error: "tags must be an array." });
+      updateData.tags = JSON.stringify(tags.map((tag: unknown) => trimTo(tag, 80).trim()).filter(Boolean).slice(0, 50));
+    }
+    if (customFields !== undefined) updateData.customFields = JSON.stringify(customFields || {});
+    if (productFit !== undefined) updateData.productFit = Array.isArray(productFit) ? JSON.stringify(productFit) : null;
+    if (serviceFit !== undefined) updateData.serviceFit = Array.isArray(serviceFit) ? JSON.stringify(serviceFit) : null;
 
     const lead = await repo.updateLead(ctxOf(req), req.params.id, updateData);
     if (!lead) return res.status(404).json(NOT_FOUND_LEAD);
@@ -509,16 +759,20 @@ router.delete("/leads/:id", requirePermission("DELETE_LEADS"), async (req: Reque
  */
 router.get("/lists/:id/export", requirePermission("EXPORT_LEADS"), async (req: Request, res: Response) => {
   try {
-    const result = await repo.findLeadsForExport(ctxOf(req), req.params.id === "ALL" ? "ALL" : req.params.id);
+    const ctx = ctxOf(req);
+    const result = await repo.findLeadsForExport(
+      ctx,
+      req.params.id === "ALL" ? "ALL" : req.params.id,
+      buildLeadWhere(req.query as Record<string, string>, ctx.userId)
+    );
     if (result === null) return res.status(404).json(NOT_FOUND_LIST);
     const { leads, listName } = result;
 
     const headers = [
-      "Business Name","Phone","Address","Rating","Reviews","Website","Website Status",
-      "Instagram URL","Instagram Status","Facebook URL","Facebook Status","LinkedIn URL",
-      "LinkedIn Status","Emails","Google Analytics","Meta Pixel","WhatsApp Present",
-      "Appointment System","Google Maps URL","Lead Score","Lead Priority","Date Added",
-      "AI Insight","Category","Website Missing","Email Status","WhatsApp Status","Notes",
+      "Business Name", "Contact Name", "Industry / Category", "Location", "Email", "Phone",
+      "WhatsApp Available", "Website", "AI Fit Score", "ICP Fit Reason", "Source", "Status",
+      "Email Outreach", "WhatsApp Outreach", "Conversation", "Assigned User ID", "Tags",
+      "List", "Date Added", "Notes",
     ];
 
     const escape = (v: any) => {
@@ -527,15 +781,13 @@ router.get("/lists/:id/export", requirePermission("EXPORT_LEADS"), async (req: R
     };
 
     const rows = leads.map((l: any) => {
-      const emails = (() => { try { return JSON.parse(l.emails || "[]").join("; "); } catch { return ""; } })();
+      const emails = parseJson<string[]>(l.emails, []).join("; ");
       return [
-        l.businessName, l.phone, l.address, l.rating, l.reviews, l.website, l.websiteStatus,
-        l.instagramUrl, l.instagramStatus, l.facebookUrl, l.facebookStatus, l.linkedinUrl,
-        l.linkedinStatus, emails, l.googleAnalyticsPresent ? "Yes" : "No",
-        l.metaPixelPresent ? "Yes" : "No", l.whatsappPresent ? "Yes" : "No",
-        l.appointmentSystem ? "Yes" : "No", l.mapsUrl, l.leadScore, l.leadPriority,
-        l.dateAdded, l.aiInsight, l.category, l.websiteMissing ? "Yes" : "No",
-        l.emailStatus || "", l.whatsappStatus || "", l.notes || "",
+        l.businessName, l.contactName || "", l.category, l.address, emails, l.phone,
+        l.whatsappPresent ? "Yes" : "No", l.website, l.icpFitScore ?? "", l.icpFitReason || "",
+        l.source || "", l.status || "NEW", l.emailStatus || "NOT_CONTACTED",
+        l.whatsappStatus || "NOT_CONTACTED", l.conversationStatus || "", l.assignedUserId || "",
+        parseJson<string[]>(l.tags, []).join("; "), l.listId, l.dateAdded, l.notes || "",
       ].map(escape).join(",");
     });
 

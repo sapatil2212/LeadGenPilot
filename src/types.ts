@@ -9,6 +9,19 @@ export interface Lead {
   listId?: string;
   notes?: string;
 
+  // Universal CRM fields. Source/status are open string vocabularies in the DB
+  // for forward compatibility, while the current UI uses these supported values.
+  contactName?: string;
+  source?: "GOOGLE_MAPS" | "WEB_DISCOVERY" | "IMPORTED" | "GOOGLE_SHEETS" | "AI_DISCOVERED" | "API" | "MANUAL";
+  status?: "NEW" | "CONTACTED" | "REPLIED" | "QUALIFIED" | "MEETING" | "NOT_INTERESTED" | "SUPPRESSED";
+  assignedUserId?: string;
+  assignedUserName?: string;
+  tags?: string[];
+  customFields?: Record<string, unknown>;
+  productFit?: Array<{ id?: string; name: string; score?: number; fit?: "HIGH" | "MEDIUM" | "LOW"; reason?: string }>;
+  serviceFit?: Array<{ id?: string; name: string; score?: number; fit?: "HIGH" | "MEDIUM" | "LOW"; reason?: string }>;
+  listName?: string;
+
   businessName: string;
   phone: string;
   address: string;

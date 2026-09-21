@@ -53,6 +53,7 @@ model User {
   scoringRuleSets ScoringRuleSet[]
 
   campaigns Campaign[]
+  assignedLeads Lead[] @relation("LeadAssignee")
 
   @@map("users")
 }
@@ -102,6 +103,7 @@ model Tenant {
   knowledgeDocuments KnowledgeDocument[]
   knowledgeChunks    KnowledgeChunk[]
   knowledgeItems     KnowledgeItem[]
+  outreachTemplates  OutreachTemplate[]
   aiConversations    AiConversation[]
   aiMessages         AiMessage[]
 
@@ -338,6 +340,17 @@ model LeadList {
 model Lead {
   id String @id @default(cuid())
 
+  // Universal CRM metadata. Legacy digital-presence fields below remain as
+  // optional intelligence signals, not as the lead's business classification.
+  contactName    String? @map("contact_name")
+  source         String  @default("GOOGLE_MAPS")
+  status         String  @default("NEW")
+  assignedUserId String? @map("assigned_user_id")
+  tags           String? @db.Text // JSON string array
+  customFields   String? @map("custom_fields") @db.Text // JSON object
+  productFit     String? @map("product_fit") @db.Text // tenant-product fit JSON
+  serviceFit     String? @map("service_fit") @db.Text // tenant-service fit JSON
+
   businessName   String  @map("business_name")
   phone          String  @default("")
   address        String  @db.Text
@@ -420,6 +433,8 @@ model Lead {
   tenantId String? @map("tenant_id")
   tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  assignedUser User? @relation("LeadAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+
   campaignMessages    CampaignMessage[]
   conversationThreads ConversationThread[]
   campaignDispatches  CampaignDispatch[]
@@ -439,6 +454,9 @@ model Lead {
   @@index([tenantId, leadScore])
   @@index([tenantId, leadPriority])
   @@index([tenantId, createdAt])
+  @@index([tenantId, source])
+  @@index([tenantId, status])
+  @@index([tenantId, assignedUserId])
   // "Which leads still need scoring under the current rule set?" and
   // "re-score everything scored by version N" are both tenant-scoped scans.
   @@index([tenantId, scoringRuleSetId])
@@ -713,6 +731,34 @@ model KnowledgeItem {
   @@index([tenantId, category])
   @@index([sourceDocumentId])
   @@map("knowledge_items")
+}
+
+/// A reviewed outreach template owned by one workspace.
+///
+/// `payload` is the validated builder schema as JSON. Keeping one versioned
+/// document avoids a migration for every presentation-field addition while the
+/// indexed columns retain ownership, channel filtering and lifecycle semantics.
+model OutreachTemplate {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  name    String
+  channel String
+  payload String @db.LongText
+  status  String @default("active")
+  version Int    @default(1)
+
+  createdById String @map("created_by_id")
+  updatedById String @map("updated_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, channel, status])
+  @@index([tenantId, updatedAt])
+  @@index([createdById])
+  @@map("outreach_templates")
 }
 
 /// An assistant chat thread.

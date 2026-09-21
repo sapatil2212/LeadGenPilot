@@ -110,7 +110,7 @@ export async function deleteLeadList(ctx: TenantContext, listId: string) {
 export async function findLeadsInWorkspace(
   ctx: TenantContext,
   extraWhere: Record<string, unknown>,
-  orderBy: Record<string, unknown>
+  orderBy: Record<string, unknown> | Array<Record<string, unknown>>
 ) {
   const listIds = await leadListIds(ctx);
   if (listIds.length === 0) return [];
@@ -124,7 +124,7 @@ export async function findLeadsInList(
   ctx: TenantContext,
   listId: string,
   extraWhere: Record<string, unknown>,
-  orderBy: Record<string, unknown>
+  orderBy: Record<string, unknown> | Array<Record<string, unknown>>
 ) {
   const owned = await findLeadList(ctx, listId);
   if (!owned) return null;
@@ -182,12 +182,18 @@ export async function updateLeadById(leadId: string, data: Record<string, unknow
 }
 
 /** Leads for CSV export, scoped to the workspace or one owned list. */
-export async function findLeadsForExport(ctx: TenantContext, listId: string | "ALL") {
+export async function findLeadsForExport(
+  ctx: TenantContext,
+  listId: string | "ALL",
+  extraWhere: Record<string, unknown> = {}
+) {
   if (listId === "ALL") {
     const listIds = await leadListIds(ctx);
     if (listIds.length === 0) return { leads: [], listName: null as string | null };
     const leads = await prisma.lead.findMany({
-      where: { listId: { in: listIds } },
+      where: Object.keys(extraWhere).length
+        ? { AND: [{ listId: { in: listIds } }, extraWhere] }
+        : { listId: { in: listIds } },
       orderBy: { leadScore: "desc" },
     });
     return { leads, listName: null as string | null };
@@ -196,8 +202,155 @@ export async function findLeadsForExport(ctx: TenantContext, listId: string | "A
   const owned = await findLeadList(ctx, listId);
   if (!owned) return null;
   const leads = await prisma.lead.findMany({
-    where: { listId: owned.id },
+    where: Object.keys(extraWhere).length
+      ? { AND: [{ listId: owned.id }, extraWhere] }
+      : { listId: owned.id },
     orderBy: { leadScore: "desc" },
   });
   return { leads, listName: owned.name as string };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Universal Leads workspace queries
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface LeadPageOptions {
+  page: number;
+  pageSize: number;
+  where: Record<string, unknown>;
+  orderBy: Record<string, unknown> | Array<Record<string, unknown>>;
+}
+
+export interface LeadPageResult {
+  rows: any[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+async function workspaceLeadWhere(
+  ctx: TenantContext,
+  extraWhere: Record<string, unknown> = {}
+): Promise<Record<string, unknown> | null> {
+  const listIds = await leadListIds(ctx);
+  if (listIds.length === 0) return null;
+  return { AND: [{ listId: { in: listIds } }, extraWhere] };
+}
+
+/** Paged workspace query used by the universal Leads table. */
+export async function findLeadPageInWorkspace(
+  ctx: TenantContext,
+  options: LeadPageOptions
+): Promise<LeadPageResult> {
+  const where = await workspaceLeadWhere(ctx, options.where);
+  if (!where) return { rows: [], total: 0, page: options.page, pageSize: options.pageSize };
+  const [rows, total] = await Promise.all([
+    prisma.lead.findMany({
+      where,
+      orderBy: options.orderBy as any,
+      skip: (options.page - 1) * options.pageSize,
+      take: options.pageSize,
+    }),
+    prisma.lead.count({ where }),
+  ]);
+  return { rows, total, page: options.page, pageSize: options.pageSize };
+}
+
+/** Paged query for one owned saved list. Null means the list is not owned. */
+export async function findLeadPageInList(
+  ctx: TenantContext,
+  listId: string,
+  options: LeadPageOptions
+): Promise<LeadPageResult | null> {
+  const owned = await findLeadList(ctx, listId);
+  if (!owned) return null;
+  const where = { AND: [{ listId: owned.id }, options.where] };
+  const [rows, total] = await Promise.all([
+    prisma.lead.findMany({
+      where,
+      orderBy: options.orderBy as any,
+      skip: (options.page - 1) * options.pageSize,
+      take: options.pageSize,
+    }),
+    prisma.lead.count({ where }),
+  ]);
+  return { rows, total, page: options.page, pageSize: options.pageSize };
+}
+
+/** Tenant-scoped count primitive for sidebar smart-view aggregations. */
+export async function countWorkspaceLeadsForLists(
+  listIds: string[],
+  extraWhere: Record<string, unknown> = {}
+): Promise<number> {
+  if (listIds.length === 0) return 0;
+  const where = Object.keys(extraWhere).length
+    ? { AND: [{ listId: { in: listIds } }, extraWhere] }
+    : { listId: { in: listIds } };
+  return prisma.lead.count({ where });
+}
+
+export async function countWorkspaceLeads(
+  ctx: TenantContext,
+  extraWhere: Record<string, unknown> = {}
+): Promise<number> {
+  const where = await workspaceLeadWhere(ctx, extraWhere);
+  return where ? prisma.lead.count({ where }) : 0;
+}
+
+/** Full detail graph fetched only when a row is opened, avoiding row N+1 calls. */
+export async function findLeadDetail(ctx: TenantContext, leadId: string) {
+  return prisma.lead.findFirst({
+    where: { AND: [{ id: leadId }, { list: { is: tenantScope(ctx) } }] },
+    include: {
+      list: { select: { id: true, name: true, businessType: true, location: true, icpProfileId: true } },
+      assignedUser: { select: { id: true, name: true, email: true } },
+      campaignDispatches: { orderBy: { occurredAt: "desc" }, take: 25 },
+      campaignMessages: { orderBy: { createdAt: "desc" }, take: 25 },
+      conversationThreads: {
+        orderBy: { lastMessageAt: "desc" },
+        take: 10,
+        include: { messages: { orderBy: { occurredAt: "desc" }, take: 25 } },
+      },
+    },
+  });
+}
+
+/** Resolve selected records within the workspace before a bulk compliance action. */
+export async function findWorkspaceLeadsByIds(ctx: TenantContext, ids: string[]) {
+  const where = await workspaceLeadWhere(ctx, { id: { in: ids } });
+  if (!where) return [];
+  return prisma.lead.findMany({ where });
+}
+
+export async function bulkUpdateLeads(
+  ctx: TenantContext,
+  ids: string[],
+  data: Record<string, unknown>
+) {
+  const where = await workspaceLeadWhere(ctx, { id: { in: ids } });
+  if (!where) return 0;
+  const result = await prisma.lead.updateMany({ where, data });
+  return result.count;
+}
+
+export async function bulkDeleteLeads(ctx: TenantContext, ids: string[]) {
+  const where = await workspaceLeadWhere(ctx, { id: { in: ids } });
+  if (!where) return 0;
+  const result = await prisma.lead.deleteMany({ where });
+  return result.count;
+}
+
+export async function isActiveWorkspaceMember(ctx: TenantContext, userId: string) {
+  return prisma.tenantMember.findFirst({
+    where: { tenantId: ctx.tenantId, userId, status: "active" },
+    select: { userId: true },
+  });
+}
+
+export async function listWorkspaceAssignees(ctx: TenantContext) {
+  return prisma.tenantMember.findMany({
+    where: { tenantId: ctx.tenantId, status: "active" },
+    orderBy: { createdAt: "asc" },
+    select: { userId: true, role: true, user: { select: { name: true, email: true } } },
+  });
 }

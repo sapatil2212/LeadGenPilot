@@ -485,3 +485,113 @@ describe("input limits", () => {
     expect(mocks.prisma.lead.update).not.toHaveBeenCalled();
   });
 });
+
+
+describe("universal Leads workspace contract", () => {
+  it("returns a tenant-scoped paginated page with composable universal filters", async () => {
+    mocks.prisma.leadList.findMany.mockResolvedValue([
+      { id: LIST_A.id, name: LIST_A.name, _count: { leads: 41 } },
+    ]);
+    mocks.prisma.lead.count.mockResolvedValue(41);
+    mocks.prisma.lead.findMany.mockResolvedValue([
+      {
+        id: "lead_a", listId: LIST_A.id, businessName: "Pune Diagnostics",
+        contactName: "Dr Rao", category: "Hospital", address: "Pune", phone: "123",
+        emails: '["buyer@example.test"]', website: "https://example.test", mapsUrl: "",
+        source: "IMPORTED", status: "NEW", icpFitScore: 92, leadScore: 0,
+        rating: 0, reviews: 0, dateAdded: "2026-09-20T00:00:00.000Z",
+      },
+    ]);
+
+    const res = await request(app)
+      .get("/api/crm/leads")
+      .query({ paginated: "true", page: "2", pageSize: "10", fit: "HIGH", source: "IMPORTED", status: "NEW", contact: "EMAIL", industry: "Hospital", location: "Pune", sortBy: "aiFit", sortDir: "desc" })
+      .set("Cookie", sessionCookie(TENANT_A));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ total: 41, page: 2, pageSize: 10, totalPages: 5 });
+    expect(res.body.leads[0]).toMatchObject({ businessName: "Pune Diagnostics", source: "IMPORTED", status: "NEW", icpFitScore: 92 });
+    const args = mocks.prisma.lead.findMany.mock.calls[0][0];
+    expect(args.skip).toBe(10);
+    expect(args.take).toBe(10);
+    expect(args.orderBy[0]).toEqual({ icpFitScore: "desc" });
+    const where = JSON.stringify(args.where);
+    expect(where).toContain(LIST_A.id);
+    expect(where).toContain('"icpFitScore":{"gte":75}');
+    expect(where).toContain('"source":"IMPORTED"');
+    expect(where).toContain('"status":"NEW"');
+    expect(where).toContain('"category":{"contains":"Hospital"}');
+    expect(where).toContain('"address":{"contains":"Pune"}');
+  });
+
+  it("caps page size and searches universal identity/source fields server-side", async () => {
+    mocks.prisma.leadList.findMany.mockResolvedValue([{ id: LIST_A.id, name: LIST_A.name, _count: { leads: 0 } }]);
+    await request(app)
+      .get("/api/crm/leads")
+      .query({ page: "1", pageSize: "9999", search: "Rao" })
+      .set("Cookie", sessionCookie(TENANT_A));
+
+    const args = mocks.prisma.lead.findMany.mock.calls[0][0];
+    expect(args.take).toBe(100);
+    const where = JSON.stringify(args.where);
+    expect(where).toContain("contactName");
+    expect(where).toContain("website");
+    expect(where).toContain("source");
+  });
+
+  it("builds every sidebar count from the caller's owned list ids", async () => {
+    mocks.prisma.leadList.findMany.mockResolvedValue([{ id: LIST_A.id }]);
+    mocks.prisma.lead.count.mockResolvedValue(3);
+
+    const res = await request(app).get("/api/crm/summary").set("Cookie", sessionCookie(TENANT_A));
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.all).toBe(3);
+    expect(res.body.counts.highFit).toBe(3);
+    expect(res.body.permissions).toContain("VIEW_LEADS");
+    expect(mocks.prisma.lead.count.mock.calls.length).toBeGreaterThan(10);
+    for (const call of mocks.prisma.lead.count.mock.calls) {
+      expect(JSON.stringify(call[0].where)).toContain(LIST_A.id);
+      expect(JSON.stringify(call[0].where)).not.toContain(LIST_B.id);
+    }
+  });
+
+  it("bulk status updates are constrained to selected ids in the caller's workspace", async () => {
+    mocks.prisma.leadList.findMany.mockResolvedValue([{ id: LIST_A.id }]);
+    mocks.prisma.lead.updateMany.mockResolvedValue({ count: 2 });
+
+    const res = await request(app)
+      .post("/api/crm/bulk/leads")
+      .set("Cookie", sessionCookie(TENANT_A))
+      .send({ ids: ["lead_1", "lead_2"], action: "CHANGE_STATUS", status: "QUALIFIED" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.affected).toBe(2);
+    const args = mocks.prisma.lead.updateMany.mock.calls[0][0];
+    expect(JSON.stringify(args.where)).toContain(LIST_A.id);
+    expect(JSON.stringify(args.where)).toContain("lead_1");
+    expect(args.data).toEqual({ status: "QUALIFIED" });
+  });
+
+  it("refuses bulk delete without DELETE_LEADS even when lead editing is allowed", async () => {
+    withMemberships(mocks.prisma, [membershipRow({ user: TENANT_A, workspace: WORKSPACE_A, role: "member" })]);
+    const res = await request(app)
+      .post("/api/crm/bulk/leads")
+      .set("Cookie", sessionCookie(TENANT_A))
+      .send({ ids: ["lead_1"], action: "DELETE" });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("permission_denied");
+    expect(mocks.prisma.lead.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("loads detail only through a tenant-owned parent list", async () => {
+    mocks.prisma.lead.findFirst.mockResolvedValue(null);
+    const res = await request(app)
+      .get(`/api/crm/leads/${LEAD_B.id}`)
+      .set("Cookie", sessionCookie(TENANT_A));
+    expect(res.status).toBe(404);
+    const where = JSON.stringify(mocks.prisma.lead.findFirst.mock.calls[0][0].where);
+    expect(where).toContain(WORKSPACE_A.id);
+    expect(where).toContain(LEAD_B.id);
+  });
+});

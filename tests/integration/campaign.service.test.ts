@@ -244,6 +244,36 @@ describe("Campaign Service", () => {
         })
       ).rejects.toThrow("No leads matched");
     });
+
+    it("rejects and creates no campaign when leads match but none has an eligible contact", async () => {
+      const list = await prisma.leadList.create({
+        data: {
+          name: "No Contact List",
+          tenantId: TENANT_ID,
+          userId: USER_ID,
+          businessType: "Test Type",
+          location: "Test Location",
+        },
+      });
+
+      // A lead with no email addresses and no phone: it matches the source but
+      // has nothing to send to on either channel.
+      await prisma.lead.create({
+        data: createLeadData(list.id, { businessName: "Unreachable", emails: JSON.stringify([]), phone: "" }),
+      });
+
+      await expect(
+        generateCampaign(CTX, {
+          sourceType: "list",
+          sourceListId: list.id,
+          channels: { email: true, whatsapp: true },
+          useAi: false,
+        })
+      ).rejects.toThrow(/eligible|contact/i);
+
+      const campaigns = await prisma.campaign.findMany({ where: { tenantId: TENANT_ID } });
+      expect(campaigns).toHaveLength(0);
+    });
   });
 
   describe("listCampaigns", () => {

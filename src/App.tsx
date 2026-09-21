@@ -62,12 +62,27 @@ import {
   ChevronLeft,
   ChevronRight,
   Building2,
-  Library,
   Bot,
   Target,
-  ShieldOff
+  ShieldOff,
+  Flame,
+  TrendingUp,
+  Activity,
+  ArrowUpRight,
+  Compass,
+  Zap,
+  type LucideIcon
 } from "lucide-react";
 import { Lead, LeadList } from "./types";
+import {
+  DASHBOARD_GROUPS,
+  DASHBOARD_ROUTES,
+  dashboardUrl,
+  initialDashboardRoute,
+  routeForTab,
+  routeFromPath,
+  type DashboardTab,
+} from "./dashboardRoutes";
 import { generateOutreachCopy } from "./outreachCopy";
 import {
   OutreachTemplate,
@@ -93,11 +108,27 @@ const EmailTemplates = lazy(() => import("./EmailTemplates"));
 const CampaignReport = lazy(() => import("./CampaignReport"));
 const Conversations = lazy(() => import("./Conversations"));
 const BusinessPanel = lazy(() => import("./features/BusinessPanel"));
-const KnowledgePanel = lazy(() => import("./features/KnowledgePanel"));
 const AssistantPanel = lazy(() => import("./features/AssistantPanel"));
 const TargetingPanel = lazy(() => import("./features/TargetingPanel"));
 const CampaignPanel = lazy(() => import("./features/CampaignPanel"));
 const SuppressionPanel = lazy(() => import("./features/SuppressionPanel"));
+const LeadsWorkspace = lazy(() => import("./features/LeadsWorkspace"));
+
+const DASHBOARD_ROUTE_ICONS: Record<DashboardTab, LucideIcon> = {
+  dashboard: LayoutDashboard,
+  business: Building2,
+  assistant: Bot,
+  targeting: Target,
+  finder: MapPin,
+  leads: Database,
+  campaigns: Send,
+  conversations: MessageSquare,
+  templates: Layout,
+  reports: BarChart3,
+  suppressions: ShieldOff,
+  settings: Settings,
+  outreach: Send,
+};
 // The spreadsheet, PDF and Word writers are only reachable from the export
 // buttons, so they are fetched at the moment a user clicks one rather than
 // shipped to every user who never exports anything.
@@ -150,13 +181,69 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   const canAiInsights = entitlements ? entitlements.aiInsights : true;
   const planName = entitlements?.planName || (currentUser?.plan ? currentUser.plan : "");
   const isFreePlan = !!entitlements && !entitlements.whatsappOutreach;
-  // Navigation
-  const [activeTab, setActiveTab] = useState<"dashboard" | "finder" | "leads" | "outreach" | "templates" | "reports" | "conversations" | "suppressions" | "settings" | "business" | "knowledge" | "assistant" | "targeting" | "campaigns">(() => {
+  const initialBusinessTab = useRef<"learn" | "knowledge">(
+    typeof window !== "undefined" &&
+      (window.location.pathname.replace(/\/+$/, "") === "/app/knowledge" ||
+        (window.location.pathname.replace(/\/+$/, "") === "/app" &&
+          localStorage.getItem("nexaleadai_activeTab") === "knowledge"))
+      ? "knowledge"
+      : "learn"
+  );
+  // URL-based navigation. Pathname wins on deep links; the previous localStorage
+  // preference is used only when someone enters through bare /app.
+  const [activeTab, setActiveTab] = useState<DashboardTab>(() => {
     const saved = typeof window !== "undefined" ? localStorage.getItem("nexaleadai_activeTab") : null;
-    // The legacy campaign tab bypassed review/approval. Redirect existing
-    // browser preferences so every operator lands on the reviewed workflow.
-    return saved === "outreach" ? "campaigns" : ((saved as any) || "dashboard");
+    // Keep the migration explicit here as well as in routeForTab because this
+    // guards bare-/app entry before any navigation event can run.
+    const migratedSaved =
+      saved === "outreach" ? "campaigns" : saved === "knowledge" ? "business" : saved;
+    const pathname = typeof window !== "undefined" ? window.location.pathname : "/app";
+    return initialDashboardRoute(pathname, migratedSaved).id;
   });
+
+  const navigateToTab = useCallback(
+    (tab: DashboardTab, options: { replace?: boolean } = {}) => {
+      const route = routeForTab(tab);
+      if (typeof window !== "undefined") {
+        const nextUrl = dashboardUrl(route, window.location.href);
+        const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+        if (nextUrl !== currentUrl) {
+          const method = options.replace ? "replaceState" : "pushState";
+          window.history[method]({ dashboardTab: route.id }, "", nextUrl);
+        }
+      }
+      setActiveTab(route.id);
+    },
+    []
+  );
+
+  // Canonicalize bare, legacy and unknown paths and remove the auth-only mode
+  // parameter after the dashboard has loaded.
+  useEffect(() => {
+    const route = routeForTab(activeTab);
+    const nextUrl = dashboardUrl(route, window.location.href);
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextUrl !== currentUrl) {
+      window.history.replaceState({ dashboardTab: route.id }, "", nextUrl);
+    }
+    document.title = `${route.title} · NexaLeadAi`;
+  }, [activeTab]);
+
+  // Browser Back/Forward is a first-class navigation path, not just sidebar
+  // clicks. Invalid history entries safely resolve to Overview.
+  useEffect(() => {
+    const onPopState = () => {
+      const route = routeFromPath(window.location.pathname) || routeForTab("dashboard");
+      const canonicalUrl = dashboardUrl(route, window.location.href);
+      const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      if (canonicalUrl !== currentUrl) {
+        window.history.replaceState({ dashboardTab: route.id }, "", canonicalUrl);
+      }
+      setActiveTab(route.id);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem("nexaleadai_activeTab", activeTab);
@@ -225,6 +312,14 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   const [searchTerm, setSearchTerm] = useState("");
   const [priorityFilter, setPriorityFilter] = useState("ALL");
   const [selectedLeadDetails, setSelectedLeadDetails] = useState<Lead | null>(null);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
+
+  const copyToClipboard = (text: string, fieldKey: string) => {
+    if (!text) return;
+    navigator.clipboard.writeText(text);
+    setCopiedField(fieldKey);
+    setTimeout(() => setCopiedField(null), 2000);
+  };
 
   // WhatsApp & SMTP Configurations
   const [whatsappStatus, setWhatsappStatus] = useState({ status: "DISCONNECTED", qr: "" });
@@ -404,7 +499,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   const [renameListValue, setRenameListValue] = useState("");
   const [isDeletingListId, setIsDeletingListId] = useState<string | null>(null);
   const [showCrmFilters, setShowCrmFilters] = useState(false);
-
+  const [overviewMapFilter, setOverviewMapFilter] = useState<"ALL" | "HOT" | "WARM" | "COLD">("ALL");
 
   // Map refs
   const finderMapInstance = useRef<any>(null);
@@ -730,11 +825,16 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
       }).addTo(map);
     }
 
-    processedLeads.forEach(lead => {
+    const leadsToShow = overviewMapFilter === "ALL"
+      ? processedLeads
+      : processedLeads.filter(l => l.leadPriority === overviewMapFilter);
+
+    const bounds: any[] = [];
+    leadsToShow.forEach(lead => {
       if (lead.lat && lead.lng) {
-        const color = lead.leadPriority === "HOT" ? "#dc2626" : lead.leadPriority === "WARM" ? "#d97706" : "#475569";
+        const color = lead.leadPriority === "HOT" ? "#ef4444" : lead.leadPriority === "WARM" ? "#f59e0b" : "#64748b";
         const marker = L.circleMarker([lead.lat, lead.lng], {
-          radius: 9,
+          radius: 8,
           fillColor: color,
           color: "#ffffff",
           weight: 2,
@@ -742,19 +842,29 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
           fillOpacity: 0.9
         }).addTo(overviewMapInstance.current);
 
+        bounds.push([lead.lat, lead.lng]);
+
         marker.bindPopup(`
-          <div class="text-slate-900 font-sans p-1">
-            <h4 class="font-bold text-xs border-b pb-1 mb-1">${lead.businessName}</h4>
-            <p class="text-[10px] my-0.5"><b>Category:</b> ${lead.category || "N/A"}</p>
-            <p class="text-[10px] my-0.5"><b>Rating:</b> ${lead.rating} ? (${lead.reviews} reviews)</p>
-            <p class="text-[10px] my-0.5"><b>Lead Score:</b> <span class="font-bold text-indigo-600">${lead.leadScore}</span> (${lead.leadPriority})</p>
-            <p class="text-[9px] text-slate-500 mt-1 truncate">${lead.address}</p>
+          <div style="font-family: system-ui, -apple-system, sans-serif; padding: 4px; min-width: 170px;">
+            <div style="font-weight: 700; font-size: 13px; color: #0f172a; margin-bottom: 2px;">${lead.businessName}</div>
+            <div style="display: flex; align-items: center; gap: 6px; margin: 4px 0;">
+              <span style="font-size: 9.5px; font-weight: 800; padding: 2px 6px; border-radius: 9999px; background: ${color}20; color: ${color};">${lead.leadPriority}</span>
+              <span style="font-size: 11px; color: #64748b;">★ ${lead.rating || "N/A"} (${lead.reviews || 0})</span>
+            </div>
+            <div style="font-size: 11px; color: #334155; margin-bottom: 4px;">Score: <b style="color: #4f46e5;">${lead.leadScore || 0}</b></div>
+            <div style="font-size: 10px; color: #64748b; line-height: 1.3;">${lead.address || "No address specified"}</div>
           </div>
         `);
         overviewMarkers.current.push(marker);
       }
     });
-  }, [activeTab, processedLeads]);
+
+    if (bounds.length > 0 && overviewMapInstance.current) {
+      try {
+        overviewMapInstance.current.fitBounds(bounds, { padding: [30, 30], maxZoom: 14 });
+      } catch (e) {}
+    }
+  }, [activeTab, processedLeads, overviewMapFilter]);
 
   const reverseGeocode = async (latitude: number, longitude: number) => {
     try {
@@ -1034,10 +1144,18 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     setOutreachEmailBody("Drafting customized outreach campaign pitch based on AI insights...\n\nPlease wait a moment.");
     setOutreachWhatsappMsg("Drafting customized message...");
 
-    // Load saved templates and reset any prior selection for this lead.
-    const allTemplates = loadOutreachTemplates();
-    setOutreachEmailTemplates(allTemplates.filter(t => t.templateType === "email"));
-    setOutreachWhatsappTemplates(allTemplates.filter(t => t.templateType === "whatsapp"));
+    // Load this workspace's server-owned templates and reset prior selection.
+    try {
+      const templateResponse = await fetch("/api/templates", { credentials: "include" });
+      if (templateResponse.ok) {
+        const allTemplates = (await templateResponse.json()) as OutreachTemplate[];
+        setOutreachEmailTemplates(allTemplates.filter((template) => template.templateType === "email"));
+        setOutreachWhatsappTemplates(allTemplates.filter((template) => template.templateType === "whatsapp"));
+      }
+    } catch {
+      setOutreachEmailTemplates([]);
+      setOutreachWhatsappTemplates([]);
+    }
     setSelectedEmailTemplateId("");
     setSelectedWhatsappTemplateId("");
     setAiOutreachCopy(null);
@@ -1276,7 +1394,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   const handleStartCampaign = () => {
     // Retained only while the legacy panel is removed incrementally. It must
     // never invoke the retired immediate-send endpoint.
-    setActiveTab("campaigns");
+    navigateToTab("campaigns");
     showAppModal(
       "success",
       "Use reviewed campaigns",
@@ -1692,14 +1810,14 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
   // Re-fetch leads whenever active list or filters/sort changes
   useEffect(() => {
-    if (activeListId && activeTab === "leads") {
+    if (false && activeListId && activeTab === "leads") {
       fetchCrmLeads(activeListId);
     }
   }, [activeListId, crmSortBy, crmSortDir, activeTab]);
 
   // Fetch CRM lists whenever the leads tab becomes active
   useEffect(() => {
-    if (activeTab === "leads") {
+    if (false && activeTab === "leads") {
       fetchLeadLists();
     }
   }, [activeTab]);
@@ -1710,7 +1828,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   useEffect(() => {
     if (activeTab === "outreach") {
       fetchLeadLists();
-      const all = loadOutreachTemplates();
+      const all = loadOutreachTemplates(currentWorkspace?.id);
       setCampaignEmailTemplates(all.filter(t => t.templateType === "email"));
       setCampaignWhatsappTemplates(all.filter(t => t.templateType === "whatsapp"));
     }
@@ -1718,7 +1836,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
   // Debounced search + filter re-fetch
   useEffect(() => {
-    if (!activeListId || activeTab !== "leads") return;
+    if (false || !activeListId || activeTab !== "leads") return;
     const t = setTimeout(() => fetchCrmLeads(activeListId), 350);
     return () => clearTimeout(t);
   }, [crmSearchTerm, crmPriorityFilter, crmWebsiteFilter, crmEmailFilter, crmWhatsappFilter, crmDateFrom, crmDateTo]);
@@ -1737,6 +1855,8 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
   const maxScoreCount = Math.max(scorePoor, scoreNeedsWork, scoreGood, scoreExcellent, 1);
 
+  const currentRoute = routeForTab(activeTab);
+  const CurrentRouteIcon = DASHBOARD_ROUTE_ICONS[currentRoute.id];
   const isLight = theme === "light";
   const bgMain = isLight ? "bg-slate-50 text-slate-800" : "bg-[#020617] text-[#e2e8f0]";
   const bgCard = isLight ? "bg-white border border-slate-200" : "bg-gradient-to-br from-slate-900 to-[#111827] border border-[#1e293b]";
@@ -1747,81 +1867,137 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   const textSecondary = isLight ? "text-slate-500" : "text-slate-400";
   
   return (
-    <div className={`flex h-screen ${bgMain} font-sans overflow-hidden`}>
+    <div className={`relative h-dvh ${bgMain} font-sans overflow-hidden`}>
       
       {/* Sidebar Navigation — fixed, collapsible to an icon rail */}
-      <aside className={`${sidebarCollapsed ? "w-[72px]" : "w-56"} ${bgAside} flex flex-col justify-between h-full z-20 shrink-0 transition-all duration-200 overflow-hidden`}>
-        <div>
+      <aside className={`${sidebarCollapsed ? "w-[72px]" : "w-64"} ${bgAside} fixed inset-y-0 left-0 z-30 flex h-dvh flex-col justify-between overflow-hidden transition-[width] duration-200 shadow-xl`}>
+        <div className="flex min-h-0 flex-1 flex-col">
           {/* Logo Brand */}
-          <div className={`h-16 flex items-center ${sidebarCollapsed ? "justify-center px-0" : "px-5"} border-b ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
-            <div className="relative flex items-center">
-              <img src="/logo.png" alt="NexaLeadAi" className="h-7 w-auto object-contain" />
-              <span className="absolute inline-flex h-2 w-2 rounded-full bg-emerald-400 -top-0.5 -right-0.5 ring-2 ring-white/20"></span>
+          <div className={`h-14 flex items-center ${sidebarCollapsed ? "justify-center px-0" : "px-5"} border-b ${isLight ? "border-slate-200/80" : "border-[#1e293b]/80"}`}>
+            <div className="relative flex items-center gap-2.5">
+              <img src="/logo.png" alt="NexaLeadAi" className="h-6 w-auto object-contain" />
+              {!sidebarCollapsed && (
+                <span className="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.2 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 shadow-xs">
+                  AGENT V2
+                </span>
+              )}
+              <span className="absolute inline-flex h-2 w-2 rounded-full bg-emerald-400 -top-0.5 -right-1 ring-2 ring-emerald-400/20 animate-pulse"></span>
             </div>
           </div>
 
-          {/* Nav Items — compact sizing */}
-          <nav className="p-2.5 space-y-0.5">
-            {([
-              { tab: "dashboard", icon: LayoutDashboard, label: "Overview", pulse: false, badge: undefined },
-              { tab: "business", icon: Building2, label: "Business", pulse: false, badge: undefined },
-              { tab: "knowledge", icon: Library, label: "Knowledge", pulse: false, badge: undefined },
-              { tab: "assistant", icon: Bot, label: "Assistant", pulse: false, badge: undefined },
-              { tab: "targeting", icon: Target, label: "Targeting", pulse: false, badge: undefined },
-              { tab: "finder", icon: MapPin, label: "Lead Finder", pulse: isRunning, badge: undefined },
-              { tab: "leads", icon: Database, label: "Leads", pulse: false, badge: totalProcessed as number | undefined },
-              { tab: "campaigns", icon: Send, label: "Campaigns", pulse: campaignRunning, badge: undefined },
-              { tab: "conversations", icon: MessageSquare, label: "Inbox", pulse: conversationsUnread > 0, badge: conversationsUnread > 0 ? conversationsUnread : undefined },
-              { tab: "templates", icon: Layout, label: "Templates", pulse: false, badge: undefined },
-              { tab: "reports", icon: BarChart3, label: "Reports", pulse: campaignRunning, badge: undefined },
-              { tab: "suppressions", icon: ShieldOff, label: "Do Not Contact", pulse: false, badge: undefined },
-              { tab: "settings", icon: Settings, label: "Integrations", pulse: false, badge: undefined },
-            ] as const).map(({ tab, icon: Icon, label, pulse, badge }) => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab as any)}
-                title={sidebarCollapsed ? label : undefined}
-                className={`relative w-full flex items-center rounded-lg text-xs font-medium transition-all cursor-pointer ${
-                  sidebarCollapsed ? "justify-center px-0 py-2.5" : "justify-between px-3 py-2"
-                } ${
-                  activeTab === tab
-                    ? "bg-indigo-600/10 text-indigo-600 font-semibold"
-                    : `${isLight ? "text-slate-600 hover:bg-slate-100 hover:text-slate-900" : "text-slate-400 hover:bg-slate-800/40 hover:text-slate-200"}`
-                }`}
-              >
-                <span className={`flex items-center ${sidebarCollapsed ? "" : "gap-2"}`}>
-                  <Icon className="h-4 w-4 shrink-0" />
-                  {!sidebarCollapsed && <span className="truncate">{label}</span>}
-                </span>
-                {!sidebarCollapsed && badge !== undefined && (
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${
-                    tab === "conversations"
-                      ? "bg-indigo-500 text-white"
-                      : isLight ? "bg-slate-100 text-slate-600" : "bg-[#1e293b] text-slate-300"
-                  }`}>
-                    {badge}
-                  </span>
-                )}
-                {!sidebarCollapsed && pulse && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>}
-                {sidebarCollapsed && pulse && <span className="absolute top-1.5 right-2 h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>}
-              </button>
-            ))}
+          {/* Route-aware navigation — grouped for fast scanning. */}
+          <nav className="min-h-0 flex-1 overflow-y-auto p-3 space-y-3" aria-label="Dashboard navigation">
+            {DASHBOARD_GROUPS.map((group) => {
+              const routes = DASHBOARD_ROUTES.filter((route) => route.group === group.id);
+              return (
+                <div key={group.id}>
+                  {sidebarCollapsed ? (
+                    group.id !== "overview" && (
+                      <div className={`h-px mx-2 my-2 ${isLight ? "bg-slate-200" : "bg-slate-800/80"}`} />
+                    )
+                  ) : (
+                    <div className={`px-3 pb-1.5 pt-1 text-[9.5px] font-bold uppercase tracking-[0.16em] ${
+                      isLight ? "text-slate-400" : "text-slate-500"
+                    }`}>
+                      {group.label}
+                    </div>
+                  )}
+                  <div className="space-y-1">
+                    {routes.map((route) => {
+                      const Icon = DASHBOARD_ROUTE_ICONS[route.id];
+                      const pulse =
+                        (route.id === "finder" && isRunning) ||
+                        ((route.id === "campaigns" || route.id === "reports") && campaignRunning) ||
+                        (route.id === "conversations" && conversationsUnread > 0);
+                      const badge =
+                        route.id === "leads"
+                          ? totalProcessed
+                          : route.id === "conversations" && conversationsUnread > 0
+                            ? conversationsUnread
+                            : undefined;
+                      const active = activeTab === route.id;
+
+                      return (
+                        <a
+                          key={route.id}
+                          href={route.path}
+                          aria-current={active ? "page" : undefined}
+                          data-dashboard-route={route.id}
+                          onClick={(event) => {
+                            if (
+                              event.button !== 0 ||
+                              event.metaKey ||
+                              event.ctrlKey ||
+                              event.shiftKey ||
+                              event.altKey
+                            ) return;
+                            event.preventDefault();
+                            navigateToTab(route.id);
+                          }}
+                          title={sidebarCollapsed ? `${route.label} — ${route.description}` : route.description}
+                          className={`btn-interactive group relative w-full flex items-center rounded-xl text-xs font-medium transition-all duration-200 cursor-pointer ${
+                            sidebarCollapsed ? "justify-center px-0 py-2.5" : "justify-between px-3 py-2.5"
+                          } ${
+                            active
+                              ? isLight
+                                ? "bg-indigo-50 text-indigo-700 font-semibold shadow-xs border border-indigo-200/80"
+                                : "bg-gradient-to-r from-indigo-600/20 via-indigo-600/10 to-transparent text-indigo-400 font-semibold border border-indigo-500/25 shadow-xs shadow-indigo-500/10"
+                              : isLight
+                                ? "text-slate-600 hover:bg-slate-100 hover:text-slate-900 hover:translate-x-0.5"
+                                : "text-slate-400 hover:bg-slate-800/40 hover:text-slate-100 hover:translate-x-0.5"
+                          }`}
+                        >
+                          {/* Active Left Indicator Bar */}
+                          {active && !sidebarCollapsed && (
+                            <span className="absolute left-0 top-1.5 bottom-1.5 w-1 rounded-r-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.8)]" />
+                          )}
+                          <span className={`flex items-center ${sidebarCollapsed ? "" : "gap-2.5"}`}>
+                            <Icon className={`h-4.5 w-4.5 shrink-0 transition-transform duration-200 group-hover:scale-110 ${active ? "text-indigo-500" : isLight ? "text-slate-400" : "text-slate-500"}`} />
+                            {!sidebarCollapsed && <span className="truncate">{route.label}</span>}
+                          </span>
+                          {!sidebarCollapsed && badge !== undefined && (
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold tabular-nums ${
+                              route.id === "conversations"
+                                ? "bg-indigo-500 text-white shadow-xs shadow-indigo-500/30"
+                                : isLight
+                                  ? "bg-slate-100 text-slate-600 border border-slate-200"
+                                  : "bg-[#1e293b] text-slate-300 border border-slate-700/50"
+                            }`}>
+                              {badge}
+                            </span>
+                          )}
+                          {!sidebarCollapsed && pulse && (
+                            <span className="relative flex h-2 w-2">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                            </span>
+                          )}
+                          {sidebarCollapsed && pulse && (
+                            <span className="absolute top-1.5 right-2 h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          )}
+                        </a>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
           </nav>
         </div>
 
         {/* Sidebar Footer — current plan + monthly usage + collapse toggle */}
-        <div className={`border-t ${isLight ? "border-slate-200" : "border-[#1e293b]/60"} ${sidebarCollapsed ? "p-2" : "p-3"} space-y-2`}>
+        <div className={`border-t ${isLight ? "border-slate-200" : "border-[#1e293b]/60"} ${sidebarCollapsed ? "p-2" : "p-3.5"} space-y-2.5`}>
           {!sidebarCollapsed && (
-            <div className="space-y-1.5">
+            <div className={`p-3 rounded-xl border ${isLight ? "bg-slate-50/70 border-slate-200/80" : "bg-[#040711] border-[#1e293b]/80"} space-y-2`}>
               <div className="flex items-center justify-between">
-                <span className={`text-[10px] font-bold uppercase tracking-wide ${isLight ? "text-slate-500" : "text-slate-500"}`}>Current Plan</span>
+                <span className={`text-[9.5px] font-bold uppercase tracking-wider ${isLight ? "text-slate-400" : "text-slate-500"}`}>Current Plan</span>
                 {entitlements ? (
                   isFreePlan ? (
-                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold border ${isLight ? "bg-slate-100 text-slate-600 border-slate-200" : "bg-slate-800/60 text-slate-300 border-slate-700"}`}>
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold border ${isLight ? "bg-white text-slate-600 border-slate-200" : "bg-slate-800/80 text-slate-300 border-slate-700"}`}>
                       {entitlements.planName}
                     </span>
                   ) : (
-                    <span className="text-[10px] inline-flex items-center gap-1 text-white bg-gradient-to-r from-indigo-600 to-violet-600 px-2 py-0.5 rounded-full font-semibold">
+                    <span className="text-[10px] inline-flex items-center gap-1 text-white bg-gradient-to-r from-indigo-600 to-violet-600 px-2.5 py-0.5 rounded-full font-semibold shadow-xs">
                       <Sparkles className="h-2.5 w-2.5" /> {entitlements.planName}
                     </span>
                   )
@@ -1832,13 +2008,16 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
               {usage && !usage.unlimited && usage.limit !== null && (
                 <div title={`${usage.used} of ${usage.limit} leads used this month`}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className={`text-[10px] font-semibold ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                      {usage.used}/{usage.limit} leads
+                    <span className={`text-[10px] font-semibold tabular-nums ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+                      {usage.used} / {usage.limit} leads
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-bold tabular-nums">
+                      {Math.round((usage.used / usage.limit) * 100)}%
                     </span>
                   </div>
                   <div className={`w-full h-1.5 rounded-full overflow-hidden ${isLight ? "bg-slate-200" : "bg-slate-800"}`}>
                     <div
-                      className={`h-full rounded-full transition-all ${usage.used >= usage.limit ? "bg-rose-500" : "bg-indigo-500"}`}
+                      className={`h-full rounded-full transition-all duration-500 ${usage.used >= usage.limit ? "bg-rose-500" : "bg-gradient-to-r from-indigo-500 to-violet-500"}`}
                       style={{ width: `${Math.min(100, (usage.used / usage.limit) * 100)}%` }}
                     ></div>
                   </div>
@@ -1850,108 +2029,115 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
           <button
             onClick={() => setSidebarCollapsed((c) => !c)}
             title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className={`w-full flex items-center gap-2 rounded-lg text-[11px] font-semibold cursor-pointer transition-all ${
-              sidebarCollapsed ? "justify-center py-2" : "justify-center py-1.5"
-            } border ${isLight ? "border-slate-200 text-slate-500 hover:bg-slate-100" : "border-[#1e293b] text-slate-400 hover:bg-slate-800/50"}`}
+            className={`w-full btn-interactive flex items-center gap-2 rounded-xl text-[11px] font-semibold cursor-pointer transition-all ${
+              sidebarCollapsed ? "justify-center py-2" : "justify-center py-2"
+            } border ${isLight ? "border-slate-200 bg-white text-slate-600 hover:bg-slate-100" : "border-[#1e293b] bg-slate-900/40 text-slate-400 hover:bg-slate-800/60 hover:text-white"}`}
           >
-            {sidebarCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <><ChevronLeft className="h-3.5 w-3.5" /> Collapse</>}
+            {sidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <><ChevronLeft className="h-4 w-4" /> Collapse rail</>}
           </button>
         </div>
       </aside>
 
-      {/* Main Panel Area */}
-      <div className="flex-grow flex flex-col h-full overflow-hidden">
-        
-        {/* Main Panel Header */}
-        <header className={`h-16 ${bgHeader} px-8 flex items-center justify-between z-40 backdrop-blur-md`}>
-          <div className="flex items-center gap-2.5">
-            {activeTab === "dashboard" && <LayoutDashboard className="h-5 w-5 text-indigo-500" />}
-            {activeTab === "finder" && <MapPin className="h-5 w-5 text-indigo-500" />}
-            {activeTab === "leads" && <Database className="h-5 w-5 text-indigo-500" />}
-            {activeTab === "outreach" && <Send className="h-5 w-5 text-indigo-500" />}
-            {activeTab === "templates" && <Layout className="h-5 w-5 text-indigo-500" />}
-            {activeTab === "reports" && <BarChart3 className="h-5 w-5 text-indigo-500" />}
-            {activeTab === "conversations" && <MessageSquare className="h-5 w-5 text-indigo-500" />}
-            {activeTab === "suppressions" && <ShieldOff className="h-5 w-5 text-rose-500" />}
-            {activeTab === "settings" && <Settings className="h-5 w-5 text-indigo-500" />}
-            {activeTab === "business" && <Building2 className="h-5 w-5 text-indigo-500" />}
-            {activeTab === "knowledge" && <Library className="h-5 w-5 text-indigo-500" />}
-            {activeTab === "assistant" && <Bot className="h-5 w-5 text-indigo-500" />}
-            {activeTab === "targeting" && <Target className="h-5 w-5 text-indigo-500" />}
-            {activeTab === "campaigns" && <Send className="h-5 w-5 text-indigo-500" />}
-            <span className={`text-base font-semibold tracking-tight ${isLight ? "text-slate-800" : "text-white"}`}>
-              {activeTab === "dashboard" && "Dashboard Overview"}
-              {activeTab === "finder" && "Geo Lead Finder"}
-              {activeTab === "leads" && "Leads Database"}
-              {activeTab === "outreach" && "Legacy Campaigns"}
-              {activeTab === "campaigns" && "Campaigns"}
-              {activeTab === "templates" && "Outreach Templates"}
-              {activeTab === "reports" && "Outreach Reports"}
-              {activeTab === "conversations" && "Conversations"}
-              {activeTab === "suppressions" && "Do Not Contact"}
-              {activeTab === "settings" && "Outreach & Integrations"}
-              {activeTab === "business" && "Business Profile"}
-              {activeTab === "knowledge" && "Knowledge Base"}
-              {activeTab === "assistant" && "AI Assistant"}
-              {activeTab === "targeting" && "Targeting & Scoring"}
-            </span>
+      {/* Fixed main shell shared by every route */}
+      <div className="min-w-0">
+        {/* Fixed dashboard header */}
+        <header className={`${sidebarCollapsed ? "left-[72px]" : "left-64"} fixed top-0 right-0 h-14 ${bgHeader} px-3 sm:px-5 lg:px-6 flex items-center justify-between z-40 backdrop-blur-md transition-[left] duration-200 border-b ${borderSubtle}`}>
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition-all ${
+              currentRoute.id === "suppressions"
+                ? isLight
+                  ? "border-rose-200 bg-rose-50 text-rose-500 shadow-xs"
+                  : "border-rose-500/20 bg-rose-500/10 text-rose-400 shadow-xs"
+                : isLight
+                  ? "border-indigo-100 bg-indigo-50 text-indigo-600 shadow-xs"
+                  : "border-indigo-500/25 bg-indigo-500/10 text-indigo-400 shadow-xs shadow-indigo-500/10"
+            }`}>
+              <CurrentRouteIcon className="h-4 w-4" />
+            </div>
+            <div className="min-w-0 leading-tight">
+              <div className={`text-[9px] font-bold uppercase tracking-[0.14em] ${textSecondary}`}>
+                Workspace / {currentRoute.label}
+              </div>
+              <div className={`mt-0.5 truncate text-sm font-bold tracking-tight ${isLight ? "text-slate-900" : "text-white"}`}>
+                {currentRoute.title}
+              </div>
+            </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-2.5">
+            {/* Live Sync Status Pill */}
+            <div className={`hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[10px] font-semibold ${
+              isLight ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-emerald-500/10 border-emerald-500/25 text-emerald-400"
+            }`}>
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+              </span>
+              <span>Live Engine Ready</span>
+            </div>
+
+            {/* Quick Action Button */}
+            <button
+              onClick={() => navigateToTab("finder")}
+              className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white shadow-xs shadow-indigo-500/25 btn-interactive cursor-pointer"
+            >
+              <MapPin className="h-3 w-3" />
+              <span>New Scan</span>
+            </button>
+
             {currentWorkspace && (
-              <div className={`hidden sm:flex items-center gap-2 rounded-lg border px-3 py-1.5 ${isLight ? "border-slate-200 bg-slate-50 text-slate-700" : "border-slate-700 bg-slate-900 text-slate-200"}`} title={currentWorkspace.slug}>
-                <Building2 className="h-4 w-4 text-indigo-500" />
-                <span className="max-w-48 truncate text-xs font-semibold">{currentWorkspace.name}</span>
-                <span className="text-[10px] capitalize text-slate-400">{currentWorkspace.role}</span>
+              <div className={`hidden md:flex items-center gap-1.5 rounded-lg border px-2.5 py-1 ${isLight ? "border-slate-200 bg-slate-50 text-slate-700" : "border-slate-700/80 bg-slate-900/60 text-slate-200"}`} title={currentWorkspace.slug}>
+                <Building2 className="h-3 w-3 text-indigo-400" />
+                <span className="max-w-36 truncate text-xs font-semibold">{currentWorkspace.name}</span>
+                <span className="text-[9px] uppercase font-bold tracking-wider text-slate-400 px-1 py-0.2 rounded bg-slate-800">{currentWorkspace.role}</span>
               </div>
             )}
             <button 
               onClick={() => setTheme(isLight ? "dark" : "light")}
-              className={`p-1.5 rounded-lg border ${borderSubtle} ${isLight ? "hover:bg-slate-100 text-slate-500 hover:text-slate-800" : "hover:bg-slate-800/50 text-slate-400 hover:text-white"} transition-all cursor-pointer`}
+              className={`p-1.5 rounded-lg border btn-interactive ${borderSubtle} ${isLight ? "hover:bg-slate-100 text-slate-600 hover:text-slate-900 bg-white" : "hover:bg-slate-800 text-slate-400 hover:text-white bg-slate-900/40"} cursor-pointer`}
               title={isLight ? "Switch to Dark Mode" : "Switch to Light Mode"}
             >
-              {isLight ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
+              {isLight ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5" />}
             </button>
             <button 
               onClick={fetchData}
-              className={`p-1.5 rounded-lg border ${borderSubtle} ${isLight ? "hover:bg-slate-100 text-slate-500 hover:text-slate-800" : "hover:bg-slate-800/50 text-slate-400 hover:text-white"} transition-all cursor-pointer`}
+              className={`p-1.5 rounded-lg border btn-interactive ${borderSubtle} ${isLight ? "hover:bg-slate-100 text-slate-600 hover:text-slate-900 bg-white" : "hover:bg-slate-800 text-slate-400 hover:text-white bg-slate-900/40"} cursor-pointer`}
               title="Reload Statuses"
             >
-              <RefreshCw className="h-4 w-4" />
+              <RefreshCw className="h-3.5 w-3.5" />
             </button>
 
             {currentUser && (
-              <div ref={profileDropdownRef} className="relative flex items-center pl-3 ml-1 border-l border-slate-200 dark:border-[#1e293b]/60">
+              <div ref={profileDropdownRef} className="relative flex items-center pl-2.5 ml-0.5 border-l border-slate-200 dark:border-[#1e293b]/60">
                 <button
                   onClick={() => setShowProfileDropdown(prev => !prev)}
-                  className="flex items-center gap-2 cursor-pointer group focus:outline-none"
+                  className="flex items-center gap-1.5 cursor-pointer group focus:outline-none"
                   aria-expanded={showProfileDropdown}
                 >
-                  <div className="h-8 w-8 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white text-xs font-bold shadow-sm ring-2 ring-indigo-500/10 group-hover:ring-indigo-500/35 transition-all">
+                  <div className="h-7 w-7 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white text-[11px] font-bold shadow-xs ring-2 ring-indigo-500/10 group-hover:ring-indigo-500/35 transition-all">
                     {(currentUser.name || currentUser.email).charAt(0).toUpperCase()}
                   </div>
                   <div className="hidden md:block leading-tight text-left">
                     <div className={`text-xs font-semibold group-hover:text-indigo-500 transition-colors ${isLight ? "text-slate-800" : "text-white"}`}>
                       {currentUser.name || currentUser.email.split("@")[0]}
                     </div>
-                    <div className="text-[10px] text-slate-400 max-w-[140px] truncate">{currentUser.email}</div>
                   </div>
                   <ChevronDown className={`h-3 w-3 text-slate-400 transition-transform duration-200 ${showProfileDropdown ? "rotate-180 text-indigo-400" : ""}`} />
                 </button>
 
                 {showProfileDropdown && (
-                  <div className={`absolute right-0 top-11 w-52 rounded-2xl shadow-xl border overflow-hidden z-[100] py-1.5 transition-all duration-200 ${
+                  <div className={`absolute right-0 top-10 w-52 rounded-xl shadow-xl border overflow-hidden z-[100] py-1 transition-all duration-200 ${
                     isLight 
                       ? "bg-white border-slate-200/80 text-slate-800" 
                       : "bg-[#090d16] border-[#1e293b] text-[#e2e8f0]"
                   }`}>
                     {/* Header info */}
-                    <div className={`px-4 py-2 border-b text-xs ${isLight ? "border-slate-100 bg-slate-50/50" : "border-[#1e293b]/60 bg-[#020617]/40"}`}>
+                    <div className={`px-3.5 py-2 border-b text-xs ${isLight ? "border-slate-100 bg-slate-50/50" : "border-[#1e293b]/60 bg-[#020617]/40"}`}>
                       <div className="font-semibold truncate">{currentUser.name || "User Account"}</div>
                       <div className="text-[10px] text-slate-500 truncate mt-0.5">{currentUser.email}</div>
                       {entitlements && (
-                        <div className="mt-1.5 flex items-center gap-1.5">
-                          <span className="text-[9px] font-black text-white bg-gradient-to-r from-indigo-600 to-violet-600 px-2 py-0.5 rounded-full shadow-sm">
+                        <div className="mt-1 flex items-center gap-1.5">
+                          <span className="text-[8.5px] font-black text-white bg-gradient-to-r from-indigo-600 to-violet-600 px-1.5 py-0.2 rounded-full shadow-xs">
                             {entitlements.planName}
                           </span>
                         </div>
@@ -1959,17 +2145,17 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                     </div>
 
                     {/* Menu items */}
-                    <div className="p-1.5 space-y-0.5">
+                    <div className="p-1 space-y-0.5">
                       <button
                         onClick={() => {
                           setShowProfileDropdown(false);
                           openAccountModal();
                         }}
-                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-xs font-medium rounded-xl transition-all text-left cursor-pointer ${
+                        className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-all text-left cursor-pointer ${
                           isLight ? "hover:bg-slate-50 text-slate-700 hover:text-slate-900" : "hover:bg-slate-800/40 text-slate-300 hover:text-white"
                         }`}
                       >
-                        <User className="h-4 w-4 text-indigo-400" />
+                        <User className="h-3.5 w-3.5 text-indigo-400" />
                         Profile Settings
                       </button>
 
@@ -1978,15 +2164,15 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                           setShowProfileDropdown(false);
                           setShowPricingModal(true);
                         }}
-                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-xs font-medium rounded-xl transition-all text-left cursor-pointer ${
+                        className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-all text-left cursor-pointer ${
                           isLight ? "hover:bg-slate-50 text-slate-700 hover:text-slate-900" : "hover:bg-slate-800/40 text-slate-300 hover:text-white"
                         }`}
                       >
-                        <CreditCard className="h-4 w-4 text-indigo-400" />
+                        <CreditCard className="h-3.5 w-3.5 text-indigo-400" />
                         Pricing Plans
                       </button>
 
-                      <div className={`h-px my-1.5 ${isLight ? "bg-slate-100" : "bg-[#1e293b]/60"}`}></div>
+                      <div className={`h-px my-1 ${isLight ? "bg-slate-100" : "bg-[#1e293b]/60"}`}></div>
 
                       {onLogout && (
                         <button
@@ -1994,11 +2180,11 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                             setShowProfileDropdown(false);
                             onLogout();
                           }}
-                          className={`w-full flex items-center gap-2.5 px-3 py-2 text-xs font-semibold rounded-xl transition-all text-left cursor-pointer ${
+                          className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-all text-left cursor-pointer ${
                             isLight ? "hover:bg-rose-50 text-rose-600" : "hover:bg-rose-500/10 text-rose-400"
                           }`}
                         >
-                          <LogOut className="h-4 w-4 text-rose-400" />
+                          <LogOut className="h-3.5 w-3.5 text-rose-400" />
                           Log out
                         </button>
                       )}
@@ -2010,8 +2196,11 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
           </div>
         </header>
 
-        {/* Active Tab View Frame */}
-        <div className="flex-grow overflow-y-auto p-8 relative">
+        {/* The only scrolling region; sidebar and header stay identical and fixed. */}
+        <main
+          className={`${sidebarCollapsed ? "left-[72px]" : "left-64"} fixed top-14 right-0 bottom-0 min-w-0 overflow-y-auto overscroll-contain p-3 sm:p-4 lg:p-5 transition-[left] duration-200`}
+          data-active-route={currentRoute.path}
+        >
           {/*
             One boundary for every lazily loaded panel. The fallback is shown only
             on the first visit to a tab, while its chunk downloads.
@@ -2031,526 +2220,1193 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
           >
 
           {/* TAB 1: DASHBOARD OVERVIEW */}
-          {activeTab === "dashboard" && (
-            <div className="space-y-6">
-              
-              {/* Header Greeting Banner */}
-              <div className={`p-6 border rounded-2xl relative overflow-hidden flex flex-col md:flex-row md:items-center justify-between gap-4 ${isLight ? "bg-white border-slate-200" : "bg-gradient-to-r from-indigo-950/20 via-slate-900 to-indigo-950/20 border-[#1e293b]"}`}>
-                <div className="absolute -left-20 -top-20 w-48 h-48 bg-indigo-500/5 rounded-full blur-3xl pointer-events-none"></div>
-                <div className="space-y-1 relative">
-                  <h2 className={`text-lg font-bold tracking-tight ${isLight ? "text-slate-900" : "text-white"}`}>
-                    Welcome back, {currentUser?.name || currentUser?.email.split("@")[0] || "User"}!
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Here is a real-time diagnostic breakdown of your lead database and outreach campaign.
-                  </p>
+          {activeTab === "dashboard" && (() => {
+            const currentHour = new Date().getHours();
+            const timeGreeting = currentHour < 12 ? "Good morning" : currentHour < 18 ? "Good afternoon" : "Good evening";
+            const userName = currentUser?.name || currentUser?.email?.split("@")[0] || "Growth Leader";
+            const hotPercentage = totalProcessed > 0 ? Math.round((hotLeads / totalProcessed) * 100) : 0;
+            const warmPercentage = totalProcessed > 0 ? Math.round((warmLeads / totalProcessed) * 100) : 0;
+            const coldPercentage = totalProcessed > 0 ? Math.round((coldLeads / totalProcessed) * 100) : 0;
+
+            return (
+              <div className="space-y-6 animate-fadeIn pb-8">
+                
+                {/* ── Executive Greeting & Diagnostic Command Bar ── */}
+                <div className={`p-4 sm:p-5 border rounded-2xl relative overflow-hidden flex flex-col lg:flex-row lg:items-center justify-between gap-4 transition-all ${
+                  isLight 
+                    ? "bg-gradient-to-r from-white via-indigo-50/30 to-white border-slate-200/80 shadow-xs" 
+                    : "bg-gradient-to-r from-indigo-950/30 via-[#0a0f1d] to-slate-900 border-[#1e293b] shadow-lg"
+                }`}>
+                  <div className="absolute -left-20 -top-20 w-48 h-48 bg-indigo-500/10 rounded-full blur-2xl pointer-events-none"></div>
+                  <div className="absolute right-0 top-0 w-40 h-40 bg-rose-500/5 rounded-full blur-xl pointer-events-none"></div>
+                  
+                  <div className="space-y-1.5 relative z-10 max-w-2xl">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold tracking-wide border ${
+                        isLight ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-emerald-500/10 text-emerald-400 border-emerald-500/25"
+                      }`}>
+                        <span className="relative flex h-1.5 w-1.5">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                        </span>
+                        Real-time Lead Engine Active
+                      </span>
+                      <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full border ${
+                        isLight ? "bg-slate-100 text-slate-600 border-slate-200" : "bg-slate-800/80 text-slate-400 border-slate-700/60"
+                      }`}>
+                        Workspace: <b className={isLight ? "text-slate-800" : "text-slate-200"}>{currentWorkspace?.name || "Production"}</b>
+                      </span>
+                    </div>
+
+                    <h1 className={`text-lg sm:text-xl font-extrabold tracking-tight ${isLight ? "text-slate-900" : "text-white"}`}>
+                      {timeGreeting}, <span className="bg-gradient-to-r from-indigo-500 via-indigo-400 to-violet-500 bg-clip-text text-transparent">{userName}</span>
+                    </h1>
+                    
+                    <p className={`text-xs leading-relaxed ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+                      Your intelligent lead acquisition hub. Monitor geo-prospects, qualification scores, and outreach readiness in real time.
+                    </p>
+                  </div>
+
+                  {/* Quick Command Action Triggers */}
+                  <div className="flex items-center gap-2 shrink-0 relative z-10 flex-wrap">
+                    <button
+                      onClick={() => navigateToTab("finder")}
+                      className="btn-interactive flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-indigo-600 via-indigo-500 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white text-xs font-bold rounded-lg cursor-pointer shadow-xs shadow-indigo-500/20"
+                    >
+                      <MapPin className="h-3.5 w-3.5" />
+                      <span>Start New Search</span>
+                      <ArrowRight className="h-3 w-3 opacity-70" />
+                    </button>
+
+                    <button
+                      onClick={fetchData}
+                      title="Fetch latest leads and system metrics"
+                      className={`btn-interactive flex items-center gap-1.5 px-2.5 py-1.5 border rounded-lg text-xs font-semibold cursor-pointer transition-all ${
+                        isLight 
+                          ? "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:text-slate-900 shadow-xs" 
+                          : "border-[#1e293b] bg-slate-900/80 text-slate-300 hover:bg-slate-800 hover:text-white"
+                      }`}
+                    >
+                      <RefreshCw className="h-3 w-3 text-indigo-400" />
+                      <span>Sync</span>
+                    </button>
+
+                    <button
+                      onClick={downloadCSV}
+                      disabled={processedLeads.length === 0}
+                      title="Download full CRM dataset as CSV"
+                      className={`btn-interactive flex items-center gap-1.5 px-2.5 py-1.5 border rounded-lg text-xs font-semibold cursor-pointer transition-all disabled:opacity-40 ${
+                        isLight 
+                          ? "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:text-slate-900 shadow-xs" 
+                          : "border-[#1e293b] bg-slate-900/80 text-slate-300 hover:bg-slate-800 hover:text-white"
+                      }`}
+                    >
+                      <FileSpreadsheet className="h-3 w-3 text-emerald-400" />
+                      <span>Export CSV</span>
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3 shrink-0 relative">
-                  <button
-                    onClick={() => setActiveTab("finder")}
-                    className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-xl cursor-pointer transition-all hover:scale-[1.02] shadow-sm"
+
+                {/* ── High-Impact Interactive KPI Stat Cards (4 Cards) ── */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                  
+                  {/* Card 1: Total Leads in Database */}
+                  <div 
+                    onClick={() => {
+                      setCrmPriorityFilter("ALL");
+                      navigateToTab("leads");
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    title="Click to view all leads in CRM"
+                    className={`group cursor-pointer rounded-xl p-3.5 border transition-all duration-200 relative overflow-hidden hover:-translate-y-0.5 ${
+                      isLight 
+                        ? "bg-white border-slate-200/80 shadow-xs hover:border-indigo-300 hover:shadow-indigo-500/10 hover:shadow-md" 
+                        : "bg-gradient-to-br from-slate-900/90 to-[#0b101d] border-[#1e293b] hover:border-indigo-500/40 hover:shadow-[0_4px_20px_rgba(99,102,241,0.12)]"
+                    }`}
                   >
-                    <MapPin className="h-3.5 w-3.5" /> Start New Search
-                  </button>
-                  <button
-                    onClick={fetchData}
-                    className={`flex items-center gap-1.5 px-3 py-2 border rounded-xl text-xs font-medium cursor-pointer transition-all ${isLight ? "border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100" : "border-[#1e293b] text-slate-300 hover:bg-slate-800"}`}
+                    <div className="absolute top-0 right-0 -mr-4 -mt-4 w-20 h-20 bg-indigo-500/10 rounded-full blur-lg group-hover:bg-indigo-500/20 transition-all duration-300"></div>
+                    <div className="flex justify-between items-start relative z-10">
+                      <div>
+                        <span className={`text-[10px] font-bold tracking-wider uppercase ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                          Total Leads
+                        </span>
+                        <div className="mt-0.5 flex items-baseline gap-1.5">
+                          <span className={`text-2xl font-black tracking-tight tabular-nums ${isLight ? "text-slate-900" : "text-white"}`}>
+                            {totalProcessed.toLocaleString()}
+                          </span>
+                          <span className={`text-[10px] font-semibold ${isLight ? "text-slate-500" : "text-slate-400"}`}>records</span>
+                        </div>
+                      </div>
+                      <div className={`p-2 rounded-lg transition-transform duration-200 group-hover:scale-110 ${
+                        isLight ? "bg-indigo-50 text-indigo-600 border border-indigo-100" : "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 shadow-inner"
+                      }`}>
+                        <Database className="h-4 w-4" />
+                      </div>
+                    </div>
+                    
+                    <div className="mt-3 pt-2 border-t border-dashed border-slate-700/20 flex items-center justify-between text-[10px] relative z-10">
+                      <span className={`font-medium ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                        CRM Repository
+                      </span>
+                      <span className="inline-flex items-center gap-1 font-bold text-indigo-500 group-hover:translate-x-0.5 transition-transform">
+                        Explore <ArrowRight className="h-2.5 w-2.5" />
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Card 2: Hot Leads (🔥 HOT) */}
+                  <div 
+                    onClick={() => {
+                      setCrmPriorityFilter("HOT");
+                      navigateToTab("leads");
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    title="Click to filter HOT leads in CRM"
+                    className={`group cursor-pointer rounded-xl p-3.5 border transition-all duration-200 relative overflow-hidden hover:-translate-y-0.5 ${
+                      isLight 
+                        ? "bg-white border-slate-200/80 shadow-xs hover:border-rose-300 hover:shadow-rose-500/10 hover:shadow-md" 
+                        : "bg-gradient-to-br from-slate-900/90 to-[#0b101d] border-rose-950/40 hover:border-rose-500/40 hover:shadow-[0_4px_20px_rgba(244,63,94,0.15)]"
+                    }`}
                   >
-                    <RefreshCw className="h-3.5 w-3.5" /> Sync Data
-                  </button>
-                </div>
-              </div>
+                    <div className="absolute top-0 right-0 -mr-4 -mt-4 w-20 h-20 bg-rose-500/10 rounded-full blur-lg group-hover:bg-rose-500/20 transition-all duration-300"></div>
+                    <div className="flex justify-between items-start relative z-10">
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] font-bold tracking-wider uppercase text-rose-500">
+                            Hot Leads
+                          </span>
+                          <span className="text-[9px] font-bold px-1.5 py-0.2 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20">
+                            {hotPercentage}%
+                          </span>
+                        </div>
+                        <div className="mt-0.5 flex items-baseline gap-1.5">
+                          <span className="text-2xl font-black tracking-tight tabular-nums text-rose-500">
+                            {hotLeads.toLocaleString()}
+                          </span>
+                          <span className="text-[10px] font-semibold text-rose-400/80">HOT</span>
+                        </div>
+                      </div>
+                      <div className={`p-2 rounded-lg transition-transform duration-200 group-hover:scale-110 ${
+                        isLight ? "bg-rose-50 text-rose-600 border border-rose-100" : "bg-rose-500/10 text-rose-400 border border-rose-500/20 shadow-inner"
+                      }`}>
+                        <Flame className="h-4 w-4" />
+                      </div>
+                    </div>
 
-              {/* Premium Metric Cards Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-5">
-                {/* Card 1: Total Leads */}
-                <div className={`rounded-2xl p-5 border hover:-translate-y-1 hover:border-indigo-500/30 transition-all duration-300 relative group overflow-hidden ${isLight ? "bg-white border-slate-200/80" : "bg-gradient-to-br from-slate-900 to-[#111827] border-[#1e293b]"}`}>
-                  <div className="absolute top-0 right-0 -mr-4 -mt-4 w-16 h-16 bg-indigo-500/5 rounded-full blur-xl group-hover:bg-indigo-500/10 transition-all"></div>
-                  <div className="flex justify-between items-start">
-                    <span className={`text-[11px] font-bold tracking-wider uppercase ${isLight ? "text-slate-400" : "text-slate-500"}`}>Total Leads</span>
-                    <div className={`p-2 rounded-xl ${isLight ? "bg-slate-50" : "bg-[#1e293b]/50"}`}>
-                      <Database className="h-4 w-4 text-indigo-400" />
+                    <div className="mt-3 pt-2 border-t border-dashed border-slate-700/20 flex items-center justify-between text-[10px] relative z-10">
+                      <span className={`font-medium ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                        Critical digital gaps
+                      </span>
+                      <span className="inline-flex items-center gap-1 font-bold text-rose-500 group-hover:translate-x-0.5 transition-transform">
+                        Filter HOT <ArrowRight className="h-2.5 w-2.5" />
+                      </span>
                     </div>
                   </div>
-                  <div className="mt-4 flex items-baseline gap-1.5">
-                    <span className={`text-3xl font-black tracking-tight ${isLight ? "text-slate-900" : "text-white"}`}>{totalProcessed}</span>
-                    <span className={`text-xs font-semibold ${isLight ? "text-slate-500" : "text-slate-400"}`}>leads</span>
-                  </div>
-                  <div className="mt-2 text-[10px] text-slate-500">Collected in CRM database</div>
-                </div>
 
-                {/* Card 2: Hot Leads */}
-                <div className={`rounded-2xl p-5 border hover:-translate-y-1 hover:border-rose-500/30 transition-all duration-300 relative group overflow-hidden ${isLight ? "bg-white border-slate-200/80" : "bg-gradient-to-br from-slate-900 to-[#111827] border-[#ef4444]/10"}`}>
-                  <div className="absolute top-0 right-0 -mr-4 -mt-4 w-16 h-16 bg-rose-500/5 rounded-full blur-xl group-hover:bg-rose-500/10 transition-all"></div>
-                  <div className="flex justify-between items-start">
-                    <span className="text-[11px] font-bold tracking-wider uppercase text-rose-400">Hot Leads</span>
-                    <div className="p-2 rounded-xl bg-rose-500/10">
-                      <Sparkles className="h-4 w-4 text-rose-400" />
+                  {/* Card 3: Warm Leads (⚡ WARM) */}
+                  <div 
+                    onClick={() => {
+                      setCrmPriorityFilter("WARM");
+                      navigateToTab("leads");
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    title="Click to filter WARM leads in CRM"
+                    className={`group cursor-pointer rounded-xl p-3.5 border transition-all duration-200 relative overflow-hidden hover:-translate-y-0.5 ${
+                      isLight 
+                        ? "bg-white border-slate-200/80 shadow-xs hover:border-amber-300 hover:shadow-amber-500/10 hover:shadow-md" 
+                        : "bg-gradient-to-br from-slate-900/90 to-[#0b101d] border-amber-950/40 hover:border-amber-500/40 hover:shadow-[0_4px_20px_rgba(245,158,11,0.15)]"
+                    }`}
+                  >
+                    <div className="absolute top-0 right-0 -mr-4 -mt-4 w-20 h-20 bg-amber-500/10 rounded-full blur-lg group-hover:bg-amber-500/20 transition-all duration-300"></div>
+                    <div className="flex justify-between items-start relative z-10">
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] font-bold tracking-wider uppercase text-amber-500">
+                            Warm Leads
+                          </span>
+                          <span className="text-[9px] font-bold px-1.5 py-0.2 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                            {warmPercentage}%
+                          </span>
+                        </div>
+                        <div className="mt-0.5 flex items-baseline gap-1.5">
+                          <span className="text-2xl font-black tracking-tight tabular-nums text-amber-500">
+                            {warmLeads.toLocaleString()}
+                          </span>
+                          <span className="text-[10px] font-semibold text-amber-400/80">WARM</span>
+                        </div>
+                      </div>
+                      <div className={`p-2 rounded-lg transition-transform duration-200 group-hover:scale-110 ${
+                        isLight ? "bg-amber-50 text-amber-600 border border-amber-100" : "bg-amber-500/10 text-amber-400 border border-amber-500/20 shadow-inner"
+                      }`}>
+                        <Zap className="h-4 w-4" />
+                      </div>
+                    </div>
+
+                    <div className="mt-3 pt-2 border-t border-dashed border-slate-700/20 flex items-center justify-between text-[10px] relative z-10">
+                      <span className={`font-medium ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                        Moderate upside
+                      </span>
+                      <span className="inline-flex items-center gap-1 font-bold text-amber-500 group-hover:translate-x-0.5 transition-transform">
+                        Filter WARM <ArrowRight className="h-2.5 w-2.5" />
+                      </span>
                     </div>
                   </div>
-                  <div className="mt-4 flex items-baseline gap-1.5">
-                    <span className="text-3xl font-black tracking-tight text-rose-500">{hotLeads}</span>
-                    <span className="text-xs font-semibold text-rose-400/80">HOT</span>
-                  </div>
-                  <div className="mt-2 text-[10px] text-slate-500">Highest gaps & conversion potential</div>
-                </div>
 
-                {/* Card 3: Warm Leads */}
-                <div className={`rounded-2xl p-5 border hover:-translate-y-1 hover:border-amber-500/30 transition-all duration-300 relative group overflow-hidden ${isLight ? "bg-white border-slate-200/80" : "bg-gradient-to-br from-slate-900 to-[#111827] border-amber-500/10"}`}>
-                  <div className="absolute top-0 right-0 -mr-4 -mt-4 w-16 h-16 bg-amber-500/5 rounded-full blur-xl group-hover:bg-amber-500/10 transition-all"></div>
-                  <div className="flex justify-between items-start">
-                    <span className="text-[11px] font-bold tracking-wider uppercase text-amber-400">Warm Leads</span>
-                    <div className="p-2 rounded-xl bg-amber-500/10">
-                      <Sun className="h-4.5 w-4.5 text-amber-400" />
+                  {/* Card 4: Webhook & Outbox Sync */}
+                  <div 
+                    className={`rounded-xl p-3.5 border transition-all duration-200 relative overflow-hidden ${
+                      isLight 
+                        ? "bg-white border-slate-200/80 shadow-xs" 
+                        : "bg-gradient-to-br from-slate-900/90 to-[#0b101d] border-[#1e293b]"
+                    }`}
+                  >
+                    <div className="absolute top-0 right-0 -mr-4 -mt-4 w-20 h-20 bg-emerald-500/10 rounded-full blur-lg"></div>
+                    <div className="flex justify-between items-start relative z-10">
+                      <div>
+                        <span className={`text-[10px] font-bold tracking-wider uppercase ${failedLeads.length > 0 ? "text-amber-400" : "text-emerald-500"}`}>
+                          Outbox Delivery
+                        </span>
+                        <div className="mt-0.5 flex items-baseline gap-1.5">
+                          <span className={`text-2xl font-black tracking-tight tabular-nums ${failedLeads.length > 0 ? "text-amber-500" : "text-emerald-500"}`}>
+                            {failedLeads.length === 0 ? "100%" : failedLeads.length}
+                          </span>
+                          <span className={`text-[10px] font-semibold ${failedLeads.length > 0 ? "text-amber-400" : "text-emerald-400"}`}>
+                            {failedLeads.length === 0 ? "synced" : "pending"}
+                          </span>
+                        </div>
+                      </div>
+                      <div className={`p-2 rounded-lg ${
+                        failedLeads.length > 0
+                          ? isLight ? "bg-amber-50 text-amber-600 border border-amber-100" : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                          : isLight ? "bg-emerald-50 text-emerald-600 border border-emerald-100" : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                      }`}>
+                        <CheckCircle2 className="h-4 w-4" />
+                      </div>
+                    </div>
+
+                    <div className="mt-3 pt-2 border-t border-dashed border-slate-700/20 flex items-center justify-between text-[10px] relative z-10">
+                      {failedLeads.length > 0 ? (
+                        <button 
+                          onClick={handleRetryFailed}
+                          disabled={isRetryingFailed}
+                          className="font-bold text-amber-400 hover:text-amber-300 underline cursor-pointer border-0 bg-transparent p-0 flex items-center gap-1"
+                        >
+                          {isRetryingFailed ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                          <span>Retry Dispatch</span>
+                        </button>
+                      ) : (
+                        <>
+                          <span className={`font-medium ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                            Google Sheet
+                          </span>
+                          <span className="font-bold text-emerald-500">Connected</span>
+                        </>
+                      )}
                     </div>
                   </div>
-                  <div className="mt-4 flex items-baseline gap-1.5">
-                    <span className="text-3xl font-black tracking-tight text-amber-500">{warmLeads}</span>
-                    <span className="text-xs font-semibold text-amber-400/80">WARM</span>
-                  </div>
-                  <div className="mt-2 text-[10px] text-slate-500">Moderate digital presence gaps</div>
+
                 </div>
 
-                {/* Card 4: Webhook Sync Status */}
-                <div className={`rounded-2xl p-5 border hover:-translate-y-1 hover:border-emerald-500/30 transition-all duration-300 relative group overflow-hidden ${isLight ? "bg-white border-slate-200/80" : "bg-gradient-to-br from-slate-900 to-[#111827] border-[#10b981]/10"}`}>
-                  <div className="absolute top-0 right-0 -mr-4 -mt-4 w-16 h-16 bg-emerald-500/5 rounded-full blur-xl group-hover:bg-emerald-500/10 transition-all"></div>
-                  <div className="flex justify-between items-start">
-                    <span className="text-[11px] font-bold tracking-wider uppercase text-emerald-400">Outbox Sync</span>
-                    <div className="p-2 rounded-xl bg-emerald-500/10">
-                      <FileSpreadsheet className="h-4.5 w-4.5 text-emerald-400" />
+                {/* ── Interactive Map & Analytics Grid ── */}
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                  
+                  {/* Left Column: Interactive Geographic Distribution Map */}
+                  <div className={`lg:col-span-8 ${
+                    isLight ? "bg-white border-slate-200/80 shadow-xs" : "bg-[#090d16] border-[#1e293b] shadow-lg"
+                  } border rounded-xl p-4 flex flex-col justify-between`}>
+                    
+                    <div>
+                      {/* Map Header with Filter Segmented Controls */}
+                      <div className={`flex flex-col sm:flex-row sm:items-center justify-between pb-3 mb-3 border-b gap-2.5 ${
+                        isLight ? "border-slate-100" : "border-[#1e293b]/70"
+                      }`}>
+                        <div className="flex items-center gap-2">
+                          <div className={`p-1.5 rounded-lg ${isLight ? "bg-indigo-50 text-indigo-600" : "bg-indigo-500/10 text-indigo-400"}`}>
+                            <Map className="h-4 w-4" />
+                          </div>
+                          <div>
+                            <h2 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                              Lead Locations Map
+                            </h2>
+                            <p className="text-[10px] text-slate-400">
+                              {processedLeads.length} localized prospect markers
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Interactive Priority Filter Pills */}
+                        <div className={`inline-flex items-center rounded-lg p-0.5 border self-start sm:self-auto ${
+                          isLight ? "bg-slate-50 border-slate-200" : "bg-slate-900/80 border-slate-800"
+                        }`}>
+                          <button
+                            onClick={() => setOverviewMapFilter("ALL")}
+                            className={`px-2 py-0.5 text-[10px] font-semibold rounded-md transition-all cursor-pointer ${
+                              overviewMapFilter === "ALL"
+                                ? isLight ? "bg-white text-indigo-600 shadow-xs font-bold" : "bg-indigo-600 text-white shadow-xs font-bold"
+                                : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-white"
+                            }`}
+                          >
+                            All ({processedLeads.length})
+                          </button>
+                          <button
+                            onClick={() => setOverviewMapFilter("HOT")}
+                            className={`px-2 py-0.5 text-[10px] font-semibold rounded-md transition-all cursor-pointer ${
+                              overviewMapFilter === "HOT"
+                                ? "bg-rose-500 text-white shadow-xs font-bold"
+                                : "text-rose-400 hover:text-rose-300"
+                            }`}
+                          >
+                            🔥 Hot ({hotLeads})
+                          </button>
+                          <button
+                            onClick={() => setOverviewMapFilter("WARM")}
+                            className={`px-2 py-0.5 text-[10px] font-semibold rounded-md transition-all cursor-pointer ${
+                              overviewMapFilter === "WARM"
+                                ? "bg-amber-500 text-white shadow-xs font-bold"
+                                : "text-amber-400 hover:text-amber-300"
+                            }`}
+                          >
+                            ⚡ Warm ({warmLeads})
+                          </button>
+                          <button
+                            onClick={() => setOverviewMapFilter("COLD")}
+                            className={`px-2 py-0.5 text-[10px] font-semibold rounded-md transition-all cursor-pointer ${
+                              overviewMapFilter === "COLD"
+                                ? isLight ? "bg-slate-700 text-white shadow-xs font-bold" : "bg-slate-600 text-white shadow-xs font-bold"
+                                : "text-slate-400 hover:text-slate-200"
+                            }`}
+                          >
+                            ❄️ Cold ({coldLeads})
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                  <div className="mt-4 flex items-baseline gap-1.5">
-                    <span className={`text-3xl font-black tracking-tight ${failedLeads.length > 0 ? "text-amber-500" : "text-emerald-500"}`}>
-                      {failedLeads.length}
-                    </span>
-                    <span className={`text-xs font-semibold ${failedLeads.length > 0 ? "text-amber-400" : "text-emerald-400"}`}>pending</span>
-                  </div>
-                  <div className="mt-2">
-                    {failedLeads.length > 0 ? (
-                      <button 
-                        onClick={handleRetryFailed}
-                        disabled={isRetryingFailed}
-                        className="text-[10px] text-amber-400 hover:text-amber-300 underline cursor-pointer border-0 bg-transparent p-0 block font-semibold"
-                      >
-                        {isRetryingFailed ? "Syncing..." : "Sync failed webhook deliveries"}
-                      </button>
+
+                    {/* Leaflet Map Box */}
+                    {processedLeads.length === 0 ? (
+                      <div className={`flex-grow flex flex-col items-center justify-center border border-dashed ${
+                        isLight ? "border-slate-200 bg-slate-50/50" : "border-[#1e293b] bg-slate-950/20"
+                      } rounded-xl py-10 text-center`}>
+                        <div className="p-3 rounded-xl bg-indigo-500/10 text-indigo-400 mb-2 animate-pulse">
+                          <Compass className="h-6 w-6" />
+                        </div>
+                        <h4 className={`text-xs font-bold ${isLight ? "text-slate-800" : "text-white"}`}>No geo-targeted leads found</h4>
+                        <p className="text-[11px] text-slate-400 max-w-sm mt-0.5">
+                          Drop a search pin in the Lead Finder tab to automatically extract businesses from Google Maps.
+                        </p>
+                        <button
+                          onClick={() => navigateToTab("finder")}
+                          className="mt-3 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer shadow-xs btn-interactive"
+                        >
+                          Open Lead Finder
+                        </button>
+                      </div>
                     ) : (
-                      <span className="text-[10px] text-slate-500 font-medium">Google Sheet is synchronized</span>
+                      <div className="relative">
+                        <div id="overview-map" className={`w-full h-[280px] rounded-xl overflow-hidden border ${
+                          isLight ? "border-slate-200 shadow-inner" : "border-[#1e293b] shadow-xl"
+                        } z-0`}></div>
+                      </div>
+                    )}
+
+                    {/* Map Legend Footer */}
+                    <div className={`mt-3 pt-2.5 border-t flex flex-wrap items-center justify-between gap-2.5 text-[10px] ${
+                      isLight ? "border-slate-100 text-slate-500" : "border-[#1e293b]/60 text-slate-400"
+                    }`}>
+                      <div className="flex items-center gap-3.5 flex-wrap">
+                        <span className="flex items-center gap-1 font-medium">
+                          <span className="h-2 w-2 rounded-full bg-rose-500 shadow-xs"></span>
+                          <span>Hot: Urgent Need / No Site</span>
+                        </span>
+                        <span className="flex items-center gap-1 font-medium">
+                          <span className="h-2 w-2 rounded-full bg-amber-500 shadow-xs"></span>
+                          <span>Warm: Moderate Gaps</span>
+                        </span>
+                        <span className="flex items-center gap-1 font-medium">
+                          <span className="h-2 w-2 rounded-full bg-slate-500 shadow-xs"></span>
+                          <span>Cold: Fully Established</span>
+                        </span>
+                      </div>
+                      <span className="text-[9.5px] text-indigo-400 font-medium italic">
+                        💡 Click any marker to view company profile & score
+                      </span>
+                    </div>
+
+                  </div>
+
+                  {/* Right Column: Visual Quality & Health Matrices */}
+                  <div className="lg:col-span-4 space-y-4">
+                    
+                    {/* Card 1: Priority Breakdown */}
+                    <div className={`${
+                      isLight ? "bg-white border-slate-200/80 shadow-xs" : "bg-[#090d16] border-[#1e293b] shadow-lg"
+                    } border rounded-xl p-4`}>
+                      <div className={`flex items-center justify-between pb-2.5 border-b mb-3.5 ${
+                        isLight ? "border-slate-100" : "border-[#1e293b]/70"
+                      }`}>
+                        <div className="flex items-center gap-1.5">
+                          <BarChart3 className="h-3.5 w-3.5 text-indigo-400" />
+                          <h3 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                            Priority Breakdown
+                          </h3>
+                        </div>
+                        <span className="text-[9.5px] font-bold text-indigo-400 px-1.5 py-0.2 rounded-full bg-indigo-500/10 border border-indigo-500/20">
+                          Total: {totalProcessed}
+                        </span>
+                      </div>
+
+                      {/* Visual Stacked Multi-Segment Bar */}
+                      <div className="space-y-3">
+                        <div className="h-2 w-full rounded-full overflow-hidden flex bg-slate-800/40 p-0.5 border border-slate-700/40">
+                          <div 
+                            className="h-full bg-rose-500 rounded-l-full transition-all duration-700" 
+                            style={{ width: `${hotPercentage}%` }}
+                            title={`Hot: ${hotLeads} (${hotPercentage}%)`}
+                          />
+                          <div 
+                            className="h-full bg-amber-500 transition-all duration-700" 
+                            style={{ width: `${warmPercentage}%` }}
+                            title={`Warm: ${warmLeads} (${warmPercentage}%)`}
+                          />
+                          <div 
+                            className="h-full bg-slate-500 rounded-r-full transition-all duration-700" 
+                            style={{ width: `${coldPercentage}%` }}
+                            title={`Cold: ${coldLeads} (${coldPercentage}%)`}
+                          />
+                        </div>
+
+                        {/* Detailed Rows */}
+                        <div className="space-y-2 pt-1">
+                          {/* Hot Row */}
+                          <div 
+                            onClick={() => { setCrmPriorityFilter("HOT"); navigateToTab("leads"); }}
+                            className="p-2 rounded-lg border border-rose-500/15 bg-rose-500/5 hover:bg-rose-500/10 cursor-pointer transition-all flex items-center justify-between"
+                          >
+                            <div className="flex items-center gap-1.5">
+                              <span className="h-1.5 w-1.5 rounded-full bg-rose-500 animate-pulse" />
+                              <span className="text-[11px] font-bold text-rose-400">HOT Priority</span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-black tabular-nums text-white">{hotLeads}</span>
+                              <span className="text-[9.5px] text-slate-400">({hotPercentage}%)</span>
+                            </div>
+                          </div>
+
+                          {/* Warm Row */}
+                          <div 
+                            onClick={() => { setCrmPriorityFilter("WARM"); navigateToTab("leads"); }}
+                            className="p-2 rounded-lg border border-amber-500/15 bg-amber-500/5 hover:bg-amber-500/10 cursor-pointer transition-all flex items-center justify-between"
+                          >
+                            <div className="flex items-center gap-1.5">
+                              <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                              <span className="text-[11px] font-bold text-amber-400">WARM Priority</span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-black tabular-nums text-white">{warmLeads}</span>
+                              <span className="text-[9.5px] text-slate-400">({warmPercentage}%)</span>
+                            </div>
+                          </div>
+
+                          {/* Cold Row */}
+                          <div 
+                            onClick={() => { setCrmPriorityFilter("COLD"); navigateToTab("leads"); }}
+                            className="p-2 rounded-lg border border-slate-500/15 bg-slate-500/5 hover:bg-slate-500/10 cursor-pointer transition-all flex items-center justify-between"
+                          >
+                            <div className="flex items-center gap-1.5">
+                              <span className="h-1.5 w-1.5 rounded-full bg-slate-400" />
+                              <span className="text-[11px] font-bold text-slate-400">COLD Priority</span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-black tabular-nums text-white">{coldLeads}</span>
+                              <span className="text-[9.5px] text-slate-400">({coldPercentage}%)</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Card 2: Digital Presence Health Matrix */}
+                    <div className={`${
+                      isLight ? "bg-white border-slate-200/80 shadow-xs" : "bg-[#090d16] border-[#1e293b] shadow-lg"
+                    } border rounded-xl p-4`}>
+                      <div className={`flex items-center justify-between pb-2.5 border-b mb-3 ${
+                        isLight ? "border-slate-100" : "border-[#1e293b]/70"
+                      }`}>
+                        <div className="flex items-center gap-1.5">
+                          <Activity className="h-3.5 w-3.5 text-indigo-400" />
+                          <h3 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                            Digital Gap Matrix
+                          </h3>
+                        </div>
+                        <span className="text-[9.5px] text-slate-400 font-mono">0–200 Index</span>
+                      </div>
+
+                      <div className="space-y-2.5">
+                        {/* 0-50: Critical Gaps */}
+                        <div>
+                          <div className="flex justify-between text-[10.5px] mb-1">
+                            <span className="font-semibold text-rose-400 flex items-center gap-1.5">
+                              <span>0–50</span>
+                              <span className="text-[8.5px] px-1.5 py-0.2 rounded bg-rose-500/10 text-rose-400">Prime Targets</span>
+                            </span>
+                            <span className="font-bold tabular-nums text-white">{scorePoor} leads</span>
+                          </div>
+                          <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                            <div 
+                              className="h-full bg-rose-500 transition-all duration-700 rounded-full" 
+                              style={{ width: `${maxScoreCount > 0 ? (scorePoor / maxScoreCount) * 100 : 0}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* 51-100: Needs Work */}
+                        <div>
+                          <div className="flex justify-between text-[10.5px] mb-1">
+                            <span className="font-semibold text-amber-400 flex items-center gap-1.5">
+                              <span>51–100</span>
+                              <span className="text-[8.5px] px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-400">Needs Work</span>
+                            </span>
+                            <span className="font-bold tabular-nums text-white">{scoreNeedsWork} leads</span>
+                          </div>
+                          <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                            <div 
+                              className="h-full bg-amber-500 transition-all duration-700 rounded-full" 
+                              style={{ width: `${maxScoreCount > 0 ? (scoreNeedsWork / maxScoreCount) * 100 : 0}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* 101-150: Moderate */}
+                        <div>
+                          <div className="flex justify-between text-[10.5px] mb-1">
+                            <span className="font-semibold text-indigo-400 flex items-center gap-1.5">
+                              <span>101–150</span>
+                              <span className="text-[8.5px] px-1.5 py-0.2 rounded bg-indigo-500/10 text-indigo-400">Moderate</span>
+                            </span>
+                            <span className="font-bold tabular-nums text-white">{scoreGood} leads</span>
+                          </div>
+                          <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                            <div 
+                              className="h-full bg-indigo-500 transition-all duration-700 rounded-full" 
+                              style={{ width: `${maxScoreCount > 0 ? (scoreGood / maxScoreCount) * 100 : 0}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* 151-200: Established */}
+                        <div>
+                          <div className="flex justify-between text-[10.5px] mb-1">
+                            <span className="font-semibold text-emerald-400 flex items-center gap-1.5">
+                              <span>151–200</span>
+                              <span className="text-[8.5px] px-1.5 py-0.2 rounded bg-emerald-500/10 text-emerald-400">Established</span>
+                            </span>
+                            <span className="font-bold tabular-nums text-white">{scoreExcellent} leads</span>
+                          </div>
+                          <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                            <div 
+                              className="h-full bg-emerald-500 transition-all duration-700 rounded-full" 
+                              style={{ width: `${maxScoreCount > 0 ? (scoreExcellent / maxScoreCount) * 100 : 0}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                  </div>
+
+                </div>
+
+                {/* ── 3-Step Interactive Growth Flow / Pipeline Banner ── */}
+                <div className={`p-4 border rounded-xl ${
+                  isLight ? "bg-white border-slate-200/80 shadow-xs" : "bg-[#090d16] border-[#1e293b] shadow-lg"
+                }`}>
+                  <div className="flex items-center justify-between pb-3 border-b border-slate-700/20 mb-3.5">
+                    <div>
+                      <h3 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                        Your 3-Step Client Acquisition Engine
+                      </h3>
+                      <p className="text-[11px] text-slate-400">
+                        Follow the automated workflow to generate verified paying clients.
+                      </p>
+                    </div>
+                    <span className="text-[10px] font-bold text-indigo-400 flex items-center gap-1">
+                      Ready to Scale <ArrowRight className="h-3 w-3" />
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    
+                    {/* Step 1 */}
+                    <div 
+                      onClick={() => navigateToTab("finder")}
+                      className={`p-3.5 rounded-xl border transition-all cursor-pointer hover:-translate-y-0.5 ${
+                        isLight ? "bg-slate-50 border-slate-200 hover:border-indigo-300" : "bg-slate-900/60 border-slate-800 hover:border-indigo-500/40"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="h-6 w-6 rounded-lg bg-indigo-600/10 text-indigo-400 font-bold text-xs flex items-center justify-center border border-indigo-500/20">
+                          1
+                        </span>
+                        <MapPin className="h-3.5 w-3.5 text-indigo-400" />
+                      </div>
+                      <h4 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                        Locate & Extract
+                      </h4>
+                      <p className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">
+                        Search any target locality for high-intent business niches on Google Maps.
+                      </p>
+                      <div className="mt-2 text-[10px] font-bold text-indigo-400 flex items-center gap-1">
+                        Open Lead Finder <ArrowRight className="h-2.5 w-2.5" />
+                      </div>
+                    </div>
+
+                    {/* Step 2 */}
+                    <div 
+                      onClick={() => navigateToTab("leads")}
+                      className={`p-3.5 rounded-xl border transition-all cursor-pointer hover:-translate-y-0.5 ${
+                        isLight ? "bg-slate-50 border-slate-200 hover:border-indigo-300" : "bg-slate-900/60 border-slate-800 hover:border-indigo-500/40"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="h-6 w-6 rounded-lg bg-violet-600/10 text-violet-400 font-bold text-xs flex items-center justify-center border border-violet-500/20">
+                          2
+                        </span>
+                        <Database className="h-3.5 w-3.5 text-violet-400" />
+                      </div>
+                      <h4 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                        Score & Segment
+                      </h4>
+                      <p className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">
+                        Filter by AI score, website existence, and missing pixels to find responsive leads.
+                      </p>
+                      <div className="mt-2 text-[10px] font-bold text-violet-400 flex items-center gap-1">
+                        Review CRM Leads <ArrowRight className="h-2.5 w-2.5" />
+                      </div>
+                    </div>
+
+                    {/* Step 3 */}
+                    <div 
+                      onClick={() => navigateToTab("campaigns")}
+                      className={`p-3.5 rounded-xl border transition-all cursor-pointer hover:-translate-y-0.5 ${
+                        isLight ? "bg-slate-50 border-slate-200 hover:border-indigo-300" : "bg-slate-900/60 border-slate-800 hover:border-indigo-500/40"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="h-6 w-6 rounded-lg bg-emerald-600/10 text-emerald-400 font-bold text-xs flex items-center justify-center border border-emerald-500/20">
+                          3
+                        </span>
+                        <Send className="h-3.5 w-3.5 text-emerald-400" />
+                      </div>
+                      <h4 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                        Multichannel Outreach
+                      </h4>
+                      <p className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">
+                        Deploy personalized Email & WhatsApp sequences directly to verified decision makers.
+                      </p>
+                      <div className="mt-2 text-[10px] font-bold text-emerald-400 flex items-center gap-1">
+                        Launch Outreach <ArrowRight className="h-2.5 w-2.5" />
+                      </div>
+                    </div>
+
+                  </div>
+                </div>
+
+              </div>
+            );
+          })()}
+
+          {/* TAB 2: GEO LEAD FINDER */}
+          {activeTab === "finder" && (() => {
+            const NICHE_PRESETS = [
+              { label: "Dental Clinics", icon: "🦷" },
+              { label: "Ayurvedic & Wellness", icon: "🌿" },
+              { label: "Digital Agencies", icon: "💻" },
+              { label: "Legal & Law Firms", icon: "⚖️" },
+              { label: "Real Estate & Builders", icon: "🏡" },
+              { label: "Fine Dining & Cafes", icon: "🍽️" },
+            ];
+            const RADIUS_PRESETS = [3, 5, 10, 15, 25, 50];
+
+            return (
+              <div className="space-y-6 animate-fadeIn pb-8">
+                
+                {/* ── Top Discovery Header Banner ── */}
+                <div className={`p-3.5 sm:p-4 border rounded-xl relative overflow-hidden flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                  isLight ? "bg-white border-slate-200/80 shadow-xs" : "bg-[#090d16] border-[#1e293b] shadow-lg"
+                }`}>
+                  <div className="flex items-center gap-2.5">
+                    <div className="p-2 rounded-lg bg-indigo-600/10 text-indigo-400 border border-indigo-500/20 shadow-inner">
+                      <Compass className="h-4 w-4" />
+                    </div>
+                    <div>
+                      <h1 className={`text-sm sm:text-base font-bold tracking-tight ${isLight ? "text-slate-900" : "text-white"}`}>
+                        Geospatial Maps Lead Finder
+                      </h1>
+                      <p className="text-[11px] text-slate-400">
+                        Scan Google Maps for local businesses, extract verified contact info, and evaluate digital gaps.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 self-start sm:self-auto">
+                    {isRunning ? (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20">
+                        <span className="relative flex h-1.5 w-1.5">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-rose-500"></span>
+                        </span>
+                        Discovery In Progress
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                        Engine Ready
+                      </span>
                     )}
                   </div>
                 </div>
-              </div>
 
-              {/* Map & Charts Grid */}
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-                
-                {/* Leads Interactive Map */}
-                <div className={`md:col-span-8 ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"} border rounded-2xl p-6 flex flex-col justify-between min-h-[450px]`}>
-                  <div className={`flex items-center justify-between pb-3 mb-4 border-b ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
-                    <div className="flex items-center gap-2">
-                      <Map className="h-4.5 w-4.5 text-indigo-500" />
-                      <h3 className={`text-sm font-semibold ${isLight ? "text-slate-800" : "text-white"}`}>Lead Locations Map</h3>
-                    </div>
-                    <span className="text-xs text-slate-400">Colored by priority level</span>
-                  </div>
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
                   
-                  {processedLeads.length === 0 ? (
-                    <div className={`flex-grow flex flex-col items-center justify-center border border-dashed ${isLight ? "border-slate-200 bg-slate-50" : "border-[#1e293b] bg-slate-950/20"} rounded-xl py-20 text-slate-500`}>
-                      <Map className="h-10 w-10 mb-3 text-slate-400 animate-pulse" />
-                      <p className="text-xs">No mapped leads available.</p>
-                      <p className="text-[10px] text-slate-400 mt-1 font-sans">Run a localized scan in the "Lead Finder" tab.</p>
-                    </div>
-                  ) : (
-                    <div id="overview-map" className={`flex-grow rounded-xl overflow-hidden border ${isLight ? "border-slate-200" : "border-[#1e293b]"} z-0 h-[380px]`}></div>
-                  )}
-                </div>
-
-                {/* SVG Visual Statistics */}
-                <div className="md:col-span-4 space-y-6">
-                  
-                  {/* Lead Priority Distribution */}
-                  <div className={`${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"} border rounded-2xl p-6 flex flex-col justify-between h-fit`}>
-                    <div className={`pb-3 border-b ${isLight ? "border-slate-200" : "border-[#1e293b]/60"} mb-5`}>
-                      <h3 className={`text-sm font-semibold ${isLight ? "text-slate-800" : "text-white"}`}>Priority Distribution</h3>
-                    </div>
+                  {/* Left Column: Interactive Area Selector Map */}
+                  <div className={`lg:col-span-7 ${
+                    isLight ? "bg-white border-slate-200/80 shadow-xs" : "bg-[#090d16] border-[#1e293b] shadow-lg"
+                  } border rounded-xl p-4 flex flex-col justify-between`}>
                     
-                    <div className="space-y-4">
-                      {/* HOT bar */}
-                      <div>
-                        <div className="flex justify-between text-[10px] mb-1.5">
-                          <span className="text-rose-400 font-bold flex items-center gap-1.5">
-                            <span className="h-2 w-2 rounded-full bg-rose-500"></span> HOT ({hotLeads})
-                          </span>
-                          <span className="text-slate-400">
-                            {totalProcessed > 0 ? ((hotLeads / totalProcessed) * 100).toFixed(0) : 0}%
-                          </span>
+                    <div>
+                      <div className={`flex items-center justify-between pb-2.5 mb-3 border-b ${
+                        isLight ? "border-slate-100" : "border-[#1e293b]/70"
+                      }`}>
+                        <div className="flex items-center gap-1.5">
+                          <MapPin className="h-4 w-4 text-indigo-400" />
+                          <h2 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                            Target Locality & Radius
+                          </h2>
                         </div>
-                        <div className={`h-2 w-full rounded-full overflow-hidden border ${isLight ? "bg-slate-100 border-slate-200" : "bg-slate-900 border-slate-800"}`}>
-                          <div 
-                            className="h-full bg-rose-500 transition-all duration-1000" 
-                            style={{ width: `${totalProcessed > 0 ? (hotLeads / totalProcessed) * 100 : 0}%` }}
-                          ></div>
-                        </div>
+                        <span className="text-[10px] text-slate-400 hidden sm:inline">
+                          Click map or search below to drop center
+                        </span>
                       </div>
 
-                      {/* WARM bar */}
-                      <div>
-                        <div className="flex justify-between text-[10px] mb-1.5">
-                          <span className="text-amber-500 font-bold flex items-center gap-1.5">
-                            <span className="h-2 w-2 rounded-full bg-amber-500"></span> WARM ({warmLeads})
-                          </span>
-                          <span className="text-slate-400">
-                            {totalProcessed > 0 ? ((warmLeads / totalProcessed) * 100).toFixed(0) : 0}%
-                          </span>
+                      {/* Geocoding Search Form */}
+                      <form onSubmit={handleSearchAreaGeocode} className="flex gap-2 mb-3">
+                        <div className="relative flex-grow">
+                          <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-400" />
+                          <input 
+                            type="text" 
+                            placeholder="Type locality (e.g. Gangapur Road, Nashik or Koregaon Park, Pune)"
+                            value={mapSearchText}
+                            onChange={(e) => setMapSearchText(e.target.value)}
+                            className={`w-full text-xs border rounded-lg pl-8 pr-3 py-1.5 transition-all focus:outline-none focus:ring-2 focus:ring-indigo-500/30 ${
+                              isLight 
+                                ? "bg-slate-50 text-slate-900 border-slate-200 focus:bg-white" 
+                                : "bg-slate-950/60 text-white border-[#1e293b] focus:border-indigo-500"
+                            }`}
+                          />
                         </div>
-                        <div className={`h-2 w-full rounded-full overflow-hidden border ${isLight ? "bg-slate-100 border-slate-200" : "bg-slate-900 border-slate-800"}`}>
-                          <div 
-                            className="h-full bg-amber-505 bg-amber-500 transition-all duration-1000" 
-                            style={{ width: `${totalProcessed > 0 ? (warmLeads / totalProcessed) * 100 : 0}%` }}
-                          ></div>
-                        </div>
-                      </div>
-
-                      {/* COLD bar */}
-                      <div>
-                        <div className="flex justify-between text-[10px] mb-1.5">
-                          <span className="text-slate-400 font-bold flex items-center gap-1.5">
-                            <span className="h-2 w-2 rounded-full bg-slate-400"></span> COLD ({coldLeads})
-                          </span>
-                          <span className="text-slate-400">
-                            {totalProcessed > 0 ? ((coldLeads / totalProcessed) * 100).toFixed(0) : 0}%
-                          </span>
-                        </div>
-                        <div className={`h-2 w-full rounded-full overflow-hidden border ${isLight ? "bg-slate-100 border-slate-200" : "bg-slate-900 border-slate-800"}`}>
-                          <div 
-                            className="h-full bg-slate-400 transition-all duration-1000" 
-                            style={{ width: `${totalProcessed > 0 ? (coldLeads / totalProcessed) * 100 : 0}%` }}
-                          ></div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Digital Presence Score Distribution */}
-                  <div className={`border rounded-2xl p-6 ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}>
-                    <div className={`pb-3 border-b ${isLight ? "border-slate-200" : "border-[#1e293b]/60"} mb-5`}>
-                      <h3 className={`text-sm font-semibold ${isLight ? "text-slate-800" : "text-white"}`}>Score Distribution</h3>
+                        <button
+                          type="submit"
+                          disabled={isGeocoding || isRunning}
+                          className="btn-interactive px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer flex items-center gap-1.5 transition-all shadow-xs disabled:opacity-50"
+                        >
+                          {isGeocoding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MapPin className="h-3.5 w-3.5" />}
+                          <span>Locate</span>
+                        </button>
+                      </form>
                     </div>
 
-                    <div className={`flex items-end justify-between h-[180px] pt-4 text-[9px] text-slate-400 border-b ${isLight ? "border-slate-200" : "border-slate-800"} pb-2`}>
-                      {/* Bar 1: Poor */}
-                      <div className="flex flex-col items-center gap-2 w-1/4">
-                        <span className={`font-bold ${isLight ? "text-slate-600" : "text-slate-300"}`}>{scorePoor}</span>
-                        <div className={`w-8 border rounded-t-md relative h-[120px] flex items-end ${isLight ? "bg-slate-50 border-slate-200" : "bg-slate-900 border-slate-800"}`}>
-                          <div 
-                            className="w-full bg-[#64748b] rounded-t-sm hover:brightness-110 transition-all animate-grow-height duration-500"
-                            style={{ height: `${(scorePoor / maxScoreCount) * 100}%` }}
-                          ></div>
-                        </div>
-                        <span className="text-[8px] truncate max-w-full">0-50</span>
-                      </div>
-
-                      {/* Bar 2: Needs Work */}
-                      <div className="flex flex-col items-center gap-2 w-1/4">
-                        <span className={`font-bold ${isLight ? "text-slate-600" : "text-slate-300"}`}>{scoreNeedsWork}</span>
-                        <div className={`w-8 border rounded-t-md relative h-[120px] flex items-end ${isLight ? "bg-slate-50 border-slate-200" : "bg-slate-900 border-slate-800"}`}>
-                          <div 
-                            className="w-full bg-amber-500/70 rounded-t-sm hover:brightness-110 transition-all animate-grow-height duration-500"
-                            style={{ height: `${(scoreNeedsWork / maxScoreCount) * 100}%` }}
-                          ></div>
-                        </div>
-                        <span className="text-[8px] truncate max-w-full">51-100</span>
-                      </div>
-
-                      {/* Bar 3: Good */}
-                      <div className="flex flex-col items-center gap-2 w-1/4">
-                        <span className={`font-bold ${isLight ? "text-slate-600" : "text-slate-300"}`}>{scoreGood}</span>
-                        <div className={`w-8 border rounded-t-md relative h-[120px] flex items-end ${isLight ? "bg-slate-50 border-slate-200" : "bg-slate-900 border-slate-800"}`}>
-                          <div 
-                            className="w-full bg-indigo-500/70 rounded-t-sm hover:brightness-110 transition-all animate-grow-height duration-500"
-                            style={{ height: `${(scoreGood / maxScoreCount) * 100}%` }}
-                          ></div>
-                        </div>
-                        <span className="text-[8px] truncate max-w-full">101-150</span>
-                      </div>
-
-                      {/* Bar 4: Excellent */}
-                      <div className="flex flex-col items-center gap-2 w-1/4">
-                        <span className={`font-bold ${isLight ? "text-slate-600" : "text-slate-300"}`}>{scoreExcellent}</span>
-                        <div className={`w-8 border rounded-t-md relative h-[120px] flex items-end ${isLight ? "bg-slate-50 border-slate-200" : "bg-slate-900 border-slate-800"}`}>
-                          <div 
-                            className="w-full bg-emerald-500/85 rounded-t-sm hover:brightness-110 transition-all animate-grow-height duration-500"
-                            style={{ height: `${(scoreExcellent / maxScoreCount) * 100}%` }}
-                          ></div>
-                        </div>
-                        <span className="text-[8px] truncate max-w-full">151-200</span>
-                      </div>
-                    </div>
-                    <div className="text-center mt-3 text-[9px] text-slate-500">
-                      Digital Presence Score Ranges
-                    </div>
-                  </div>
-
-                </div>
-
-              </div>
-
-            </div>
-          )}
-
-          {/* TAB 2: GEO LEAD FINDER */}
-          {activeTab === "finder" && (
-            <div className="space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-                
-                {/* Left Area selector Map */}
-                <div className={`md:col-span-7 ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"} border rounded-2xl p-6 flex flex-col justify-between min-h-[460px]`}>
-                  <div>
-                    <div className="flex items-center justify-between pb-3 mb-4 border-b border-[#1e293b]/60">
-                      <div className="flex items-center gap-2">
-                        <MapPin className="h-4.5 w-4.5 text-indigo-400" />
-                        <h3 className={`text-sm font-semibold ${isLight ? "text-slate-800" : "text-white"}`}>Select Target Locality</h3>
-                      </div>
-                      <span className="text-xs text-slate-400">Geocode or click map to drop search center</span>
+                    {/* Leaflet Map Box */}
+                    <div className="relative">
+                      <div id="finder-map" className={`w-full h-[240px] rounded-xl overflow-hidden border ${
+                        isLight ? "border-slate-200" : "border-[#1e293b]"
+                      } z-0 shadow-inner`}></div>
                     </div>
 
-                    {/* Geocoding Input Bar */}
-                    <form onSubmit={handleSearchAreaGeocode} className="flex gap-2 mb-4">
-                      <div className="relative flex-grow">
-                        <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
-                        <input 
-                          type="text" 
-                          placeholder="Search neighborhood (e.g. Gangapur Road, Nashik)"
-                          value={mapSearchText}
-                          onChange={(e) => setMapSearchText(e.target.value)}
-                          className={`w-full text-xs border rounded-lg pl-9 pr-3 py-2 focus:outline-none focus:border-indigo-500 ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}
-                        />
+                    {/* Interactive Coordinates Bar */}
+                    <div className={`mt-2.5 text-[10px] flex items-center justify-between p-2 rounded-lg border ${
+                      isLight ? "bg-slate-50 border-slate-200 text-slate-600" : "bg-slate-950/50 border-slate-900 text-slate-400"
+                    }`}>
+                      <div className="flex items-center gap-1.5">
+                        <MapPin className="h-3 w-3 text-indigo-400" />
+                        <span className="font-medium">Target Coordinates:</span>
+                        <span className="font-mono font-bold text-indigo-400">
+                          {lat ? lat.toFixed(5) : "19.99750"}, {lng ? lng.toFixed(5) : "73.78980"}
+                        </span>
                       </div>
                       <button
-                        type="submit"
-                        disabled={isGeocoding || isRunning}
-                        className="px-4 py-2 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 border border-indigo-500/25 text-xs font-bold rounded-lg cursor-pointer flex items-center gap-1.5 transition-all"
+                        type="button"
+                        onClick={() => {
+                          const coordText = `${lat?.toFixed(6) || 0}, ${lng?.toFixed(6) || 0}`;
+                          copyToClipboard(coordText, "coords");
+                        }}
+                        className="btn-interactive flex items-center gap-1 text-[9.5px] font-semibold text-slate-400 hover:text-white cursor-pointer"
                       >
-                        {isGeocoding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Center Map"}
+                        {copiedField === "coords" ? (
+                          <span className="text-emerald-400 font-bold flex items-center gap-1">
+                            <Check className="h-2.5 w-2.5" /> Copied
+                          </span>
+                        ) : (
+                          <span className="flex items-center gap-1">
+                            <Copy className="h-2.5 w-2.5" /> Copy
+                          </span>
+                        )}
                       </button>
-                    </form>
-                  </div>
-
-                  {/* Leaflet instance element */}
-                  <div id="finder-map" className="flex-grow rounded-xl overflow-hidden border border-[#1e293b] z-0 h-[280px]"></div>
-
-                  {/* Lat Lng display */}
-                  <div className="mt-3 text-[10px] text-slate-400 flex items-center justify-between bg-slate-950/40 p-2.5 rounded-lg border border-slate-900">
-                    <span className="flex items-center gap-1"><MapPin className="h-3.5 w-3.5 text-indigo-400" /> Coordinates:</span>
-                    <span>Lat: {lat?.toFixed(6) || "N/A"} | Lng: {lng?.toFixed(6) || "N/A"}</span>
-                  </div>
-                </div>
-
-                {/* Right Form settings parameters */}
-                <div className={`md:col-span-5 ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"} border rounded-2xl p-6 flex flex-col justify-between`}>
-                  <div>
-                    <div className="flex items-center gap-2 pb-3 mb-4 border-b border-[#1e293b]/60">
-                      <Sliders className="h-4.5 w-4.5 text-indigo-400" />
-                      <h3 className={`text-sm font-semibold ${isLight ? "text-slate-800" : "text-white"}`}>Scan Parameters</h3>
                     </div>
 
-                    <form onSubmit={handleSaveConfig} className="space-y-4">
-                      <div>
-                        <label className="block text-[9px] font-bold text-slate-400 tracking-wider uppercase mb-1">Business Type</label>
-                        <input 
-                          type="text" 
-                          value={businessType}
-                          onChange={(e) => setBusinessType(e.target.value)}
-                          placeholder="e.g. Dental Clinic"
-                          disabled={isRunning || isSavingConfig}
-                          className={`w-full text-xs border rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500 disabled:opacity-50 ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}
-                          required
-                        />
+                  </div>
+
+                  {/* Right Column: Scan Parameters & Niche Selector */}
+                  <div className={`lg:col-span-5 ${
+                    isLight ? "bg-white border-slate-200/80 shadow-xs" : "bg-[#090d16] border-[#1e293b] shadow-lg"
+                  } border rounded-xl p-4 flex flex-col justify-between`}>
+                    
+                    <div>
+                      <div className={`flex items-center gap-1.5 pb-2.5 mb-3 border-b ${
+                        isLight ? "border-slate-100" : "border-[#1e293b]/70"
+                      }`}>
+                        <Sliders className="h-4 w-4 text-indigo-400" />
+                        <h2 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                          Discovery Parameters
+                        </h2>
                       </div>
 
-                      <div>
-                        <label className="block text-[9px] font-bold text-slate-400 tracking-wider uppercase mb-1">Area Locality Name</label>
-                        <input 
-                          type="text" 
-                          value={location}
-                          onChange={(e) => setLocation(e.target.value)}
-                          onBlur={async () => {
-                            if (!location.trim()) return;
-                            try {
-                              const res = await fetch(`/api/geocode/search?q=${encodeURIComponent(location)}`);
-                              if (res.ok) {
-                                const data = await res.json();
-                                if (data && data.length > 0) {
-                                  const item = data[0];
-                                  const newLat = parseFloat(item.lat);
-                                  const newLng = parseFloat(item.lon);
-                                  setLat(newLat);
-                                  setLng(newLng);
-                                  if (finderMapInstance.current) {
-                                    finderMapInstance.current.setView([newLat, newLng], 12);
-                                  }
-                                  if (finderMarker.current) {
-                                    finderMarker.current.setLatLng([newLat, newLng]);
-                                  }
-                                  if (finderCircle.current) {
-                                    finderCircle.current.setLatLng([newLat, newLng]);
-                                  }
-                                }
-                              }
-                            } catch (e) {
-                              console.error("Auto-geocoding error:", e);
-                            }
-                          }}
-                          placeholder="e.g. Gangapur Road, Nashik"
-                          disabled={isRunning || isSavingConfig}
-                          className={`w-full text-xs border rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500 disabled:opacity-50 ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}
-                          required
-                        />
-                      </div>
-
-                      {/* Search Radius Limit (slider + typeable number input) */}
-                      <div>
-                        <div className="flex justify-between text-[9px] font-bold text-slate-400 tracking-wider uppercase mb-1">
-                          <span>Search Radius Limit</span>
-                          <span className="text-indigo-400 text-xs font-black lowercase">{radius}km radius</span>
-                        </div>
-                        <div className="flex items-center gap-3 mb-4">
-                          <input 
-                            type="range" 
-                            min="1"
-                            max="100"
-                            value={radius > 100 ? 100 : radius}
-                            onChange={(e) => setRadius(parseInt(e.target.value) || 5)}
-                            disabled={isRunning || isSavingConfig}
-                            className="flex-grow h-1 bg-slate-900 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                          />
-                          <input 
-                            type="number"
-                            min="1"
-                            max="500"
-                            value={radius}
-                            onChange={(e) => setRadius(parseInt(e.target.value) || 5)}
-                            disabled={isRunning || isSavingConfig}
-                            className={`w-16 text-center text-xs border rounded-lg px-2 py-1 focus:outline-none focus:border-indigo-500 disabled:opacity-50 ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}
-                            title="Type custom radius in km"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-4">
+                      <form onSubmit={handleSaveConfig} className="space-y-3">
+                        
+                        {/* Business Niche Selector */}
                         <div>
-                          <label className="block text-[9px] font-bold text-slate-400 tracking-wider uppercase mb-1">Limit leads</label>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-[9.5px] font-bold text-slate-400 tracking-wider uppercase">
+                              Target Business Niche
+                            </label>
+                            <span className="text-[9.5px] text-indigo-400 font-semibold">1-Click Presets</span>
+                          </div>
+
+                          {/* Quick Niche Chips */}
+                          <div className="flex flex-wrap gap-1 mb-2">
+                            {NICHE_PRESETS.map((preset) => {
+                              const isSelected = businessType.toLowerCase() === preset.label.toLowerCase();
+                              return (
+                                <button
+                                  key={preset.label}
+                                  type="button"
+                                  onClick={() => setBusinessType(preset.label)}
+                                  disabled={isRunning || isSavingConfig}
+                                  className={`btn-interactive text-[9.5px] px-2 py-0.5 rounded-md border transition-all cursor-pointer flex items-center gap-1 ${
+                                    isSelected
+                                      ? "bg-indigo-600 text-white border-indigo-500 font-bold shadow-xs"
+                                      : isLight
+                                        ? "bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200/70"
+                                        : "bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800"
+                                  }`}
+                                >
+                                  <span>{preset.icon}</span>
+                                  <span>{preset.label}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+
                           <input 
-                            type="number" 
-                            min="1"
-                            max="5000"
-                            value={maxResults}
-                            onChange={(e) => setMaxResults(parseInt(e.target.value, 10) || 10)}
+                            type="text" 
+                            value={businessType}
+                            onChange={(e) => setBusinessType(e.target.value)}
+                            placeholder="e.g. Dental Clinic, Marketing Agency"
                             disabled={isRunning || isSavingConfig}
-                            className={`w-full text-xs border rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500 disabled:opacity-50 ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}
+                            className={`w-full text-xs border rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 disabled:opacity-50 transition-all ${
+                              isLight ? "bg-slate-50 text-slate-900 border-slate-200" : "bg-slate-950/60 text-white border-[#1e293b]"
+                            }`}
                             required
                           />
                         </div>
-                        <div className="flex flex-col justify-end gap-1 pb-1">
-                          <label className="flex items-center gap-1.5 text-[10px] text-slate-300 cursor-pointer select-none">
-                            <input 
-                              type="checkbox"
-                              checked={headless}
-                              onChange={(e) => setHeadless(e.target.checked)}
-                              disabled={isRunning || isSavingConfig}
-                              className={`rounded text-indigo-600 focus:ring-indigo-500/20 ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}
-                            />
-                            <span>Headless browser</span>
-                          </label>
-                          <label className="flex items-center gap-1.5 text-[10px] text-slate-300 cursor-pointer select-none">
-                            <input 
-                              type="checkbox"
-                              checked={enableSimulation}
-                              onChange={(e) => setEnableSimulation(e.target.checked)}
-                              disabled={isRunning || isSavingConfig}
-                              className={`rounded text-indigo-600 focus:ring-indigo-500/20 ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}
-                            />
-                            <span>Simulation mode</span>
-                          </label>
-                        </div>
-                      </div>
 
-                      <div className="pt-2 flex gap-2">
+                        {/* Location Name */}
+                        <div>
+                          <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">
+                            Area / Locality Label
+                          </label>
+                          <input 
+                            type="text" 
+                            value={location}
+                            onChange={(e) => setLocation(e.target.value)}
+                            onBlur={async () => {
+                              if (!location.trim()) return;
+                              try {
+                                const res = await fetch(`/api/geocode/search?q=${encodeURIComponent(location)}`);
+                                if (res.ok) {
+                                  const data = await res.json();
+                                  if (data && data.length > 0) {
+                                    const item = data[0];
+                                    const newLat = parseFloat(item.lat);
+                                    const newLng = parseFloat(item.lon);
+                                    setLat(newLat);
+                                    setLng(newLng);
+                                    if (finderMapInstance.current) {
+                                      finderMapInstance.current.setView([newLat, newLng], 12);
+                                    }
+                                    if (finderMarker.current) {
+                                      finderMarker.current.setLatLng([newLat, newLng]);
+                                    }
+                                    if (finderCircle.current) {
+                                      finderCircle.current.setLatLng([newLat, newLng]);
+                                    }
+                                  }
+                                }
+                              } catch (e) {
+                                console.error("Auto-geocoding error:", e);
+                              }
+                            }}
+                            placeholder="e.g. Gangapur Road, Nashik"
+                            disabled={isRunning || isSavingConfig}
+                            className={`w-full text-xs border rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 disabled:opacity-50 transition-all ${
+                              isLight ? "bg-slate-50 text-slate-900 border-slate-200" : "bg-slate-950/60 text-white border-[#1e293b]"
+                            }`}
+                            required
+                          />
+                        </div>
+
+                        {/* Search Radius with Quick Pills */}
+                        <div>
+                          <div className="flex justify-between text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">
+                            <span>Search Radius Limit</span>
+                            <span className="text-indigo-400 font-bold tabular-nums">{radius} km radius</span>
+                          </div>
+
+                          {/* Quick Radius Pills */}
+                          <div className="flex gap-1 mb-1.5">
+                            {RADIUS_PRESETS.map((km) => (
+                              <button
+                                key={km}
+                                type="button"
+                                onClick={() => setRadius(km)}
+                                disabled={isRunning || isSavingConfig}
+                                className={`btn-interactive flex-1 text-[9px] py-0.5 rounded-md border transition-all cursor-pointer font-bold ${
+                                  radius === km
+                                    ? "bg-indigo-600 text-white border-indigo-500 shadow-xs"
+                                    : isLight
+                                      ? "bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200"
+                                      : "bg-slate-900 text-slate-400 border-slate-800 hover:bg-slate-800 hover:text-white"
+                                }`}
+                              >
+                                {km}km
+                              </button>
+                            ))}
+                          </div>
+
+                          <div className="flex items-center gap-2.5">
+                            <input 
+                              type="range" 
+                              min="1"
+                              max="100"
+                              value={radius > 100 ? 100 : radius}
+                              onChange={(e) => setRadius(parseInt(e.target.value) || 5)}
+                              disabled={isRunning || isSavingConfig}
+                              className="flex-grow h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                            />
+                            <input 
+                              type="number"
+                              min="1"
+                              max="500"
+                              value={radius}
+                              onChange={(e) => setRadius(parseInt(e.target.value) || 5)}
+                              disabled={isRunning || isSavingConfig}
+                              className={`w-14 text-center text-xs font-bold border rounded-md px-1.5 py-1 focus:outline-none focus:border-indigo-500 disabled:opacity-50 ${
+                                isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"
+                              }`}
+                              title="Type custom radius in km"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Limit Leads & Options */}
+                        <div className="grid grid-cols-2 gap-2.5 pt-0.5">
+                          <div>
+                            <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">
+                              Max Leads
+                            </label>
+                            <input 
+                              type="number" 
+                              min="1"
+                              max="5000"
+                              value={maxResults}
+                              onChange={(e) => setMaxResults(parseInt(e.target.value, 10) || 10)}
+                              disabled={isRunning || isSavingConfig}
+                              className={`w-full text-xs font-bold border rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-indigo-500 disabled:opacity-50 ${
+                                isLight ? "bg-slate-50 text-slate-900 border-slate-200" : "bg-slate-950/60 text-white border-[#1e293b]"
+                              }`}
+                              required
+                            />
+                          </div>
+
+                          <div className="flex flex-col justify-center gap-1 pt-3">
+                            <label className="flex items-center gap-1.5 text-[10.5px] text-slate-300 cursor-pointer select-none">
+                              <input 
+                                type="checkbox"
+                                checked={headless}
+                                onChange={(e) => setHeadless(e.target.checked)}
+                                disabled={isRunning || isSavingConfig}
+                                className="rounded text-indigo-600 focus:ring-indigo-500/20 h-3 w-3"
+                              />
+                              <span>Headless Mode</span>
+                            </label>
+                            <label className="flex items-center gap-1.5 text-[10.5px] text-slate-300 cursor-pointer select-none">
+                              <input 
+                                type="checkbox"
+                                checked={enableSimulation}
+                                onChange={(e) => setEnableSimulation(e.target.checked)}
+                                disabled={isRunning || isSavingConfig}
+                                className="rounded text-indigo-600 focus:ring-indigo-500/20 h-3 w-3"
+                              />
+                              <span>Simulation Mode</span>
+                            </label>
+                          </div>
+                        </div>
+
                         <button
                           type="submit"
                           disabled={isRunning || isSavingConfig}
-                          className="flex-grow text-xs font-semibold py-2 rounded-lg border border-indigo-500/30 text-indigo-400 bg-indigo-500/5 hover:bg-indigo-500/10 focus:outline-none transition-colors disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer"
+                          className="w-full text-xs font-bold py-1.5 rounded-lg border border-indigo-500/30 text-indigo-400 bg-indigo-500/5 hover:bg-indigo-500/10 focus:outline-none transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer btn-interactive"
                         >
-                          {isSavingConfig ? "Saving..." : configSuccess ? "Config Written ?" : "Save parameters"}
+                          {isSavingConfig ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                          <span>{isSavingConfig ? "Saving..." : configSuccess ? "Parameters Saved ✓" : "Save Configuration"}</span>
                         </button>
-                      </div>
-                    </form>
+                      </form>
+                    </div>
+
+                    {/* Primary Run / Stop Execution Trigger */}
+                    <div className="pt-3 border-t border-slate-700/20 mt-3">
+                      {isRunning ? (
+                        <button
+                          onClick={handleStopScraper}
+                          disabled={isStopping}
+                          className="w-full py-2.5 px-3 rounded-lg font-bold text-xs bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white flex items-center justify-center gap-1.5 shadow-md shadow-rose-500/20 focus:outline-none transition-all disabled:opacity-50 cursor-pointer btn-interactive"
+                        >
+                          {isStopping ? (
+                            <>
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              <span>Halting Scraper...</span>
+                            </>
+                          ) : (
+                            <>
+                              <X className="h-3.5 w-3.5" />
+                              <span>Halt Active Scraper</span>
+                            </>
+                          )}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={handleStartScraper}
+                          disabled={isRunning}
+                          className="w-full py-2.5 px-3 rounded-lg font-bold text-xs bg-gradient-to-r from-indigo-600 via-indigo-500 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white flex items-center justify-center gap-1.5 shadow-md shadow-indigo-500/25 focus:outline-none transition-all disabled:opacity-50 cursor-pointer btn-interactive"
+                        >
+                          <Play className="h-3.5 w-3.5 fill-white" />
+                          <span>Launch Lead Discovery Agent</span>
+                        </button>
+                      )}
+                    </div>
+
                   </div>
 
-                    {isRunning ? (
+                </div>
+
+                {/* ── macOS-Style Execution Console ── */}
+                <div className="bg-[#070b14] border border-[#1e293b] rounded-xl p-3.5 shadow-xl flex flex-col justify-between">
+                  
+                  {/* Console Header with Mac Dots and Terminal Tools */}
+                  <div className="flex flex-wrap items-center justify-between pb-2.5 border-b border-[#1e293b] mb-3 gap-2.5">
+                    <div className="flex items-center gap-2.5">
+                      {/* Window Controls */}
+                      <div className="flex items-center gap-1.5">
+                        <span className="h-2.5 w-2.5 rounded-full bg-rose-500/80 inline-block"></span>
+                        <span className="h-2.5 w-2.5 rounded-full bg-amber-500/80 inline-block"></span>
+                        <span className="h-2.5 w-2.5 rounded-full bg-emerald-500/80 inline-block"></span>
+                      </div>
+                      
+                      <div className="h-3.5 w-px bg-slate-800 mx-0.5"></div>
+
+                      <div className="flex items-center gap-1.5">
+                        <TerminalIcon className="h-3.5 w-3.5 text-indigo-400" />
+                        <h3 className="text-[11px] font-bold font-mono text-slate-200 tracking-wide">
+                          Scraper Engine Stream — bash ~/maps-bot.sh
+                        </h3>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <label className="flex items-center gap-1 text-[10px] text-slate-400 cursor-pointer select-none font-mono">
+                        <input 
+                          type="checkbox"
+                          checked={autoScrollLogs}
+                          onChange={(e) => setAutoScrollLogs(e.target.checked)}
+                          className="rounded text-indigo-500 bg-slate-900 border-slate-700 h-3 w-3"
+                        />
+                        <span>Auto-scroll</span>
+                      </label>
+
                       <button
-                        onClick={handleStopScraper}
-                        disabled={isStopping}
-                        className="w-full py-3 px-4 rounded-xl font-bold text-xs bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center gap-2 shadow-lg shadow-rose-500/10 focus:outline-none transition-all disabled:opacity-50 cursor-pointer"
+                        type="button"
+                        onClick={() => {
+                          copyToClipboard(terminalLogs, "logs");
+                        }}
+                        className="btn-interactive flex items-center gap-1 text-[10px] font-mono font-medium text-slate-400 hover:text-white px-2 py-0.5 rounded-md bg-slate-900 border border-slate-800 cursor-pointer"
                       >
-                        {isStopping ? (
-                          <>
-                            <Loader2 className="h-4.5 w-4.5 animate-spin" />
-                            Stopping Scraper...
-                          </>
+                        {copiedField === "logs" ? (
+                          <span className="text-emerald-400 font-bold flex items-center gap-1">
+                            <Check className="h-2.5 w-2.5" /> Copied
+                          </span>
                         ) : (
-                          <>
-                            <X className="h-4.5 w-4.5" />
-                            Stop Collecting Leads
-                          </>
+                          <span className="flex items-center gap-1">
+                            <Copy className="h-2.5 w-2.5" /> Copy Logs
+                          </span>
                         )}
                       </button>
-                    ) : (
+
                       <button
-                        onClick={handleStartScraper}
-                        disabled={isRunning}
-                        className="w-full py-3 px-4 rounded-xl font-bold text-xs bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/10 focus:outline-none transition-all disabled:opacity-50 cursor-pointer"
+                        type="button"
+                        onClick={() => setTerminalLogs("")}
+                        className="btn-interactive text-[10px] font-mono font-medium text-slate-400 hover:text-rose-400 px-2 py-0.5 rounded-md bg-slate-900 border border-slate-800 cursor-pointer"
                       >
-                        <Play className="h-4.5 w-4.5 fill-white" />
-                        Run NexaLeadAi Agent
+                        Clear
                       </button>
-                    )}
-                </div>
-
-              </div>
-
-              {/* Log Terminal underneath */}
-              <div className="bg-[#090d16] border border-[#1e293b] rounded-2xl p-6 flex flex-col justify-between">
-                <div className="flex items-center justify-between pb-3 border-b border-[#1e293b]/60 mb-4">
-                  <div className="flex items-center gap-2">
-                    <TerminalIcon className="h-4 w-4 text-indigo-400" />
-                    <h3 className="text-sm font-semibold text-white">Execution Logs</h3>
+                    </div>
                   </div>
-                  <label className="flex items-center gap-1.5 text-[10px] text-slate-400 cursor-pointer select-none">
-                    <input 
-                      type="checkbox"
-                      checked={autoScrollLogs}
-                      onChange={(e) => setAutoScrollLogs(e.target.checked)}
-                      className={`rounded ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}
-                    />
-                    <span>Auto-scroll</span>
-                  </label>
+
+                  {/* Terminal Log Screen */}
+                  <div 
+                    ref={terminalContainerRef}
+                    className="w-full h-44 bg-black/90 border border-slate-900/80 rounded-lg p-3 font-mono text-[11px] overflow-y-auto leading-relaxed text-emerald-400 whitespace-pre-wrap select-text scrollbar-thin shadow-inner"
+                  >
+                    {terminalLogs || (
+                      <span className="text-slate-600 italic">
+                        [System ready] Click "Launch Lead Discovery Agent" above to start live stream output...
+                      </span>
+                    )}
+                  </div>
                 </div>
-                
-                <div 
-                  ref={terminalContainerRef}
-                  className="w-full h-60 bg-black/90 border border-slate-900 rounded-lg p-4 font-mono text-xs overflow-y-auto leading-relaxed text-[#10b981] whitespace-pre-wrap select-text scrollbar-thin"
-                >
-                  {terminalLogs}
-                </div>
+
               </div>
-            </div>
+            );
+          })()}
+
+          {/* TAB 3: CRM — LEAD LISTS */}
+          {/* TAB 3: CRM — LEAD LISTS */}
+          {/* Universal Leads workspace — extracted from the legacy agency-specific table. */}
+          {activeTab === "leads" && (
+            <LeadsWorkspace
+              isLight={isLight}
+              onOpenOutreach={handleOpenOutreach}
+              onFindLeads={() => navigateToTab("finder")}
+              onAddToCampaign={(leadIds) => {
+                sessionStorage.setItem("nexaleadai_campaign_lead_ids", JSON.stringify(leadIds));
+                navigateToTab("campaigns");
+              }}
+            />
           )}
 
-          {/* TAB 3: CRM — LEAD LISTS */}
-          {/* TAB 3: CRM — LEAD LISTS */}
-          {activeTab === "leads" && (
+          {/* Legacy CRM retained temporarily as a compatibility reference, but no longer rendered. */}
+          {false && activeTab === "leads" && (
             <div className="flex flex-col gap-4 h-full animate-fadeIn" style={{ minHeight: "calc(100vh - 180px)" }}>
 
               {/* ── MAIN AREA: Leads Table + Detail Panel ── */}
@@ -2767,21 +3623,55 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                       )}
                     </div>
 
-                    {/* Priority filter */}
-                    <SearchableDropdown
-                      isLight={isLight}
-                      value={crmPriorityFilter}
-                      onChange={setCrmPriorityFilter}
-                      placeholder="Select Priority"
-                      searchPlaceholder="Search priority..."
-                      options={[
-                        { id: "ALL", label: "All Priorities" },
-                        { id: "HOT", label: "HOT", icon: <span className="text-xs">🔥</span> },
-                        { id: "WARM", label: "WARM", icon: <span className="text-xs">🌡</span> },
-                        { id: "COLD", label: "COLD", icon: <span className="text-xs">❄</span> },
-                      ]}
-                      className="shrink-0 w-36"
-                    />
+                    {/* Quick Priority Filter Pills */}
+                    <div className={`hidden md:inline-flex items-center rounded-xl p-1 border shrink-0 ${
+                      isLight ? "bg-slate-50 border-slate-200" : "bg-slate-900/90 border-slate-800"
+                    }`}>
+                      <button
+                        type="button"
+                        onClick={() => setCrmPriorityFilter("ALL")}
+                        className={`px-3 py-1 text-[11px] font-semibold rounded-lg transition-all cursor-pointer ${
+                          crmPriorityFilter === "ALL"
+                            ? isLight ? "bg-white text-indigo-600 shadow-xs font-bold" : "bg-indigo-600 text-white shadow-xs font-bold"
+                            : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        All Leads
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCrmPriorityFilter("HOT")}
+                        className={`px-3 py-1 text-[11px] font-semibold rounded-lg transition-all cursor-pointer ${
+                          crmPriorityFilter === "HOT"
+                            ? "bg-rose-500 text-white shadow-xs font-bold"
+                            : "text-rose-400 hover:text-rose-300"
+                        }`}
+                      >
+                        🔥 Hot
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCrmPriorityFilter("WARM")}
+                        className={`px-3 py-1 text-[11px] font-semibold rounded-lg transition-all cursor-pointer ${
+                          crmPriorityFilter === "WARM"
+                            ? "bg-amber-500 text-white shadow-xs font-bold"
+                            : "text-amber-400 hover:text-amber-300"
+                        }`}
+                      >
+                        ⚡ Warm
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCrmPriorityFilter("COLD")}
+                        className={`px-3 py-1 text-[11px] font-semibold rounded-lg transition-all cursor-pointer ${
+                          crmPriorityFilter === "COLD"
+                            ? isLight ? "bg-slate-700 text-white shadow-xs font-bold" : "bg-slate-600 text-white shadow-xs font-bold"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        ❄️ Cold
+                      </button>
+                    </div>
 
                     {/* Website status */}
                     <SearchableDropdown
@@ -2982,6 +3872,51 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                     </div>
                   )}
                 </div>
+
+                {/* Floating Multi-Selection Action Bar */}
+                {selectedCrmLeadIds.size > 0 && (
+                  <div className={`p-3.5 border rounded-2xl flex flex-wrap items-center justify-between gap-3 shadow-xl animate-fadeIn ${
+                    isLight 
+                      ? "bg-indigo-50/90 border-indigo-200 text-indigo-950" 
+                      : "bg-gradient-to-r from-indigo-950/90 via-slate-900 to-indigo-950/90 border-indigo-500/30 text-white"
+                  }`}>
+                    <div className="flex items-center gap-3">
+                      <span className="h-7 w-7 rounded-xl bg-indigo-600 text-white font-black text-xs flex items-center justify-center shadow-xs">
+                        {selectedCrmLeadIds.size}
+                      </span>
+                      <div>
+                        <span className="text-xs font-bold">
+                          {selectedCrmLeadIds.size} {selectedCrmLeadIds.size === 1 ? "lead" : "leads"} selected
+                        </span>
+                        <span className="text-[11px] opacity-70 ml-2 hidden sm:inline">
+                          Apply bulk operations across selected records
+                        </span>
+                      </div>
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedCrmLeadIds(new Set())}
+                        className={`btn-interactive px-3 py-1.5 text-xs font-semibold rounded-xl border cursor-pointer ${
+                          isLight 
+                            ? "border-slate-300 bg-white text-slate-700 hover:bg-slate-100" 
+                            : "border-slate-700 bg-slate-800/60 text-slate-300 hover:text-white"
+                        }`}
+                      >
+                        Clear Selection
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCrmBulkDelete}
+                        className="btn-interactive px-3.5 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-500 rounded-xl shadow-xs cursor-pointer flex items-center gap-1.5"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        <span>Delete Selected ({selectedCrmLeadIds.size})</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {/* Table + Detail split */}
                 <div className={`flex gap-4 flex-1 min-h-0 ${selectedCrmLeadDetail ? "" : ""}`}>
@@ -3496,22 +4431,22 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
           {/* TAB 5: OUTREACH CAMPAIGN PANEL */}
           {activeTab === "outreach" && (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 animate-fadeIn">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 animate-fadeIn pb-6">
               
               {/* Left Column - Setup & Progress / Logs & List (7 cols) */}
-              <div className="lg:col-span-7 space-y-6">
+              <div className="lg:col-span-7 space-y-4">
                 
                 {/* Campaign Action & Settings Card */}
-                <div className={`border rounded-2xl p-6 space-y-4 ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}>
-                  <div className={`flex items-center justify-between pb-3 border-b ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
+                <div className={`border rounded-xl p-4 space-y-3 shadow-sm ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}>
+                  <div className={`flex items-center justify-between pb-2.5 border-b ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
                     <div className="flex items-center gap-2">
-                      <Send className="h-5 w-5 text-indigo-400" />
-                      <h3 className={`text-sm font-semibold ${isLight ? "text-slate-800" : "text-white"}`}>
+                      <Send className="h-4 w-4 text-indigo-400" />
+                      <h3 className={`text-xs font-bold ${isLight ? "text-slate-800" : "text-white"}`}>
                         Campaign Settings
                       </h3>
                     </div>
                     {campaignRunning && (
-                      <span className="flex items-center gap-1.5 px-2 py-0.5 rounded text-[9px] font-bold bg-indigo-500/10 text-indigo-400 animate-pulse border border-indigo-500/20">
+                      <span className="flex items-center gap-1.5 px-2 py-0.5 rounded text-[8.5px] font-bold bg-indigo-500/10 text-indigo-400 animate-pulse border border-indigo-500/20">
                         <span className="h-1.5 w-1.5 rounded-full bg-indigo-400"></span>
                         {campaignProgress.status.includes("Simulation") ? "SIMULATION ACTIVE" : "LIVE CAMPAIGN"}
                       </span>
@@ -3976,28 +4911,28 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                 </div>
 
                 {/* Campaign Progress Logs console */}
-                <div className={`border rounded-2xl p-6 transition-all duration-300 ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"} ${showCampaignActivity ? "space-y-3" : ""}`}>
+                <div className={`border rounded-xl p-4 shadow-sm transition-all duration-300 ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"} ${showCampaignActivity ? "space-y-2.5" : ""}`}>
                   <div 
                     onClick={() => setShowCampaignActivity(!showCampaignActivity)}
                     className="flex items-center justify-between pb-1 cursor-pointer select-none group"
                   >
                     <div className="flex items-center gap-2">
-                      <TerminalIcon className="h-4.5 w-4.5 text-indigo-400" />
-                      <h3 className={`text-sm font-semibold transition-colors ${isLight ? "text-slate-800 group-hover:text-indigo-600" : "text-white group-hover:text-indigo-400"}`}>
+                      <TerminalIcon className="h-4 w-4 text-indigo-400" />
+                      <h3 className={`text-xs font-bold transition-colors ${isLight ? "text-slate-800 group-hover:text-indigo-600" : "text-white group-hover:text-indigo-400"}`}>
                         Campaign Activity
                       </h3>
                     </div>
-                    <button className={`p-1 rounded-lg border transition-all ${
+                    <button className={`btn-interactive p-1 rounded-md border transition-all cursor-pointer ${
                       isLight 
-                        ? "bg-slate-50 border-slate-200 text-slate-505 hover:text-slate-800 hover:bg-slate-100" 
+                        ? "bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800 hover:bg-slate-100" 
                         : "bg-slate-900/50 border-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
                     }`}>
-                      {showCampaignActivity ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                      {showCampaignActivity ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                     </button>
                   </div>
 
                   {showCampaignActivity && (
-                    <div className={`h-[180px] border rounded-xl p-4 overflow-y-auto font-mono text-[10px] space-y-1.5 leading-relaxed animate-fadeIn ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}>
+                    <div className={`h-[150px] border rounded-lg p-3 overflow-y-auto font-mono text-[10px] space-y-1 leading-relaxed animate-fadeIn ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}>
                       {terminalLogs.split("\n").filter(line => 
                         line.includes("Campaign") || 
                         line.includes("outreach") || 
@@ -4036,40 +4971,40 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                 <CampaignReport isLight={isLight} liveRefresh={campaignRunning} />
 
                 {/* Campaign Checklist Table (Robust Feature 2) */}
-                <div className={`border rounded-2xl p-6 transition-all duration-300 ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"} ${showTargetLeads ? "space-y-4" : ""}`}>
+                <div className={`border rounded-xl p-4 shadow-sm transition-all duration-300 ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"} ${showTargetLeads ? "space-y-3" : ""}`}>
                   <div 
                     onClick={() => setShowTargetLeads(!showTargetLeads)}
                     className="flex items-center justify-between pb-1 cursor-pointer select-none group"
                   >
                     <div className="flex items-center gap-2">
-                      <Database className="h-4.5 w-4.5 text-indigo-400" />
-                      <h3 className={`text-sm font-semibold transition-colors ${isLight ? "text-slate-800 group-hover:text-indigo-600" : "text-white group-hover:text-indigo-400"}`}>
+                      <Database className="h-4 w-4 text-indigo-400" />
+                      <h3 className={`text-xs font-bold transition-colors ${isLight ? "text-slate-800 group-hover:text-indigo-600" : "text-white group-hover:text-indigo-400"}`}>
                         Target Leads
                       </h3>
                     </div>
-                    <div className="flex items-center gap-2.5">
-                      <span className="text-[10px] text-slate-400">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[9.5px] text-slate-400 font-medium">
                         {processedLeads.filter(l => (!selectedCampaignSheet || l.sheetName === selectedCampaignSheet) && ((l.emails && l.emails.length > 0 && l.emailStatus !== "SENT") || (l.phone && l.whatsappStatus !== "SENT"))).length} Pending
                       </span>
-                      <button className={`p-1 rounded-lg border transition-all ${
+                      <button className={`btn-interactive p-1 rounded-md border transition-all cursor-pointer ${
                         isLight 
-                          ? "bg-slate-50 border-slate-200 text-slate-505 hover:text-slate-800 hover:bg-slate-100" 
+                          ? "bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800 hover:bg-slate-100" 
                           : "bg-slate-900/50 border-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
                       }`}>
-                        {showTargetLeads ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                        {showTargetLeads ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                       </button>
                     </div>
                   </div>
 
                   {showTargetLeads && (
-                    <div className="overflow-x-auto max-h-[300px] overflow-y-auto animate-fadeIn">
+                    <div className="overflow-x-auto max-h-[260px] overflow-y-auto animate-fadeIn scrollbar-thin">
                       <table className="w-full text-left border-collapse font-sans text-xs">
                         <thead>
-                          <tr className={`border-b text-[9px] uppercase tracking-wider ${isLight ? "border-slate-200 text-slate-400" : "border-[#1e293b]/40 text-slate-400"}`}>
-                            <th className="py-2.5 font-normal">Business Details</th>
-                            <th className="py-2.5 font-normal">Email status</th>
-                            <th className="py-2.5 font-normal">WhatsApp status</th>
-                            <th className="py-2.5 text-right font-normal">Preview</th>
+                          <tr className={`border-b text-[9px] font-bold uppercase tracking-wider ${isLight ? "border-slate-200 text-slate-400" : "border-[#1e293b]/40 text-slate-400"}`}>
+                            <th className="py-2 font-normal">Business Details</th>
+                            <th className="py-2 font-normal">Email status</th>
+                            <th className="py-2 font-normal">WhatsApp status</th>
+                            <th className="py-2 text-right font-normal">Preview</th>
                           </tr>
                         </thead>
                         <tbody className={`divide-y ${isLight ? "divide-slate-100" : "divide-[#1e293b]/20"}`}>
@@ -4078,40 +5013,40 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                             const hasPhone = !!lead.phone;
                             return (
                               <tr key={idx} className={`transition-all ${isLight ? "hover:bg-slate-50" : "hover:bg-slate-900/20"}`}>
-                                <td className="py-2.5">
-                                  <div className={`font-bold truncate max-w-[200px] ${isLight ? "text-slate-900" : "text-white"}`}>{lead.businessName}</div>
-                                  <div className="text-[10px] text-slate-500 truncate max-w-[200px] mt-0.5">{lead.address}</div>
+                                <td className="py-2 pr-2">
+                                  <div className={`font-bold text-xs ${isLight ? "text-slate-900" : "text-white"}`}>{lead.businessName}</div>
+                                  <div className="text-[9.5px] text-slate-500 truncate max-w-[200px]">{lead.address || "No address"}</div>
                                 </td>
-                                <td className="py-2.5">
+                                <td className="py-2">
                                   {hasEmail ? (
-                                    <span className={` text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                                      lead.emailStatus === "SENT" ? "bg-emerald-500/10 text-emerald-400 animate-pulse" :
+                                    <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                      lead.emailStatus === "SENT" ? "bg-emerald-500/10 text-emerald-400" :
                                       lead.emailStatus === "FAILED" ? "bg-rose-500/10 text-rose-400" :
                                       "bg-slate-500/10 text-slate-400"
                                     }`}>
                                       {lead.emailStatus || "PENDING"}
                                     </span>
                                   ) : (
-                                    <span className="text-slate-600 text-[10px] italic">No Email</span>
+                                    <span className="text-slate-600 text-[9px] italic">No Email</span>
                                   )}
                                 </td>
-                                <td className="py-2.5">
+                                <td className="py-2">
                                   {hasPhone ? (
-                                    <span className={` text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                                      lead.whatsappStatus === "SENT" ? "bg-emerald-500/10 text-emerald-400 animate-pulse" :
+                                    <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                      lead.whatsappStatus === "SENT" ? "bg-emerald-500/10 text-emerald-400" :
                                       lead.whatsappStatus === "FAILED" ? "bg-rose-500/10 text-rose-400" :
                                       "bg-slate-500/10 text-slate-400"
                                     }`}>
                                       {lead.whatsappStatus || "PENDING"}
                                     </span>
                                   ) : (
-                                    <span className="text-slate-600 text-[10px] italic">No Phone</span>
+                                    <span className="text-slate-600 text-[9px] italic">No Phone</span>
                                   )}
                                 </td>
-                                <td className="py-2.5 text-right">
+                                <td className="py-2 text-right">
                                   <button
                                     onClick={() => handleSelectPreviewLead(lead)}
-                                    className="px-2 py-1 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 border border-indigo-500/20 text-[10px] font-bold rounded cursor-pointer transition-all"
+                                    className="btn-interactive px-2 py-0.5 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 border border-indigo-500/20 text-[9.5px] font-bold rounded cursor-pointer transition-all"
                                   >
                                     View Pitch
                                   </button>
@@ -4121,7 +5056,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                           })}
                           {processedLeads.length === 0 && (
                             <tr>
-                              <td colSpan={4} className="py-8 text-center text-slate-500 italic">
+                              <td colSpan={4} className="py-6 text-center text-slate-500 italic text-xs">
                                 No processed leads in the database. Scan coordinates first.
                               </td>
                             </tr>
@@ -4136,43 +5071,43 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
               {/* Right Column - Pitch Previewer (5 cols) */}
               <div className="lg:col-span-5">
-                <div className={`border rounded-2xl p-6 space-y-4 sticky top-6 ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}>
-                  <div className={`pb-3 border-b flex items-center justify-between ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
-                    <div className="flex items-center gap-2">
-                      <Sparkles className="h-4.5 w-4.5 text-indigo-400" />
-                      <h3 className={`text-sm font-semibold ${isLight ? "text-slate-800" : "text-white"}`}>
+                <div className={`border rounded-xl p-4 space-y-3 shadow-sm sticky top-4 ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}>
+                  <div className={`pb-2.5 border-b flex items-center justify-between ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
+                    <div className="flex items-center gap-1.5">
+                      <Sparkles className="h-4 w-4 text-indigo-400" />
+                      <h3 className={`text-xs font-bold ${isLight ? "text-slate-800" : "text-white"}`}>
                         AI Message Preview
                       </h3>
                     </div>
                   </div>
 
                   {isLoadingPreviewCopy ? (
-                    <div className="py-24 text-center space-y-3 text-xs text-indigo-400">
-                      <Loader2 className="h-8 w-8 text-indigo-500 animate-spin mx-auto" />
+                    <div className="py-16 text-center space-y-2 text-xs text-indigo-400">
+                      <Loader2 className="h-6 w-6 text-indigo-500 animate-spin mx-auto" />
                       <span>Generating AI pitch tailored to lead profile...</span>
                     </div>
                   ) : previewLead ? (
-                    <div className="space-y-4 text-xs">
+                    <div className="space-y-3 text-xs">
                       <div>
-                        <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Active Target:</div>
-                        <div className={`text-sm font-bold mt-1 leading-snug ${isLight ? "text-slate-900" : "text-white"}`}>{previewLead.businessName}</div>
-                        <div className="text-[10px] text-slate-500 truncate mt-0.5">{previewLead.address}</div>
+                        <div className="text-[9.5px] text-slate-400 font-bold uppercase tracking-wider">Active Target:</div>
+                        <div className={`text-xs font-bold mt-0.5 leading-snug ${isLight ? "text-slate-900" : "text-white"}`}>{previewLead.businessName}</div>
+                        <div className="text-[9.5px] text-slate-500 truncate mt-0.5">{previewLead.address}</div>
                       </div>
 
-                      <div className={`p-3 rounded-xl border space-y-1 text-[10px] text-slate-400 ${isLight ? "bg-slate-50 border-slate-200" : "bg-slate-950/50 border-slate-900"}`}>
+                      <div className={`p-2.5 rounded-lg border space-y-0.5 text-[9.5px] text-slate-400 ${isLight ? "bg-slate-50 border-slate-200" : "bg-slate-950/50 border-slate-900"}`}>
                         <div><strong className="text-indigo-400">Priority:</strong> {previewLead.leadPriority}</div>
                         <div><strong className="text-indigo-400">Digital Score:</strong> {previewLead.leadScore} pts</div>
                         <div className="truncate"><strong className="text-indigo-400">AI Insight:</strong> {previewLead.aiInsight}</div>
                       </div>
 
-                      <div className={`space-y-3 border-t pt-4 ${isLight ? "border-slate-200" : "border-slate-800/50"}`}>
-                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5 select-none">
-                          <WhatsAppLogo className="h-3.5 w-3.5 fill-emerald-500 text-emerald-500 shrink-0" /> WhatsApp Message Copy
+                      <div className={`space-y-2 border-t pt-2.5 ${isLight ? "border-slate-200" : "border-slate-800/50"}`}>
+                        <span className="text-[8.5px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5 select-none">
+                          <WhatsAppLogo className="h-3 w-3 fill-emerald-500 text-emerald-500 shrink-0" /> WhatsApp Message Copy
                         </span>
                         <textarea
                           readOnly
                           value={previewCopy?.whatsappMessage || ""}
-                          className={`w-full min-h-[120px] border rounded-xl p-3 text-[11px] leading-relaxed focus:outline-none focus:border-indigo-500 resize-none font-sans ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}
+                          className={`w-full min-h-[90px] border rounded-lg p-2.5 text-[10.5px] leading-relaxed focus:outline-none focus:border-indigo-500 resize-none font-sans ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}
                         />
                         <div className="flex justify-end">
                           <button
@@ -4182,25 +5117,25 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                                 alert("WhatsApp pitch copied to clipboard!");
                               }
                             }}
-                            className={`px-2.5 py-1 border text-[10px] font-bold rounded cursor-pointer transition-all flex items-center gap-1 ${isLight ? "bg-white hover:bg-slate-50 text-slate-600 border-slate-200" : "bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-800"}`}
+                            className={`btn-interactive px-2 py-0.5 border text-[9.5px] font-bold rounded cursor-pointer transition-all flex items-center gap-1 ${isLight ? "bg-white hover:bg-slate-50 text-slate-600 border-slate-200" : "bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-800"}`}
                           >
-                            <Copy className="h-3 w-3" /> Copy WhatsApp Pitch
+                            <Copy className="h-2.5 w-2.5" /> Copy WhatsApp Pitch
                           </button>
                         </div>
                       </div>
 
-                      <div className={`space-y-3 border-t pt-4 ${isLight ? "border-slate-200" : "border-slate-800/50"}`}>
-                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1">
-                          <Mail className="h-3.5 w-3.5 text-indigo-400" /> Email Pitch Copy
+                      <div className={`space-y-2 border-t pt-2.5 ${isLight ? "border-slate-200" : "border-slate-800/50"}`}>
+                        <span className="text-[8.5px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1">
+                          <Mail className="h-3 w-3 text-indigo-400" /> Email Pitch Copy
                         </span>
-                        <div className="space-y-2">
-                          <div className={`text-[10px] text-slate-400 p-2 rounded border truncate ${isLight ? "bg-slate-50 border-slate-200" : "bg-slate-950/30 border-slate-900"}`}>
+                        <div className="space-y-1.5">
+                          <div className={`text-[9.5px] text-slate-400 p-1.5 rounded border truncate ${isLight ? "bg-slate-50 border-slate-200" : "bg-slate-950/30 border-slate-900"}`}>
                             <strong>Subject:</strong> {previewCopy?.emailSubject || ""}
                           </div>
                           <textarea
                             readOnly
                             value={previewCopy?.emailBody || ""}
-                            className={`w-full min-h-[160px] border rounded-xl p-3 text-[11px] leading-relaxed focus:outline-none focus:border-indigo-500 resize-none font-sans ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}
+                            className={`w-full min-h-[120px] border rounded-lg p-2.5 text-[10.5px] leading-relaxed focus:outline-none focus:border-indigo-500 resize-none font-sans ${isLight ? "bg-white text-slate-800 border-slate-200" : "bg-[#030712] text-white border-[#1e293b]"}`}
                           />
                         </div>
                         <div className="flex justify-end">
@@ -4211,17 +5146,17 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                                 alert("Email pitch body copied to clipboard!");
                               }
                             }}
-                            className={`px-2.5 py-1 border text-[10px] font-bold rounded cursor-pointer transition-all flex items-center gap-1 ${isLight ? "bg-white hover:bg-slate-50 text-slate-600 border-slate-200" : "bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-800"}`}
+                            className={`btn-interactive px-2 py-0.5 border text-[9.5px] font-bold rounded cursor-pointer transition-all flex items-center gap-1 ${isLight ? "bg-white hover:bg-slate-50 text-slate-600 border-slate-200" : "bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-800"}`}
                           >
-                            <Copy className="h-3 w-3" /> Copy Email Pitch
+                            <Copy className="h-2.5 w-2.5" /> Copy Email Pitch
                           </button>
                         </div>
                       </div>
                     </div>
                   ) : (
-                    <div className="py-24 text-center space-y-3 text-xs text-slate-500">
-                      <BookOpen className="h-8 w-8 text-slate-600 mx-auto opacity-50" />
-                      <span>Select a lead from the checklist on the left to preview customized AI copy.</span>
+                    <div className="py-16 text-center space-y-2 text-xs text-slate-500">
+                      <BookOpen className="h-6 w-6 text-slate-600 mx-auto opacity-50" />
+                      <span className="text-[11px]">Select a lead from the checklist on the left to preview customized AI copy.</span>
                     </div>
                   )}
                 </div>
@@ -4233,7 +5168,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
           {/* TAB 6: EMAIL TEMPLATES BUILDER */}
           {activeTab === "templates" && (
             <div className="space-y-6 animate-fadeIn">
-              <EmailTemplates isLight={isLight} />
+              <EmailTemplates isLight={isLight} workspaceId={currentWorkspace?.id} />
             </div>
           )}
 
@@ -4262,13 +5197,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
           */}
           {activeTab === "business" && (
             <div className="animate-fadeIn">
-              <BusinessPanel isLight={isLight} />
-            </div>
-          )}
-
-          {activeTab === "knowledge" && (
-            <div className="animate-fadeIn">
-              <KnowledgePanel isLight={isLight} />
+              <BusinessPanel isLight={isLight} initialTab={initialBusinessTab.current} />
             </div>
           )}
 
@@ -4299,7 +5228,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
           )}
 
           </Suspense>
-        </div>
+        </main>
       </div>
 
       {/* Reusable interactive alert / success modal */}
