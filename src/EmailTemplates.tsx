@@ -251,16 +251,16 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
       subject: "",
       designMode: "builder",
       htmlCode: "",
-      useLogo: false,
-      logoType: "text",
-      logoValue: "",
+      useLogo: true,
+      logoType: "image",
+      logoValue: "/logo.png",
       introText: "Hi {{company}} team,",
       useAiBody: false,
       customBodyText: "",
       useCta: false,
       ctaText: "",
       ctaUrl: "",
-      ctaBgColor: "#4f46e5",
+      ctaBgColor: "#0f172a",
       useContact: false,
       contactText: "",
       useFooter: false,
@@ -408,44 +408,48 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
   // HTML compiler based on wizard schema (Email only)
   const generateHtml = (tpl: EmailTemplate): string => {
     let html = `<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${tpl.name}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
-<body style="margin: 0; padding: 0; background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
-  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #f8fafc; padding: 20px 0;">
+<body style="margin: 0; padding: 0; background-color: #f8fafc; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased;">
+  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #f8fafc; padding: 24px 16px;">
     <tr>
       <td align="center">
         <!--[if mso]>
-        <table align="center" border="0" cellspacing="0" cellpadding="0" width="550" style="width: 550px;">
+        <table align="center" border="0" cellspacing="0" cellpadding="0" width="520" style="width: 520px;">
         <tr>
-        <td align="center" valign="top" width="550">
+        <td align="center" valign="top" width="520">
         <![endif]-->
-        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 550px; background-color: #ffffff; border-radius: 12px; overflow: hidden; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
+        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 520px; background-color: #ffffff; border-radius: 12px; overflow: hidden; border: 1px solid #e2e8f0;">
           <tr>
-            <td style="padding: 24px;">`;
+            <td style="padding: 24px 28px 24px 28px;">`;
 
     // 1. Logo Section
-    if (tpl.useLogo && tpl.logoValue.trim()) {
-      if (tpl.logoType === "image") {
+    if (tpl.useLogo) {
+      const logoSrc = tpl.logoValue && tpl.logoValue.trim() ? tpl.logoValue.trim() : "/logo.png";
+      if (tpl.logoType === "image" || !tpl.logoValue.trim()) {
         html += `
               <!-- LOGO BANNER IMAGE -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 20px;">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 20px; border-bottom: 1px solid #f1f5f9; padding-bottom: 18px;">
                 <tr>
-                  <td align="center">
-                    <img src="${tpl.logoValue}" alt="Logo" style="max-height: 48px; max-width: 200px; object-contain: fill; display: block;" />
+                  <td align="center" style="text-align: center;">
+                    <img src="${logoSrc}" alt="Logo" style="max-height: 38px; height: 38px; width: auto; object-contain: contain; margin: 0 auto; display: block; border: 0;" />
                   </td>
                 </tr>
               </table>`;
       } else {
         html += `
               <!-- LOGO BANNER TEXT -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 20px; border-bottom: 1px solid #f1f5f9; padding-bottom: 12px;">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 20px; border-bottom: 1px solid #f1f5f9; padding-bottom: 18px;">
                 <tr>
-                  <td align="left">
-                    <span style="font-size: 16px; font-weight: bold; color: #4f46e5; letter-spacing: -0.5px;">${tpl.logoValue}</span>
+                  <td align="center" style="text-align: center;">
+                    <span style="font-size: 18px; font-weight: 600; color: #0f172a; letter-spacing: -0.2px; font-family: 'Inter', sans-serif; display: block; text-align: center;">${tpl.logoValue}</span>
                   </td>
                 </tr>
               </table>`;
@@ -456,9 +460,9 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
     if (tpl.introText.trim()) {
       html += `
               <!-- WELCOME / COMMON GREETING -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 16px;">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 14px;">
                 <tr>
-                  <td style="font-size: 14px; color: #334155; line-height: 1.5; white-space: pre-line;">${tpl.introText}</td>
+                  <td align="center" style="font-size: 13px; color: #334155; line-height: 1.5; white-space: pre-line; font-family: 'Inter', sans-serif; text-align: center;">${tpl.introText}</td>
                 </tr>
               </table>`;
     }
@@ -469,7 +473,7 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
               <!-- AI GENERATED OUTREACH BODY PLACEHOLDER -->
               <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 16px;">
                 <tr>
-                  <td style="padding: 16px; background-color: #f1f5f9; border-left: 4px solid #6366f1; border-radius: 6px; font-size: 13px; color: #475569; font-style: italic; line-height: 1.6;">
+                  <td align="center" style="padding: 12px 16px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 13px; color: #475569; font-style: italic; line-height: 1.5; font-family: 'Inter', sans-serif; text-align: center;">
                     [🤖 AI Outreach Agent: A personalized campaign pitch based on prospect's GMB scores, priority tier, and city signals will be automatically generated and injected here during dispatches.]
                   </td>
                 </tr>
@@ -479,7 +483,7 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
               <!-- CUSTOM OUTREACH BODY -->
               <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 16px;">
                 <tr>
-                  <td style="font-size: 14px; color: #334155; line-height: 1.6; white-space: pre-line;">${tpl.customBodyText}</td>
+                  <td align="center" style="font-size: 13px; color: #334155; line-height: 1.6; white-space: pre-line; font-family: 'Inter', sans-serif; text-align: center;">${tpl.customBodyText}</td>
                 </tr>
               </table>`;
     }
@@ -488,13 +492,13 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
     if (tpl.useCta && tpl.ctaText.trim()) {
       html += `
               <!-- CTA OUTREACH BUTTON -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin: 24px 0;">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin: 22px 0;">
                 <tr>
-                  <td align="center">
-                    <table border="0" cellpadding="0" cellspacing="0" style="border-collapse: separate;">
+                  <td align="center" style="text-align: center;">
+                    <table border="0" cellpadding="0" cellspacing="0" align="center" style="border-collapse: separate; margin: 0 auto;">
                       <tr>
-                        <td align="center" style="border-radius: 8px; background-color: ${tpl.ctaBgColor || "#4f46e5"};">
-                          <a href="${tpl.ctaUrl || "#"}" target="_blank" style="display: inline-block; padding: 10px 22px; font-size: 13px; font-weight: bold; color: #ffffff; text-decoration: none; border-radius: 8px; font-family: sans-serif;">
+                        <td align="center" style="border-radius: 8px; background-color: ${tpl.ctaBgColor || "#0f172a"};">
+                          <a href="${tpl.ctaUrl || "#"}" target="_blank" style="display: inline-block; padding: 9px 20px; font-size: 13px; font-weight: 500; color: #ffffff; text-decoration: none; border-radius: 8px; font-family: 'Inter', sans-serif;">
                             ${tpl.ctaText}
                           </a>
                         </td>
@@ -509,9 +513,9 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
     if (tpl.useContact && tpl.contactText.trim()) {
       html += `
               <!-- CONTACT OUTLET DETAILS -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-top: 24px; border-top: 1px solid #f1f5f9; padding-top: 12px; margin-bottom: 8px;">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-top: 20px; border-top: 1px solid #f1f5f9; padding-top: 12px; margin-bottom: 6px;">
                 <tr>
-                  <td align="center" style="font-size: 11px; color: #64748b; line-height: 1.5; white-space: pre-line;">${tpl.contactText}</td>
+                  <td align="center" style="font-size: 11px; color: #64748b; line-height: 1.5; white-space: pre-line; font-family: 'Inter', sans-serif; text-align: center;">${tpl.contactText}</td>
                 </tr>
               </table>`;
     }
@@ -520,9 +524,9 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
     if (tpl.useFooter && tpl.footerText.trim()) {
       html += `
               <!-- OUTREACH FOOTER / DISCLAIMER -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-top: 8px;">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-top: 6px;">
                 <tr>
-                  <td align="center" style="font-size: 10px; color: #94a3b8; line-height: 1.4; white-space: pre-line;">${tpl.footerText}</td>
+                  <td align="center" style="font-size: 10px; color: #94a3b8; line-height: 1.4; white-space: pre-line; font-family: 'Inter', sans-serif; text-align: center;">${tpl.footerText}</td>
                 </tr>
               </table>`;
     }

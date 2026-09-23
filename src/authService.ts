@@ -168,7 +168,11 @@ async function createAndSendOtp(
 
   // Invalidate any prior outstanding codes for this target+purpose.
   await prisma.emailOtp.updateMany({
-    where: whereClause,
+    where: {
+      ...(targetType === "email" ? { email: target, phone: null } : { phone: target, email: null }),
+      purpose,
+      consumed: false,
+    },
     data: { consumed: true },
   });
 
@@ -367,22 +371,17 @@ export async function verifyOtp(input: { email: string; code: string; purpose?: 
 // ── Password reset ──
 
 /**
- * Sends a password-reset OTP. Always resolves successfully to avoid revealing
- * whether an account exists.
+ * Sends a password-reset OTP. Verifies account existence first.
  */
 export async function requestPasswordReset(email: string, meta?: RequestMeta): Promise<{ ok: true }> {
   const normalized = normalizeEmail(email);
   if (!EMAIL_RE.test(normalized)) throw new AuthError(400, "invalid_email", "Please enter a valid email address.");
   const user = await prisma.user.findUnique({ where: { email: normalized } });
-  if (user) {
-    try {
-      await createAndSendOtp(normalized, "reset", user.id, "email");
-      await writeAudit("password_reset_requested", { userId: user.id, meta });
-    } catch (err) {
-      // Swallow cooldown errors so the response stays uniform.
-      if (!(err instanceof AuthError && err.code === "otp_cooldown")) throw err;
-    }
+  if (!user) {
+    throw new AuthError(404, "user_not_found", "No account exists with this email address. Please register first.");
   }
+  await createAndSendOtp(normalized, "reset", user.id, "email");
+  await writeAudit("password_reset_requested", { userId: user.id, meta });
   return { ok: true };
 }
 
@@ -561,6 +560,25 @@ export async function login(
   if (user.lockedUntil && new Date(user.lockedUntil).getTime() > Date.now()) {
     const mins = Math.ceil((new Date(user.lockedUntil).getTime() - Date.now()) / 60000);
     throw new AuthError(423, "account_locked", `Account temporarily locked after too many attempts. Try again in ${mins} minute(s).`);
+  }
+
+  /*
+   * Administrative suspension.
+   *
+   * Checked after the lockout test but before bcrypt, and worded plainly rather
+   * than as "invalid credentials": a suspended customer needs to know to contact
+   * support, not to keep retrying a password that is in fact correct. The
+   * enumeration concern that justifies the uniform error above does not apply
+   * here, because reaching this line already required knowing the address
+   * belongs to a real account.
+   */
+  if (user.status === "suspended") {
+    await writeAudit("login_refused_suspended", { userId: user.id, meta });
+    throw new AuthError(
+      403,
+      "account_suspended",
+      "This account has been suspended. Please contact support to restore access."
+    );
   }
 
   const ok = await bcrypt.compare(password, user.passwordHash);

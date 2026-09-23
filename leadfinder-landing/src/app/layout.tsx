@@ -6,7 +6,8 @@ export const metadata: Metadata = {
   description: "LeadGenPilot automatically scrapes Google Maps to find high-quality local business leads without websites, scores them with AI, and delivers qualified leads to your Google Sheet in real-time.",
   keywords: "lead generation, Google Maps scraper, AI leads, local business leads, sales automation, outreach",
   icons: {
-    icon: [],
+    icon: "/favicon.png",
+    apple: "/favicon.png",
   },
   openGraph: {
     title: "LeadGenPilot — Find Hot Leads Automatically",
@@ -19,7 +20,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <head>
-        <link rel="icon" href="data:," />
+        <link rel="icon" type="image/png" href="/favicon.png" />
+        <link rel="apple-touch-icon" href="/favicon.png" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
       </head>

@@ -113,9 +113,9 @@ export default function AuthGate() {
 
   if (status === "loading") {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 gap-3 font-sans">
-        <div className="w-10 h-10 border-4 border-slate-200 border-t-indigo-600 rounded-full animate-spin"></div>
-        <div className="text-slate-500 text-xs font-semibold tracking-wide uppercase mt-1">Loading…</div>
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50/60 gap-2.5 font-sans">
+        <Loader2 className="w-5 h-5 text-slate-700 animate-spin" />
+        <div className="text-slate-500 text-[11px] font-medium tracking-wider uppercase">Loading workspace…</div>
       </div>
     );
   }
@@ -134,11 +134,11 @@ export default function AuthGate() {
 
   if (status === "unavailable") {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6 font-sans">
-        <div className="max-w-md rounded-2xl border border-amber-200 bg-white p-6 text-center shadow-sm">
-          <h1 className="text-lg font-bold text-slate-900">Authentication is unavailable</h1>
-          <p className="mt-2 text-sm text-slate-600">The database is not configured or cannot be reached. The dashboard remains locked to prevent unscoped data access.</p>
-          <button onClick={checkSession} className="mt-5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500">Try again</button>
+      <div className="min-h-screen flex items-center justify-center bg-slate-50/40 p-6 font-sans">
+        <div className="w-full max-w-[360px] rounded-xl border border-amber-200/80 bg-white p-6 text-center shadow-none">
+          <h1 className="text-base font-semibold text-slate-900 tracking-[-0.01em]">Authentication unavailable</h1>
+          <p className="mt-1.5 text-xs text-slate-600 leading-relaxed">The database is not configured or cannot be reached. The dashboard remains locked to prevent unscoped data access.</p>
+          <button onClick={checkSession} className="mt-4 w-full h-9 rounded-lg bg-slate-900 px-4 text-xs font-medium text-white hover:bg-slate-800 transition-colors cursor-pointer">Try again</button>
         </div>
       </div>
     );
@@ -146,20 +146,20 @@ export default function AuthGate() {
 
   if (status === "workspace") {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6 font-sans">
-        <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <h1 className="text-xl font-bold text-slate-900">Choose a workspace</h1>
-          <p className="mt-1 text-sm text-slate-500">Select the dashboard you want to open.</p>
-          <div className="mt-5 space-y-2">
+      <div className="min-h-screen flex items-center justify-center bg-slate-50/40 p-6 font-sans">
+        <div className="w-full max-w-[360px] rounded-xl border border-slate-200/90 bg-white p-6 shadow-none">
+          <h1 className="text-base font-semibold text-slate-900 tracking-[-0.01em]">Choose a workspace</h1>
+          <p className="mt-0.5 text-xs text-slate-500">Select the workspace you want to open.</p>
+          <div className="mt-4 space-y-2">
             {workspaces.map((item) => (
-              <button key={item.id} onClick={() => handleWorkspaceSelect(item.id)} className="w-full rounded-xl border border-slate-200 p-3 text-left hover:border-indigo-400 hover:bg-indigo-50">
-                <div className="font-semibold text-slate-900">{item.name}</div>
-                <div className="text-xs capitalize text-slate-500">{item.role}</div>
+              <button key={item.id} onClick={() => handleWorkspaceSelect(item.id)} className="w-full rounded-lg border border-slate-200/90 p-2.5 text-left hover:border-slate-300 hover:bg-slate-50/80 transition-all cursor-pointer">
+                <div className="text-xs font-semibold text-slate-900">{item.name}</div>
+                <div className="text-[11px] capitalize text-slate-500">{item.role}</div>
               </button>
             ))}
           </div>
-          {workspaceError && <p className="mt-3 text-sm text-rose-600">{workspaceError}</p>}
-          <button onClick={handleLogout} className="mt-5 text-sm font-semibold text-slate-500 hover:text-slate-800">Sign out</button>
+          {workspaceError && <p className="mt-3 text-xs text-rose-600">{workspaceError}</p>}
+          <button onClick={handleLogout} className="mt-4 text-xs font-medium text-slate-500 hover:text-slate-800 cursor-pointer">Sign out</button>
         </div>
       </div>
     );

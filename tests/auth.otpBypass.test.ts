@@ -28,7 +28,7 @@ vi.mock("../src/prisma", () => ({
 const sendOtpEmail = vi.hoisted(() => vi.fn().mockResolvedValue(true));
 vi.mock("../src/mailer", () => ({ sendOtpEmail }));
 
-const { resendOtp, verifyOtp, issueSessionToken, verifySessionToken, AuthError } =
+const { resendOtp, verifyOtp, issueSessionToken, verifySessionToken, requestPasswordReset, AuthError } =
   await import("../src/authService");
 const { env } = await import("../src/env");
 
@@ -146,3 +146,23 @@ describe("verifySessionToken pins the signing algorithm", () => {
     expect(verifySessionToken("")).toBeNull();
   });
 });
+
+describe("requestPasswordReset checks account existence", () => {
+  it("rejects an unknown email with user_not_found error", async () => {
+    mocks.prisma.user.findUnique.mockResolvedValue(null);
+    await expect(requestPasswordReset("nonexistent@example.com")).rejects.toMatchObject({
+      code: "user_not_found",
+      message: "No account exists with this email address. Please register first.",
+    });
+    expect(sendOtpEmail).not.toHaveBeenCalled();
+  });
+
+  it("sends reset OTP when account exists", async () => {
+    mocks.prisma.user.findUnique.mockResolvedValue(TENANT_A as any);
+    mocks.prisma.emailOtp.findFirst.mockResolvedValue(null);
+    mocks.prisma.emailOtp.create.mockResolvedValue({ id: "otp_1" } as any);
+    await expect(requestPasswordReset(TENANT_A.email)).resolves.toEqual({ ok: true });
+    expect(sendOtpEmail).toHaveBeenCalledTimes(1);
+  });
+});
+

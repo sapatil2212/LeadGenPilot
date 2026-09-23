@@ -151,7 +151,7 @@ router.post("/forgot-password", otpLimiter, async (req: Request, res: Response) 
     const { email } = req.body || {};
     if (!email) return res.status(400).json({ error: "Email is required.", code: "missing_fields" });
     await requestPasswordReset(email, metaOf(req));
-    res.json({ success: true, message: "If an account exists for that email, a reset code has been sent." });
+    res.json({ success: true, message: "A 6-digit reset code has been sent to your email." });
   } catch (err) {
     handleError(res, err);
   }
@@ -169,6 +169,26 @@ router.post("/reset-password", authLimiter, async (req: Request, res: Response) 
   } catch (err) {
     handleError(res, err);
   }
+});
+
+// ── Google OAuth entry point ──
+router.get("/google", (req: Request, res: Response) => {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  if (!clientId) {
+    return res.status(501).json({
+      error: "Google Sign-In is not configured yet. Please configure GOOGLE_CLIENT_ID in your .env file or sign in with your email and password.",
+      code: "google_oauth_not_configured",
+    });
+  }
+  const redirectUri = `${req.protocol}://${req.get("host")}/api/auth/google/callback`;
+  const scope = encodeURIComponent("openid email profile");
+  const state = (req.query.mode as string) || "signin";
+  const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${scope}&state=${state}&prompt=select_account`;
+  
+  if (req.query.json === "1" || req.headers.accept?.includes("application/json")) {
+    return res.json({ url });
+  }
+  res.redirect(url);
 });
 
 // ── Current session and workspace context ──

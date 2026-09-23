@@ -110,7 +110,7 @@ export const env = {
     otpTtlMinutes: toInt(process.env.OTP_TTL_MINUTES, 10),
     otpMaxAttempts: toInt(process.env.OTP_MAX_ATTEMPTS, 5),
     // Minimum seconds between OTP resends for the same email.
-    otpResendSeconds: toInt(process.env.OTP_RESEND_SECONDS, 30),
+    otpResendSeconds: toInt(process.env.OTP_RESEND_SECONDS, 60),
     // Product name shown in OTP emails.
     appName: process.env.APP_NAME || "LeadGenPilot",
     // Brute-force lockout.

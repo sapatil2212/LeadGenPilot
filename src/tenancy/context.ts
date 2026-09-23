@@ -15,6 +15,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { env } from "../env";
 import { logger } from "../logger";
+import { prisma } from "../prisma";
 import { listMemberships, findMembership, type Membership } from "./tenantService";
 import { resolvePermissions, type Permission, type TenantRole } from "./permissions";
 
@@ -81,6 +82,26 @@ export async function resolveTenantContext(req: Request, res: Response, next: Ne
     const userId = req.authUser?.id;
     if (!userId) {
       return res.status(401).json({ error: "Authentication required.", code: "no_session" });
+    }
+
+    /*
+     * Administrative suspension, enforced here as well as at login.
+     *
+     * A suspension applied from the operator console has to take effect on the
+     * next request, not whenever the person's existing session happens to
+     * expire — otherwise suspending an account being actively abused does
+     * nothing for up to the full session lifetime. This guard is the right place
+     * for it: it already runs a database query on every tenant-scoped route, so
+     * the check costs one additional indexed lookup rather than a new round trip
+     * on paths that were previously token-only.
+     */
+    const account = await prisma.user.findUnique({ where: { id: userId }, select: { status: true } });
+    if (account?.status === "suspended") {
+      logger.warn(`Refused a request from suspended account ${userId}.`);
+      return res.status(403).json({
+        error: "This account has been suspended. Please contact support to restore access.",
+        code: "account_suspended",
+      });
     }
 
     const requested =

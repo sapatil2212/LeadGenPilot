@@ -3,25 +3,36 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * The /api/admin surface: everything the superadmin console reads and writes.
+ *
+ * `requireAdmin` guards the whole router, so nothing below needs its own check —
+ * and, more usefully, nothing below can accidentally omit one. The real surface
+ * lives in ./admin/*, grouped by the thing it administers:
+ *
+ *   /api/admin/users      accounts: CRUD, bulk actions, password resets, export
+ *   /api/admin/billing    plans, subscriptions, invoices, payments, revenue
+ *   /api/admin/platform   workspaces, flags, announcements, settings, audit,
+ *                         traffic, jobs, cross-tenant data, health
+ *   /api/admin/analytics   KPIs, time series, cohorts
+ *
+ * The four endpoints at the bottom (/stats, /audit, /visitors, /me) are the
+ * original ones, kept so an older client or a bookmarked URL still resolves.
+ */
+
 import { Router, type Request, type Response } from "express";
 import { requireAdmin } from "./authRoutes";
-import {
-  adminListUsers,
-  adminUpdateUser,
-  adminListAuditLogs,
-  AuthError,
-  type RequestMeta,
-} from "./authService";
+import { adminListAuditLogs, AuthError } from "./authService";
 import { logger } from "./logger";
+import { env } from "./env";
+
+import adminUsersRouter from "./admin/adminUsers";
+import adminBillingRouter from "./admin/adminBilling";
+import adminPlatformRouter from "./admin/adminPlatform";
+import adminAnalyticsRouter from "./admin/adminAnalytics";
+import { actorOf, adminRoute, sendAdminError } from "./admin/shared";
 
 const router = Router();
-
-function metaOf(req: Request): RequestMeta {
-  return {
-    ip: (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip,
-    userAgent: req.headers["user-agent"],
-  };
-}
 
 function handleError(res: Response, err: unknown) {
   if (err instanceof AuthError) {
@@ -31,53 +42,57 @@ function handleError(res: Response, err: unknown) {
   return res.status(500).json({ error: "Something went wrong. Please try again.", code: "internal" });
 }
 
+// Single gate for every route in this file and every sub-router below it.
 router.use(requireAdmin);
 
-// ── List users (paginated, searchable) ──
-router.get("/users", async (req: Request, res: Response) => {
-  try {
-    const page = parseInt(String(req.query.page || "1"), 10);
-    const pageSize = parseInt(String(req.query.pageSize || "20"), 10);
-    const search = req.query.search ? String(req.query.search) : undefined;
-    const result = await adminListUsers({ page, pageSize, search });
-    res.json(result);
-  } catch (err) {
-    handleError(res, err);
-  }
-});
+// ── Grouped admin surface ────────────────────────────────────────────────────
+router.use("/users", adminUsersRouter);
+router.use("/billing", adminBillingRouter);
+router.use("/platform", adminPlatformRouter);
+router.use("/analytics", adminAnalyticsRouter);
 
-// ── Update a user's plan/role ──
-router.patch("/users/:id", async (req: Request, res: Response) => {
-  try {
-    const actorId = (req as any).user.sub;
-    const { plan, role } = req.body || {};
-    const user = await adminUpdateUser(req.params.id, { plan, role }, actorId, metaOf(req));
-    res.json({ success: true, user });
-  } catch (err) {
-    handleError(res, err);
-  }
-});
+/**
+ * Who am I, and what is this console allowed to do?
+ *
+ * The console's session may be the synthetic env-based superadmin with no row in
+ * `users`, so the client cannot look itself up by id. This is how the header
+ * learns the operator's identity after a hard reload.
+ */
+router.get(
+  "/me",
+  adminRoute(async (req, res) => {
+    const actor = actorOf(req);
+    res.json({
+      id: actor.id ?? "superadmin",
+      email: actor.email,
+      role: "admin",
+      kind: actor.synthetic ? "superadmin_console" : "admin_user",
+      environment: env.nodeEnv,
+      capabilities: {
+        // Surfaced so the UI can explain a disabled control instead of failing
+        // the request after the operator has filled in a form.
+        backupRestore: env.enableBackupRestore,
+        emailDelivery: env.isSmtpConfigured(),
+        aiProvider: env.isGeminiConfigured(),
+      },
+    });
+  })
+);
 
-// ── View audit log ──
-router.get("/audit", async (req: Request, res: Response) => {
-  try {
-    const page = parseInt(String(req.query.page || "1"), 10);
-    const pageSize = parseInt(String(req.query.pageSize || "50"), 10);
-    const result = await adminListAuditLogs({ page, pageSize });
-    res.json(result);
-  } catch (err) {
-    handleError(res, err);
-  }
-});
+// ── Legacy endpoints (kept for compatibility) ────────────────────────────────
 
-// ── Platform stats overview ──
+/**
+ * Platform counters.
+ *
+ * Superseded by /api/admin/analytics/overview, which returns the same figures
+ * plus period-over-period deltas and the series behind them.
+ */
 router.get("/stats", async (req: Request, res: Response) => {
   try {
     const { prisma } = await import("./prisma");
     const now = new Date();
     const startOf30Days = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     const startOf7Days = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const currentPeriod = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 
     const [
       totalUsers,
@@ -125,10 +140,7 @@ router.get("/stats", async (req: Request, res: Response) => {
         last30Days: leadsLast30,
         totalUsed: totalLeadsUsed._sum.leadsUsed || 0,
       },
-      audit: {
-        total: totalAuditLogs,
-        last7Days: auditLast7,
-      },
+      audit: { total: totalAuditLogs, last7Days: auditLast7 },
       plans: Object.fromEntries(planCounts.map((p) => [p.plan, p._count.id])),
     });
   } catch (err) {
@@ -136,14 +148,26 @@ router.get("/stats", async (req: Request, res: Response) => {
   }
 });
 
-// ── Visitor analytics ──
+/** Superseded by /api/admin/platform/audit, which adds filters, sort and export. */
+router.get("/audit", async (req: Request, res: Response) => {
+  try {
+    const page = parseInt(String(req.query.page || "1"), 10);
+    const pageSize = parseInt(String(req.query.pageSize || "50"), 10);
+    const result = await adminListAuditLogs({ page, pageSize });
+    res.json(result);
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+/** Superseded by /api/admin/platform/visitors, which takes a ?days window. */
 router.get("/visitors", async (req: Request, res: Response) => {
   try {
     const { getVisitorStats } = await import("./visitorTracker");
     const stats = await getVisitorStats();
     res.json(stats);
   } catch (err) {
-    handleError(res, err);
+    sendAdminError(res, err);
   }
 });
 

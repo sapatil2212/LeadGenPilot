@@ -2559,12 +2559,24 @@ async function startServer() {
     res.status(404).json({ error: `API route not found: ${req.method} ${req.originalUrl}` });
   });
 
-  // No site favicon by design. Browsers request /favicon.ico regardless of the
-  // markup, so answer with 204 to stop the request falling through to the SPA
-  // shell or a stale cached icon.
+  // Serve site favicon from public or assets
+  const faviconFile = [
+    path.join(process.cwd(), "assets", "favicon.png"),
+    path.join(process.cwd(), "assets", "logo", "favicon.png"),
+    path.join(process.cwd(), "public", "favicon.png"),
+  ].find((p) => fs.existsSync(p));
+
   app.get(["/favicon.ico", "/favicon.png", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"], (_req, res) => {
+    if (faviconFile && fs.existsSync(faviconFile)) {
+      res.setHeader("Content-Type", "image/png");
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      return res.sendFile(faviconFile);
+    }
     res.status(204).end();
   });
+
+  // Serve static assets directory
+  app.use("/assets", express.static(path.join(process.cwd(), "assets")));
 
   // Serve all Next.js landing page static export files (HTML, CSS, images, etc.)
   app.use(express.static(nextOutPath));

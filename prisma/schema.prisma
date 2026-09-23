@@ -25,6 +25,16 @@ model User {
   // Subscription plan: "free" | "pro" | "custom"
   plan String @default("free")
 
+  /// Account lifecycle, set by the platform operator from the superadmin
+  /// console: "active" | "suspended".
+  ///
+  /// Distinct from `lockedUntil`, which is an automatic, self-healing
+  /// brute-force lockout. Suspension is a deliberate administrative act with no
+  /// expiry: the account keeps its data but cannot sign in until an operator
+  /// reactivates it. Enforced in login() so the refusal cannot be bypassed by
+  /// any client.
+  status String @default("active")
+
   // Monthly lead-usage tracking. usagePeriod is "YYYY-MM"; leadsUsed resets
   // when a new period begins.
   leadsUsed   Int     @default(0) @map("leads_used")
@@ -55,6 +65,12 @@ model User {
   campaigns Campaign[]
   assignedLeads Lead[] @relation("LeadAssignee")
 
+  subscriptions Subscription[]
+  invoices      Invoice[]
+  payments      Payment[]
+
+  @@index([status])
+  @@index([plan])
   @@map("users")
 }
 
@@ -116,6 +132,9 @@ model Tenant {
   conversationMessages ConversationMessage[]
   campaignDispatches   CampaignDispatch[]
   suppressions         SuppressionEntry[]
+
+  subscriptions Subscription[]
+  invoices      Invoice[]
 
   @@index([status])
   @@map("tenants")
@@ -1320,4 +1339,340 @@ model SuppressionEntry {
   @@unique([tenantId, channel, contactKey])
   @@index([tenantId, createdAt])
   @@map("suppression_entries")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BILLING
+//
+// Until now the entire commercial model was one string column, `User.plan`,
+// and a hard-coded entitlement table in src/plans.ts. That is enough to gate a
+// feature and nothing else: it cannot say what a customer pays, when they
+// started paying, whether the last charge cleared, what was invoiced, or what
+// the platform earns in a month. Every one of those questions is one the
+// operator console has to answer, so they get real rows.
+//
+// Money is stored as an INTEGER count of minor units (paise for INR, cents for
+// USD) and never as a float. A price of ₹999.00 is 99900. Floating point
+// arithmetic on currency silently loses fractions, and a billing system that is
+// off by a paisa per invoice is a billing system nobody trusts.
+//
+// `User.plan` is deliberately kept as the enforcement field read by
+// src/entitlements.ts. Subscription is the commercial record; the plan column is
+// the cached grant derived from it. The admin API writes both together so they
+// cannot drift.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A sellable plan. Editable by the operator, which is the point: pricing,
+/// limits and packaging change far more often than code deploys, and until now
+/// changing the lead quota on the Free tier meant editing src/plans.ts and
+/// shipping a release.
+///
+/// Rows are seeded from src/plans.ts on first use so the console never opens on
+/// an empty pricing table, but after that this table is authoritative for
+/// everything except the compiled fallbacks.
+model PlanDefinition {
+  id String @id @default(cuid())
+
+  /// Stable machine key matching User.plan ("free", "pro", "custom", …).
+  /// Immutable after creation: changing it would orphan every subscriber.
+  key String @unique
+
+  name        String
+  description String? @db.Text
+
+  /// Recurring price in minor units, per cycle. 0 means free.
+  priceMonthly Int    @default(0) @map("price_monthly")
+  priceYearly  Int    @default(0) @map("price_yearly")
+  currency     String @default("INR")
+
+  /// New leads permitted per calendar month. -1 means unlimited — a sentinel
+  /// rather than null so the column stays NOT NULL and comparisons in SQL keep
+  /// working.
+  monthlyLeadLimit Int @default(100) @map("monthly_lead_limit")
+
+  /// Included seats (tenant members). -1 means unlimited.
+  seats     Int @default(1)
+  trialDays Int @default(0) @map("trial_days")
+
+  /// JSON array of feature keys granted by this plan, e.g.
+  /// ["whatsappOutreach","aiInsights"]. Kept as JSON on the row because it is
+  /// always read whole with the plan and never queried on its own.
+  features String? @db.Text
+
+  /// Marketing flags. `isPublic` false keeps a plan usable for existing
+  /// subscribers while hiding it from new sign-ups (a grandfathered tier).
+  highlight Boolean @default(false)
+  isActive  Boolean @default(true) @map("is_active")
+  isPublic  Boolean @default(true) @map("is_public")
+  sortOrder Int     @default(0) @map("sort_order")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([isActive])
+  @@index([sortOrder])
+  @@map("plan_definitions")
+}
+
+/// One customer's commercial agreement. At most one is "current" per user in
+/// practice, but history is kept as separate rows rather than by mutating one:
+/// an upgrade, a downgrade and a churn-then-return are all facts the operator
+/// needs to see later, and overwriting them destroys the only record of what
+/// the customer was paying and when.
+///
+/// `planKey` is a plain string, not a foreign key into PlanDefinition. A plan
+/// that is retired must not cascade-delete or block the subscriptions that
+/// reference it, and the price actually agreed is captured on `amount` here
+/// anyway, so the row survives the catalogue changing underneath it.
+model Subscription {
+  id       String  @id @default(cuid())
+  userId   String  @map("user_id")
+  tenantId String? @map("tenant_id")
+
+  planKey String @map("plan_key")
+
+  /// "trialing" | "active" | "past_due" | "paused" | "canceled" | "expired".
+  status String @default("active")
+
+  /// "monthly" | "yearly" | "lifetime".
+  billingCycle String @default("monthly") @map("billing_cycle")
+
+  /// Amount charged per cycle in minor units, AFTER any negotiated discount.
+  /// Recorded here rather than read from the plan so historical rows stay true
+  /// after a price change.
+  amount   Int    @default(0)
+  currency String @default("INR")
+
+  seats           Int @default(1)
+  discountPercent Int @default(0) @map("discount_percent")
+
+  startedAt          DateTime  @default(now()) @map("started_at")
+  currentPeriodStart DateTime  @map("current_period_start")
+  currentPeriodEnd   DateTime  @map("current_period_end")
+  trialEndsAt        DateTime? @map("trial_ends_at")
+
+  /// Set when the customer has asked to stop but has paid through the period.
+  /// Kept separate from status so a subscription can be simultaneously active
+  /// (entitlements still granted) and ending (no renewal invoice).
+  cancelAtPeriodEnd Boolean   @default(false) @map("cancel_at_period_end")
+  canceledAt        DateTime? @map("canceled_at")
+  cancelReason      String?   @map("cancel_reason") @db.Text
+
+  /// Identifier at the payment processor, once one is wired up. Nullable
+  /// because subscriptions are operator-created today.
+  externalRef String? @map("external_ref")
+  notes       String? @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant   Tenant?   @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  invoices Invoice[]
+
+  @@index([userId])
+  @@index([tenantId])
+  @@index([status])
+  @@index([planKey])
+  @@index([currentPeriodEnd])
+  @@index([status, currentPeriodEnd])
+  @@map("subscriptions")
+}
+
+/// A bill issued to a customer. Immutable in spirit: once issued, an invoice is
+/// voided and replaced rather than rewritten, which is why `status` carries
+/// "void" instead of the row being deleted.
+///
+/// `userId` is nullable and SetNull on delete so financial history outlives the
+/// account it belonged to. Deleting a user must not erase the record that money
+/// changed hands — `billingName` / `billingEmail` snapshot who was billed so the
+/// invoice still reads correctly after the relation is gone.
+model Invoice {
+  id String @id @default(cuid())
+
+  /// Human-facing sequential reference, e.g. "INV-2026-0001". Unique so a
+  /// double-submit cannot mint two invoices with the same number.
+  number String @unique
+
+  userId         String? @map("user_id")
+  tenantId       String? @map("tenant_id")
+  subscriptionId String? @map("subscription_id")
+
+  /// "draft" | "open" | "paid" | "partially_paid" | "void" | "uncollectible" | "refunded".
+  status   String @default("open")
+  currency String @default("INR")
+
+  /// All amounts in minor units. total = subtotal - discount + tax.
+  subtotal Int @default(0)
+  discount Int @default(0)
+
+  /// Tax rate in HUNDREDTHS of a percent, so 18% GST is 1800. Integer basis
+  /// points avoid storing 18.5 as a float and re-deriving a different rounding
+  /// than the one that produced `tax`.
+  taxPercent Int @default(0) @map("tax_percent")
+  tax        Int @default(0)
+  total      Int @default(0)
+  amountPaid Int @default(0) @map("amount_paid")
+
+  /// JSON array of { description, quantity, unitAmount, amount }.
+  lineItems String? @map("line_items") @db.Text
+
+  issuedAt DateTime  @default(now()) @map("issued_at")
+  dueAt    DateTime? @map("due_at")
+  paidAt   DateTime? @map("paid_at")
+
+  periodStart DateTime? @map("period_start")
+  periodEnd   DateTime? @map("period_end")
+
+  billingName  String? @map("billing_name")
+  billingEmail String? @map("billing_email")
+  notes        String? @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  tenant       Tenant?       @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  payments     Payment[]
+
+  @@index([userId])
+  @@index([tenantId])
+  @@index([subscriptionId])
+  @@index([status])
+  @@index([issuedAt])
+  @@index([dueAt])
+  @@index([status, dueAt])
+  @@map("invoices")
+}
+
+/// A movement of money against an invoice. Separate from Invoice because one
+/// bill can be settled by several attempts — a failed card, a retry, a partial
+/// transfer — and because a refund is a payment event, not an invoice edit.
+model Payment {
+  id String @id @default(cuid())
+
+  invoiceId String? @map("invoice_id")
+  userId    String? @map("user_id")
+
+  /// Minor units. Positive for a charge; refunds are tracked on
+  /// `refundedAmount` rather than as a negative amount, so summing `amount`
+  /// over succeeded rows always gives gross collected.
+  amount   Int    @default(0)
+  currency String @default("INR")
+
+  /// "succeeded" | "pending" | "failed" | "refunded" | "partially_refunded".
+  status String @default("succeeded")
+
+  /// "card" | "upi" | "netbanking" | "bank_transfer" | "paypal" | "wallet" | "manual" | "cheque".
+  method String @default("manual")
+
+  /// Processor name and its transaction id, for reconciliation.
+  gateway   String?
+  reference String?
+
+  failureReason  String? @map("failure_reason") @db.Text
+  refundedAmount Int     @default(0) @map("refunded_amount")
+
+  paidAt DateTime @default(now()) @map("paid_at")
+  notes  String?  @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  invoice Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([invoiceId])
+  @@index([userId])
+  @@index([status])
+  @@index([method])
+  @@index([paidAt])
+  @@map("payments")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLATFORM OPERATIONS
+//
+// Controls that belong to the operator rather than to any tenant: what is
+// switched on, what is being announced, and what the platform's own knobs are
+// set to. All three used to be code constants or environment variables, which
+// meant changing any of them required a deploy and left no record of who
+// changed what.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A runtime feature switch. Lets a risky capability be turned off for
+/// everyone, or rolled out to a fraction of accounts, without shipping code.
+model FeatureFlag {
+  id          String  @id @default(cuid())
+  key         String  @unique
+  name        String
+  description String? @db.Text
+
+  enabled Boolean @default(false)
+
+  /// 0-100. Applied by hashing the subject id, so a given account stays on the
+  /// same side of the split between requests.
+  rolloutPercent Int @default(100) @map("rollout_percent")
+
+  /// "all" | "plan:free" | "plan:pro" | "plan:custom" | "role:admin".
+  audience String @default("all")
+
+  updatedBy String?  @map("updated_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([enabled])
+  @@map("feature_flags")
+}
+
+/// An operator message shown in the product — maintenance windows, incidents,
+/// release notes.
+model Announcement {
+  id    String @id @default(cuid())
+  title String
+  body  String @db.Text
+
+  /// "info" | "success" | "warning" | "critical".
+  level String @default("info")
+
+  /// Same grammar as FeatureFlag.audience.
+  audience String @default("all")
+
+  isActive    Boolean   @default(true) @map("is_active")
+  publishedAt DateTime? @map("published_at")
+  expiresAt   DateTime? @map("expires_at")
+
+  createdBy String?  @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([isActive])
+  @@index([publishedAt])
+  @@map("announcements")
+}
+
+/// A single operator-editable platform setting. A key/value table rather than a
+/// wide row so a new setting needs no migration, which is the whole reason these
+/// are not environment variables: secrets belong in the environment, policy
+/// belongs somewhere it can be changed and audited.
+model PlatformSetting {
+  id  String @id @default(cuid())
+  key String @unique
+
+  /// JSON-encoded, so a setting can be a string, number, boolean or object
+  /// without the column caring.
+  value String @db.Text
+
+  /// Grouping for the settings UI: "general" | "limits" | "billing" | "security" | "notifications".
+  category    String  @default("general")
+  label       String?
+  description String? @db.Text
+
+  updatedBy String?  @map("updated_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([category])
+  @@map("platform_settings")
 }
