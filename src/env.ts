@@ -103,8 +103,8 @@ export const env = {
     // Session lifetime in days.
     sessionDays: toInt(process.env.AUTH_SESSION_DAYS, 7),
     // Cookie name for the session token and the validated active workspace.
-    cookieName: process.env.AUTH_COOKIE_NAME || "nexaleadai_session",
-    tenantCookieName: process.env.AUTH_TENANT_COOKIE_NAME || "nexaleadai_tenant",
+    cookieName: process.env.AUTH_COOKIE_NAME || "leadgenpilot_session",
+    tenantCookieName: process.env.AUTH_TENANT_COOKIE_NAME || "leadgenpilot_tenant",
     // OTP configuration.
     otpLength: 6,
     otpTtlMinutes: toInt(process.env.OTP_TTL_MINUTES, 10),
@@ -112,7 +112,7 @@ export const env = {
     // Minimum seconds between OTP resends for the same email.
     otpResendSeconds: toInt(process.env.OTP_RESEND_SECONDS, 30),
     // Product name shown in OTP emails.
-    appName: process.env.APP_NAME || "NexaLeadAi",
+    appName: process.env.APP_NAME || "LeadGenPilot",
     // Brute-force lockout.
     maxFailedLogins: toInt(process.env.MAX_FAILED_LOGINS, 5),
     lockoutMinutes: toInt(process.env.LOCKOUT_MINUTES, 15),

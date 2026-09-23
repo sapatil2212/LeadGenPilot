@@ -83,6 +83,7 @@ router.delete("/", async (req: Request, res: Response) => {
     if (!password) return res.status(400).json({ error: "Password confirmation is required.", code: "missing_fields" });
     await deleteAccount(userId, { password }, metaOf(req));
     res.clearCookie(env.auth.cookieName, { ...sessionCookieOptions(), maxAge: undefined });
+    res.clearCookie("nexaleadai_session", { ...sessionCookieOptions(), maxAge: undefined });
     res.json({ success: true, message: "Your account has been deleted." });
   } catch (err) {
     handleError(res, err);

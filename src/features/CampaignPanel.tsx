@@ -521,7 +521,7 @@ function GenerateTab({ isLight }: Themed) {
 
   const initialManualLeadIds = (() => {
     try {
-      const value = JSON.parse(sessionStorage.getItem("nexaleadai_campaign_lead_ids") || "[]");
+      const value = JSON.parse(sessionStorage.getItem("leadgenpilot_campaign_lead_ids") || sessionStorage.getItem("nexaleadai_campaign_lead_ids") || "[]");
       return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
     } catch { return [] as string[]; }
   })();
@@ -632,7 +632,7 @@ function GenerateTab({ isLight }: Themed) {
             <div className={`rounded-lg border px-3 py-2 text-sm ${t.body} ${t.border}`}>
               {manualLeadIds.length} lead{manualLeadIds.length === 1 ? "" : "s"} selected from the Leads workspace
               {manualLeadIds.length > 0 && (
-                <button type="button" className="ml-2 text-xs text-rose-400" onClick={() => { setManualLeadIds([]); sessionStorage.removeItem("nexaleadai_campaign_lead_ids"); }}>Clear</button>
+                <button type="button" className="ml-2 text-xs text-rose-400" onClick={() => { setManualLeadIds([]); sessionStorage.removeItem("leadgenpilot_campaign_lead_ids"); sessionStorage.removeItem("nexaleadai_campaign_lead_ids"); }}>Clear</button>
               )}
             </div>
           </Field>

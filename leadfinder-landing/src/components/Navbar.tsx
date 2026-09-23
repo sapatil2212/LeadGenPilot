@@ -6,6 +6,7 @@ import { Menu, X, Zap, LogIn } from "lucide-react";
 const navLinks = [
   { label: "Features", href: "#features" },
   { label: "How It Works", href: "#how-it-works" },
+  { label: "Outreach", href: "#outreach" },
   { label: "Scoring", href: "#scoring" },
   { label: "Pricing", href: "#pricing" },
   { label: "FAQ", href: "#faq" },
@@ -40,7 +41,7 @@ export default function Navbar() {
 
           {/* Logo */}
           <Link href="/" className="flex items-center">
-            <img src="/logo.png" alt="NexaLeadAi" className="h-8 w-auto object-contain" />
+            <img src="/logo.png" alt="LeadGenPilot" className="h-8 w-auto object-contain" />
           </Link>
 
           {/* Desktop Nav */}

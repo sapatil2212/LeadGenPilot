@@ -276,6 +276,8 @@ describe("scoreFit", () => {
 
     await fit.scoreFit(CTX_A, candidates, icpView());
 
+    const request = mocks.generateStructuredOutput.mock.calls[0][0];
+    expect(request.maxTokens).toBe(2_048);
     const options = mocks.generateStructuredOutput.mock.calls[0][1];
     expect(options).toMatchObject({
       operation: "lead.icpFit",

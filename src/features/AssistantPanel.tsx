@@ -158,15 +158,15 @@ export default function AssistantPanel({ isLight }: Themed) {
 
       <div className="grid lg:grid-cols-[260px_1fr] gap-4 items-start">
         {/* Threads */}
-        <div className={`border rounded-2xl overflow-hidden ${t.card}`}>
-          <div className={`px-4 py-3 border-b ${t.border} flex items-center justify-between gap-2`}>
-            <span className={`text-xs font-semibold ${t.heading}`}>Conversations</span>
+        <div className={`border rounded-xl overflow-hidden ${t.card}`}>
+          <div className={`px-3.5 py-2.5 border-b ${t.border} flex items-center justify-between gap-2`}>
+            <span className={`text-xs font-bold ${t.heading}`}>Conversations</span>
             <Button isLight={isLight} variant="ghost" icon={MessageSquarePlus} onClick={startNew}>
               New
             </Button>
           </div>
 
-          <div className="max-h-[420px] overflow-y-auto p-2 space-y-1">
+          <div className="max-h-[420px] overflow-y-auto p-1.5 space-y-1">
             {threads.loading ? (
               <Spinner isLight={isLight} />
             ) : (threads.data ?? []).length === 0 ? (
@@ -218,12 +218,12 @@ export default function AssistantPanel({ isLight }: Themed) {
         </div>
 
         {/* Thread */}
-        <div className={`border rounded-2xl flex flex-col ${t.card}`} style={{ minHeight: 480 }}>
-          <div className={`px-5 py-3.5 border-b ${t.border} flex items-center gap-2.5`}>
+        <div className={`border rounded-xl flex flex-col ${t.card}`} style={{ minHeight: 460 }}>
+          <div className={`px-4 py-2.5 border-b ${t.border} flex items-center gap-2`}>
             <Bot className="h-4 w-4 text-indigo-500" />
             <div className="min-w-0">
-              <div className={`text-sm font-semibold ${t.heading}`}>Business assistant</div>
-              <div className={`text-[11px] ${t.muted}`}>
+              <div className={`text-xs font-bold ${t.heading}`}>Business assistant</div>
+              <div className={`text-[10.5px] ${t.muted}`}>
                 Answers from your business profile and your own documents — nothing else.
               </div>
             </div>

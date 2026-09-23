@@ -11,12 +11,12 @@ import { logger } from "./logger";
 dotenv.config();
 
 /**
- * CLI Entrance point for NexaLeadAi Agent
+ * CLI Entrance point for LeadGenPilot Agent
  */
 async function main() {
   logger.clear();
   logger.log("=================================================");
-  logger.log("          NEXALEADAI - SCRAPER BOT                 ");
+  logger.log("         LEADGENPILOT - SCRAPER BOT              ");
   logger.log("=================================================");
   
   try {

@@ -4,99 +4,129 @@ import { Search, Sparkles, Zap, Database, Mail, Shield } from "lucide-react";
 
 const features = [
   {
-    Icon: Search, color: "indigo",
-    iconBg: "bg-indigo-100", iconColor: "text-indigo-600",
-    tag: "Scraping", tagBg: "bg-indigo-50", tagColor: "text-indigo-600",
+    Icon: Search,
+    iconBg: "bg-indigo-50",
+    iconColor: "text-indigo-600",
+    tag: "Scraping",
+    tagBg: "bg-indigo-50",
+    tagColor: "text-indigo-600",
     title: "Google Maps Automation",
-    desc: "Playwright-powered Chromium headlessly scans any business type in any city — extracting name, phone, address, ratings, reviews, and all social handles automatically.",
-    stat: "100+ listings/run",
+    desc: "Playwright-powered Chromium headlessly scans any business category in any city — extracting name, verified phone, address, ratings, reviews, and social handles.",
+    stat: "100+ listings per run",
   },
   {
-    Icon: Sparkles, color: "violet",
-    iconBg: "bg-violet-100", iconColor: "text-violet-600",
-    tag: "AI", tagBg: "bg-violet-50", tagColor: "text-violet-600",
-    title: "Gemini AI Insights",
-    desc: "Each lead gets a unique AI-generated insight: opportunity gaps, digital weakness analysis, and a personalized outreach angle — powered by Google Gemini.",
-    stat: "AI-powered per lead",
+    Icon: Sparkles,
+    iconBg: "bg-violet-50",
+    iconColor: "text-violet-600",
+    tag: "AI Insights",
+    tagBg: "bg-violet-50",
+    tagColor: "text-violet-600",
+    title: "Gemini AI Opportunity Analysis",
+    desc: "Every lead receives an automated pitch angle highlighting operational gaps, lack of mobile booking portals, and reputation strengths.",
+    stat: "Powered by Gemini 2.0",
   },
   {
-    Icon: Zap, color: "blue",
-    iconBg: "bg-blue-100", iconColor: "text-blue-600",
-    tag: "Scoring", tagBg: "bg-blue-50", tagColor: "text-blue-600",
-    title: "Smart Lead Scoring",
-    desc: "Every lead is scored 0–100 across website presence, review count, star rating, and phone availability. Focus exclusively on HOT and WARM leads.",
-    stat: "0–100 score engine",
+    Icon: Zap,
+    iconBg: "bg-sky-50",
+    iconColor: "text-sky-600",
+    tag: "Scoring",
+    tagBg: "bg-sky-50",
+    tagColor: "text-sky-600",
+    title: "Smart 0–100 Lead Scoring",
+    desc: "Leads are evaluated across website absence, review volume, star rating, and direct phone lines so your sales team only focuses on HOT opportunities.",
+    stat: "Automated qualification",
   },
   {
-    Icon: Database, color: "emerald",
-    iconBg: "bg-emerald-100", iconColor: "text-emerald-600",
-    tag: "Delivery", tagBg: "bg-emerald-50", tagColor: "text-emerald-600",
+    Icon: Database,
+    iconBg: "bg-emerald-50",
+    iconColor: "text-emerald-600",
+    tag: "Delivery",
+    tagBg: "bg-emerald-50",
+    tagColor: "text-emerald-600",
     title: "Real-Time Google Sheets Sync",
-    desc: "Leads stream directly to your Google Sheet via Apps Script webhooks the moment they're scored. No manual exports, no CSVs, no delays.",
-    stat: "<2s sync time",
+    desc: "Streams directly to your Google Sheet via custom Apps Script webhooks the second leads are scored. Zero manual exports or messy CSV uploads.",
+    stat: "< 1.5s webhook latency",
   },
   {
-    Icon: Mail, color: "amber",
-    iconBg: "bg-amber-100", iconColor: "text-amber-600",
-    tag: "Outreach", tagBg: "bg-amber-50", tagColor: "text-amber-700",
+    Icon: Mail,
+    iconBg: "bg-amber-50",
+    iconColor: "text-amber-600",
+    tag: "Outreach",
+    tagBg: "bg-amber-50",
+    tagColor: "text-amber-700",
     title: "Email & WhatsApp Outreach",
-    desc: "Send AI-crafted, fully personalized emails and WhatsApp messages directly from the dashboard. Delivery status syncs back to your sheet automatically.",
-    stat: "1-click outreach",
+    desc: "Dispatch AI-personalized emails via custom SMTP and automated WhatsApp conversations with human-paced delivery to protect account health.",
+    stat: "1-click multi-channel",
   },
   {
-    Icon: Shield, color: "rose",
-    iconBg: "bg-rose-100", iconColor: "text-rose-600",
-    tag: "Reliability", tagBg: "bg-rose-50", tagColor: "text-rose-600",
+    Icon: Shield,
+    iconBg: "bg-rose-50",
+    iconColor: "text-rose-600",
+    tag: "Reliability",
+    tagBg: "bg-rose-50",
+    tagColor: "text-rose-600",
     title: "Deduplication & Failure Safety",
-    desc: "Hash-based deduplication eliminates duplicate leads across every run. 3-retry webhook delivery with offline fallback ensures zero lead is ever lost.",
-    stat: "98% accuracy",
+    desc: "Unique name and address hash caching guarantees you never scrape the same business twice. Automatic 3-retry webhook delivery ensures zero data loss.",
+    stat: "100% duplicate protection",
   },
 ];
 
-const container = { hidden: {}, visible: { transition: { staggerChildren: 0.1 } } };
-const item = { hidden: { opacity: 0, y: 30 }, visible: { opacity: 1, y: 0, transition: { duration: 0.6 } } };
+const container = { hidden: {}, visible: { transition: { staggerChildren: 0.08 } } };
+const item = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.5 } } };
 
 export default function Features() {
   return (
-    <section id="features" className="py-24 bg-gradient-to-b from-slate-50 to-white">
-      <div className="max-w-7xl mx-auto px-6">
-        {/* Header */}
-        <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }} className="text-center max-w-2xl mx-auto mb-16">
-          <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest bg-indigo-50 text-indigo-600 border border-indigo-100 mb-4">
-            <Sparkles className="w-3.5 h-3.5" /> Everything You Need
+    <section id="features" className="py-24 bg-gradient-to-b from-slate-50 to-white border-b border-slate-100">
+      <div className="max-w-6xl mx-auto px-6">
+        {/* Section Header */}
+        <motion.div 
+          initial={{ opacity: 0, y: 16 }} 
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true }} 
+          className="text-center max-w-2xl mx-auto mb-14"
+        >
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold uppercase tracking-wider bg-indigo-50 text-indigo-600 border border-indigo-100 mb-3">
+            <Sparkles className="w-3.5 h-3.5" /> Platform Capabilities
           </span>
-          <h2 className="text-4xl lg:text-5xl font-extrabold text-slate-900 tracking-tight mb-4">
-            Built for Serious<br /><span className="gradient-text">Lead Generation</span>
+          <h2 className="text-3xl sm:text-4xl font-semibold text-slate-900 tracking-tight mb-3">
+            Engineered for Modern <span className="gradient-text">Outbound Sales</span>
           </h2>
-          <p className="text-slate-500 text-lg leading-relaxed">
-            A complete AI automation stack — from scraping to outreach — with intelligence at every step.
+          <p className="text-sm sm:text-base text-slate-500 leading-relaxed max-w-lg mx-auto">
+            Everything your agency or sales team needs to find, score, and close high-value local business clients.
           </p>
         </motion.div>
 
-        {/* Grid */}
-        <motion.div variants={container} initial="hidden" whileInView="visible" viewport={{ once: true, margin: "-50px" }}
-          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {/* Standardized 6-Card Grid */}
+        <motion.div 
+          variants={container} 
+          initial="hidden" 
+          whileInView="visible" 
+          viewport={{ once: true, margin: "-40px" }}
+          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"
+        >
           {features.map((f) => (
-            <motion.div key={f.title} variants={item}
-              whileHover={{ y: -6, transition: { duration: 0.2 } }}
-              className="group relative bg-white rounded-3xl border border-slate-200 p-8 hover:border-indigo-200 hover:shadow-xl hover:shadow-indigo-500/10 transition-all duration-300 cursor-default overflow-hidden">
-
-              {/* Gradient hover overlay */}
-              <div className="absolute inset-0 bg-gradient-to-br from-indigo-50/0 to-violet-50/0 group-hover:from-indigo-50/40 group-hover:to-violet-50/20 transition-all duration-500 rounded-3xl pointer-events-none" />
-
-              <div className="relative">
-                <div className={`w-12 h-12 rounded-2xl ${f.iconBg} flex items-center justify-center mb-5 group-hover:scale-110 transition-transform duration-300`}>
-                  <f.Icon className={`w-6 h-6 ${f.iconColor}`} />
+            <motion.div 
+              key={f.title} 
+              variants={item}
+              whileHover={{ y: -4, transition: { duration: 0.2 } }}
+              className="group relative bg-white rounded-2xl border border-slate-200/90 p-6 sm:p-7 hover:border-indigo-300 hover:shadow-lg hover:shadow-indigo-500/5 transition-all duration-300 cursor-default flex flex-col justify-between h-full"
+            >
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <div className={`w-10 h-10 rounded-xl ${f.iconBg} flex items-center justify-center group-hover:scale-105 transition-transform duration-300`}>
+                    <f.Icon className={`w-5 h-5 ${f.iconColor}`} />
+                  </div>
+                  <span className={`text-[11px] font-semibold uppercase tracking-wider px-2.5 py-0.5 rounded-full ${f.tagBg} ${f.tagColor}`}>
+                    {f.tag}
+                  </span>
                 </div>
-                <span className={`inline-block text-xs font-bold uppercase tracking-widest px-2.5 py-1 rounded-full mb-3 ${f.tagBg} ${f.tagColor}`}>
-                  {f.tag}
-                </span>
-                <h3 className="text-base font-bold text-slate-900 mb-3">{f.title}</h3>
-                <p className="text-sm text-slate-500 leading-relaxed mb-5">{f.desc}</p>
-                <div className="flex items-center gap-2 pt-4 border-t border-slate-100">
-                  <span className={`text-xs font-bold ${f.iconColor}`}>{f.stat}</span>
-                </div>
+
+                <h3 className="text-base font-semibold text-slate-900 mb-2">{f.title}</h3>
+                <p className="text-xs sm:text-sm text-slate-500 leading-relaxed mb-4">{f.desc}</p>
+              </div>
+
+              <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
+                <span className={`text-xs font-semibold ${f.iconColor}`}>{f.stat}</span>
               </div>
             </motion.div>
           ))}

@@ -1,10 +1,10 @@
 {
-  "name": "nexaleadai",
+  "name": "leadgenpilot",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server-dev.js && node dist/server-dev.js",
+    "dev": "esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server-dev.js && node --env-file=.env dist/server-dev.js",
     "build:landing": "npm --prefix leadfinder-landing run build",
     "build": "npm run build:landing && vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && esbuild src/worker.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/worker.cjs",
     "start": "node dist/server.cjs",
@@ -34,9 +34,9 @@
     "verify:fresh-db": "node scripts/verify-fresh-migration.mjs",
     "prisma:push": "echo \"REFUSED: 'db push' bypasses migration history. Use 'npm run prisma:migrate:dev' to create a migration, or 'npm run prisma:migrate' to deploy one. Override deliberately with 'npx prisma db push'.\" && exit 1",
     "db:studio": "prisma studio",
-    "setup:browsers": "playwright install --with-deps chromium",
+    "setup:browsers": "node node_modules/playwright/cli.js install --with-deps chromium",
     "postinstall": "prisma generate && npm run --silent install:browsers",
-    "install:browsers": "playwright install chromium || echo \"Playwright browser download failed - run 'npx playwright install --with-deps chromium' manually before scraping\""
+    "install:browsers": "node node_modules/playwright/cli.js install chromium"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

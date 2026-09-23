@@ -80,7 +80,7 @@ export async function attachEntitlements(req: Request, _res: Response, next: Nex
       req.entitlements = ADMIN_ENTITLEMENTS;
       return next();
     }
-    const token = req.cookies?.[env.auth.cookieName];
+    const token = req.cookies?.[env.auth.cookieName] || req.cookies?.["nexaleadai_session"];
     const payload = token ? verifySessionToken(token) : null;
     if (payload) {
       const user = await prisma.user.findUnique({ where: { id: payload.sub } });

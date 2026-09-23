@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: nexaleadai
+    name: leadgenpilot
     runtime: docker
     plan: free
     healthCheckPath: /api/health
@@ -44,7 +44,7 @@ services:
   # Phase 7: a separate process owns durable campaign leases. Scale this
   # independently from the web service; all replicas coordinate through MySQL.
   - type: worker
-    name: nexaleadai-campaign-worker
+    name: leadgenpilot-campaign-worker
     runtime: docker
     plan: starter
     dockerCommand: npm run worker

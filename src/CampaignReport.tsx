@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import WhatsAppLogo from "./WhatsAppLogo";
 import AlertModal, { AlertModalType } from "./AlertModal";
+import { ModalPortal } from "./ui/primitives";
 // Document writers are loaded on demand from the export handlers below. Opening
 // the Reports tab should not download a spreadsheet engine, a PDF engine and a
 // Word engine before the first row is visible.
@@ -373,11 +374,11 @@ export default function CampaignReport({ isLight, liveRefresh = false, alwaysExp
           try { doc.addImage(logoDataUrl, "PNG", 5, (HEADER_H - logoH) / 2, logoW, logoH); }
           catch {
             doc.setTextColor(79, 70, 229); doc.setFontSize(11);
-            doc.setFont("helvetica", "bold"); doc.text("NexaLeadAI", 5, 11);
+            doc.setFont("helvetica", "bold"); doc.text("LeadGenPilot", 5, 11);
           }
         } else {
           doc.setTextColor(79, 70, 229); doc.setFontSize(11);
-          doc.setFont("helvetica", "bold"); doc.text("NexaLeadAI", 5, 11);
+          doc.setFont("helvetica", "bold"); doc.text("LeadGenPilot", 5, 11);
         }
 
         // Title beside logo
@@ -508,7 +509,7 @@ export default function CampaignReport({ isLight, liveRefresh = false, alwaysExp
         },
         children: [
           new Paragraph({
-            children: [new TextRun({ text: "NexaLeadAI — Campaign Dispatch Report", bold: true, size: 32, color: "4F46E5" })],
+            children: [new TextRun({ text: "LeadGenPilot — Campaign Dispatch Report", bold: true, size: 32, color: "4F46E5" })],
             spacing: { after: 120 },
           }),
           new Paragraph({
@@ -535,41 +536,41 @@ export default function CampaignReport({ isLight, liveRefresh = false, alwaysExp
   const subtleText = isLight ? "text-slate-500" : "text-slate-400";
 
   return (
-    <div className={`border rounded-2xl p-6 space-y-5 transition-all duration-300 ${cardBg}`}>
+    <div className={`border rounded-xl p-4 sm:p-5 space-y-4 transition-all duration-300 ${cardBg}`}>
       <div
         onClick={() => setExpanded((e) => !e)}
         className="flex items-center justify-between cursor-pointer select-none group"
       >
         <div className="flex items-center gap-2">
-          <History className="h-4.5 w-4.5 text-indigo-400" />
-          <h3 className={`text-sm font-semibold transition-colors ${isLight ? "text-slate-800 group-hover:text-indigo-600" : "text-white group-hover:text-indigo-400"}`}>
+          <History className="h-4 w-4 text-indigo-400" />
+          <h3 className={`text-xs font-bold transition-colors ${isLight ? "text-slate-800 group-hover:text-indigo-600" : "text-white group-hover:text-indigo-400"}`}>
             Dispatch History &amp; Reports
           </h3>
           {liveRefresh && (
-            <span className="flex items-center gap-1 text-[9px] font-bold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded-full animate-pulse">
+            <span className="flex items-center gap-1 text-[8.5px] font-bold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded-full animate-pulse border border-emerald-500/20">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> LIVE
             </span>
           )}
         </div>
-        <button className={`p-1 rounded-lg border transition-all ${isLight ? "bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800 hover:bg-slate-100" : "bg-slate-900/50 border-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"}`}>
+        <button className={`p-1 rounded-lg border transition-all cursor-pointer ${isLight ? "bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800 hover:bg-slate-100" : "bg-slate-900/50 border-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"}`}>
           {expanded ? <X className="h-3.5 w-3.5" /> : <History className="h-3.5 w-3.5" />}
         </button>
       </div>
 
       {expanded && (
-        <div className="space-y-5 animate-fadeIn">
+        <div className="space-y-4 animate-fadeIn">
           {/* Summary stat cards */}
           {summary && (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
               {[
                 { label: "Total Dispatched", value: summary.total, color: "text-indigo-400" },
                 { label: "Sent", value: summary.totalSent, color: "text-emerald-400" },
                 { label: "Failed", value: summary.totalFailed, color: "text-rose-400" },
                 { label: "Success Rate", value: `${summary.successRate}%`, color: "text-sky-400" },
               ].map((s) => (
-                <div key={s.label} className={`p-3 rounded-xl border text-center transition-all ${isLight ? "bg-slate-50 border-slate-200" : "bg-slate-950/40 border-slate-900"}`}>
-                  <div className={`text-xl font-black ${s.color}`}>{s.value}</div>
-                  <div className={`text-[9px] uppercase tracking-wide mt-0.5 ${subtleText}`}>{s.label}</div>
+                <div key={s.label} className={`p-2.5 rounded-xl border text-center transition-all duration-200 hover:-translate-y-0.5 hover:shadow-xs ${isLight ? "bg-slate-50/80 border-slate-200" : "bg-slate-950/40 border-slate-900"}`}>
+                  <div className={`text-lg font-black tracking-tight ${s.color}`}>{s.value}</div>
+                  <div className={`text-[8.5px] uppercase tracking-wider font-semibold mt-0.5 ${subtleText}`}>{s.label}</div>
                 </div>
               ))}
             </div>
@@ -838,50 +839,50 @@ export default function CampaignReport({ isLight, liveRefresh = false, alwaysExp
 
       {/* View / Edit detail panel */}
       {detailRecord && (
-        <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fadeIn" onClick={closeDetail}>
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className={`w-full ${detailMode === "view" ? "max-w-3xl" : "max-w-md"} rounded-2xl border p-6 space-y-4 relative shadow-2xl animate-scaleUp ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}
-          >
-            <button
-              onClick={closeDetail}
-              className={`absolute top-4 right-4 p-1 rounded-lg text-slate-400 hover:text-slate-200 cursor-pointer transition-colors ${isLight ? "hover:bg-slate-100" : "hover:bg-slate-800"}`}
+        <ModalPortal>
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fadeIn" onMouseDown={closeDetail}>
+            <div
+              onMouseDown={(e) => e.stopPropagation()}
+              className={`w-full ${detailMode === "view" ? "max-w-2xl" : "max-w-md"} rounded-2xl border p-5 space-y-4 relative shadow-2xl animate-scaleUp ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}
             >
-              <X className="h-4 w-4" />
-            </button>
+              <button
+                onClick={closeDetail}
+                className={`absolute top-4 right-4 p-1 rounded-lg cursor-pointer transition-colors ${isLight ? "text-slate-400 hover:text-slate-700 hover:bg-slate-100" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"}`}
+              >
+                <X className="h-4 w-4" />
+              </button>
 
-            <div className="flex items-center gap-2">
-              {detailMode === "view" ? <Eye className="h-4 w-4 text-indigo-400" /> : <PencilLine className="h-4 w-4 text-indigo-400" />}
-              <h3 className={`text-sm font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
-                {detailMode === "view" ? "Dispatch Record" : "Edit Dispatch Record"}
-              </h3>
-            </div>
+              <div className="flex items-center gap-2">
+                {detailMode === "view" ? <Eye className="h-4 w-4 text-indigo-400" /> : <PencilLine className="h-4 w-4 text-indigo-400" />}
+                <h3 className={`text-sm font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                  {detailMode === "view" ? "Dispatch Record" : "Edit Dispatch Record"}
+                </h3>
+              </div>
 
-            {detailMode === "view" ? (
-              <div className="space-y-4 text-xs">
-                {/* Key fields laid out horizontally in a responsive grid instead of stacked rows */}
-                <div className={`grid grid-cols-2 sm:grid-cols-3 gap-3 p-3 rounded-xl border ${isLight ? "bg-slate-50 border-slate-200" : "bg-slate-950/40 border-slate-900"}`}>
-                  <div className="min-w-0">
-                    <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Business</div>
-                    <div className={`font-bold truncate ${isLight ? "text-slate-800" : "text-white"}`} title={detailRecord.businessName}>{detailRecord.businessName}</div>
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Channel</div>
-                    <div className="flex items-center gap-1 font-bold">
-                      {detailRecord.channel === "email" ? <Mail className="h-3 w-3 text-indigo-400" /> : <WhatsAppLogo className="h-3 w-3 fill-emerald-500 text-emerald-500" />}
-                      {detailRecord.channel === "email" ? "Email" : "WhatsApp"}
+              {detailMode === "view" ? (
+                <div className="space-y-4 text-xs">
+                  <div className={`grid grid-cols-2 sm:grid-cols-3 gap-3 p-3 rounded-xl border ${isLight ? "bg-slate-50 border-slate-200" : "bg-slate-950/40 border-slate-900"}`}>
+                    <div className="min-w-0">
+                      <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Business</div>
+                      <div className={`font-bold truncate ${isLight ? "text-slate-800" : "text-white"}`} title={detailRecord.businessName}>{detailRecord.businessName}</div>
                     </div>
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Status</div>
-                    <span className={`inline-flex text-[9px] font-bold px-1.5 py-0.5 rounded ${detailRecord.status === "SENT" ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400"}`}>{detailRecord.status}</span>
-                  </div>
-                  <div className="min-w-0 col-span-2 sm:col-span-1">
-                    <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Recipient</div>
-                    <div className={`font-bold truncate ${isLight ? "text-slate-800" : "text-white"}`} title={detailRecord.recipient}>{detailRecord.recipient}</div>
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Source</div>
+                    <div className="min-w-0">
+                      <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Channel</div>
+                      <div className="flex items-center gap-1 font-bold">
+                        {detailRecord.channel === "email" ? <Mail className="h-3 w-3 text-indigo-400" /> : <WhatsAppLogo className="h-3 w-3 fill-emerald-500 text-emerald-500" />}
+                        {detailRecord.channel === "email" ? "Email" : "WhatsApp"}
+                      </div>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Status</div>
+                      <span className={`inline-flex text-[9px] font-bold px-1.5 py-0.5 rounded ${detailRecord.status === "SENT" ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400"}`}>{detailRecord.status}</span>
+                    </div>
+                    <div className="min-w-0 col-span-2 sm:col-span-1">
+                      <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Recipient</div>
+                      <div className={`font-bold truncate ${isLight ? "text-slate-800" : "text-white"}`} title={detailRecord.recipient}>{detailRecord.recipient}</div>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Source</div>
                     <div className={`truncate ${isLight ? "text-slate-700" : "text-slate-300"}`} title={detailRecord.sourceLabel}>{detailRecord.sourceLabel}</div>
                   </div>
                   <div className="min-w-0">
@@ -995,6 +996,7 @@ export default function CampaignReport({ isLight, liveRefresh = false, alwaysExp
             )}
           </div>
         </div>
+        </ModalPortal>
       )}
 
       {/* Delete confirmation modal */}

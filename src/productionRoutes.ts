@@ -137,7 +137,7 @@ router.get("/export/leads/csv", requireAdmin, (_req: Request, res: Response) => 
     const csv = exportToCSV(leads);
 
     res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", `attachment; filename="nexaleadai-leads-${new Date().toISOString().split("T")[0]}.csv"`);
+    res.setHeader("Content-Disposition", `attachment; filename="leadgenpilot-leads-${new Date().toISOString().split("T")[0]}.csv"`);
     res.send(csv);
   } catch (error) {
     fail(res, error, "Failed to export leads.");
@@ -150,7 +150,7 @@ router.get("/export/failed-leads/csv", requireAdmin, (_req: Request, res: Respon
     const csv = exportToCSV(leads);
 
     res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", `attachment; filename="nexaleadai-failed-leads-${new Date().toISOString().split("T")[0]}.csv"`);
+    res.setHeader("Content-Disposition", `attachment; filename="leadgenpilot-failed-leads-${new Date().toISOString().split("T")[0]}.csv"`);
     res.send(csv);
   } catch (error) {
     fail(res, error, "Failed to export failed leads.");
@@ -178,7 +178,7 @@ router.get("/export/analytics/csv", requireAdmin, (_req: Request, res: Response)
     const csv = exportToCSV(data);
 
     res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", `attachment; filename="nexaleadai-analytics-${new Date().toISOString().split("T")[0]}.csv"`);
+    res.setHeader("Content-Disposition", `attachment; filename="leadgenpilot-analytics-${new Date().toISOString().split("T")[0]}.csv"`);
     res.send(csv);
   } catch (error) {
     fail(res, error, "Failed to export analytics.");

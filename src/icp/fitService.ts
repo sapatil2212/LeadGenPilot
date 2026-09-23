@@ -271,6 +271,10 @@ export async function scoreFitWithAi(
         }),
         temperature: 0.2,
         timeoutMs: 60_000,
+        // A batch returns compact fit verdicts. Reserving the global 4096-token
+        // ceiling needlessly rejects low-credit OpenRouter accounts before the
+        // model runs; 2048 covers the largest supported 20-lead batch.
+        maxTokens: 2_048,
       },
       {
         operation: "lead.icpFit",

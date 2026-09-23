@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import "dotenv/config";
 import express from "express";
 import path from "path";
 import fs from "fs";
@@ -49,6 +50,7 @@ import superAdminRoutes from "./src/superAdminRoutes";
 import productionRoutes from "./src/productionRoutes";
 import businessRoutes from "./src/business/businessRoutes";
 import knowledgeRoutes from "./src/knowledge/knowledgeRoutes";
+import templateRoutes from "./src/templates/templateRoutes";
 import assistantRoutes from "./src/assistant/assistantRoutes";
 import icpRoutes from "./src/icp/icpRoutes";
 import scoringRoutes from "./src/scoring/scoringRoutes";
@@ -134,6 +136,7 @@ import {
   findActiveJob,
   reclaimAbandonedJobs,
 } from "./src/tenancy/jobService";
+import { runWithJobLogContext, readJobLogLines } from "./src/tenancy/jobLogStream";
 import { performanceMiddleware } from "./src/analytics";
 import { scheduleAutomaticBackups } from "./src/backup";
 import { notificationService } from "./src/notifications";
@@ -288,8 +291,8 @@ app.get("/superadmin", (req, res) => {
   }
 });
 
-// ── Serve superadmin dashboard at /superadmin/dashboard ──
-app.get("/superadmin/dashboard", (req, res) => {
+// ── Serve the superadmin dashboard and each dedicated management route ──
+app.get(/^\/superadmin\/dashboard(?:\/.*)?$/, (req, res) => {
   const dashboardPage = path.join(process.cwd(), "public", "superadmin-dashboard.html");
   if (fs.existsSync(dashboardPage)) {
     res.sendFile(dashboardPage);
@@ -511,6 +514,7 @@ app.use("/api/production", productionRoutes);
  */
 app.use("/api/business", businessRoutes);
 app.use("/api/knowledge", knowledgeRoutes);
+app.use("/api/templates", templateRoutes);
 app.use("/api/assistant", assistantRoutes);
 
 /*
@@ -816,6 +820,13 @@ app.post(
         });
     }, 3000);
 
+    /*
+     * Everything below runs inside a log context bound to this job, so each line
+     * the scraper writes is attributed to this workspace's run and can be shown
+     * in its own console. Without the context two concurrent runs would share
+     * one process-wide log and each tenant would see the other's businesses.
+     */
+    await runWithJobLogContext({ jobId: job.id, tenantId: ctx.tenantId }, async () => {
     try {
       logger.clear();
       let customWebhookUrl: string | undefined;
@@ -1056,6 +1067,7 @@ app.post(
     } finally {
       clearInterval(cancelPoll);
     }
+    });
   })
 );
 
@@ -1130,7 +1142,7 @@ app.post(
     }
 
     const testLead: Lead = {
-      businessName: "Test Lead (NexaLeadAi Verification)",
+      businessName: "Test Lead (LeadGenPilot Verification)",
       phone: "+1 (555) 019-2831",
       address: "123 Diagnostic Lane, Silicon Valley, CA",
       rating: 4.9,
@@ -1365,7 +1377,7 @@ app.post(
     }
     if (!phone) return res.status(400).json({ error: "Enter a destination number to test the Cloud API." });
 
-    const result = await sendWhatsAppUnified(String(phone), "Test message from NexaLeadAi.", {
+    const result = await sendWhatsAppUnified(String(phone), "Test message from LeadGenPilot.", {
       userId,
       tenantId: ctx.tenantId,
       allowTemplateFallback: true,
@@ -1382,7 +1394,7 @@ app.get("/api/geocode/search", async (req, res) => {
   try {
     const response = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(String(q))}&format=json&limit=5`, {
       headers: {
-        "User-Agent": "NexaLeadAi-Agent/1.0"
+        "User-Agent": "LeadGenPilot-Agent/1.0"
       }
     });
     const data = await response.json();
@@ -1398,7 +1410,7 @@ app.get("/api/geocode/reverse", async (req, res) => {
   try {
     const response = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`, {
       headers: {
-        "User-Agent": "NexaLeadAi-Agent/1.0"
+        "User-Agent": "LeadGenPilot-Agent/1.0"
       }
     });
     const data = await response.json();
@@ -1426,7 +1438,7 @@ app.post("/api/reset-data", requireAuth, requireAdmin, (req, res) => {
 
     writeJsonAtomic(processedPath, []);
     writeJsonAtomic(failedPath, []);
-    fs.writeFileSync(scraperLogPath, "NexaLeadAi System reset successfully.\nReady.", "utf8");
+    fs.writeFileSync(scraperLogPath, "LeadGenPilot System reset successfully.\nReady.", "utf8");
     
     logger.clear();
     logger.success("Dashboard database has been completely wiped and reset!");
@@ -2464,6 +2476,7 @@ app.get(
       lastResult: job && isTerminal(job.status) ? job.result : null,
       jobId: job?.id ?? null,
       jobStatus: job?.status ?? null,
+      error: job && isTerminal(job.status) ? job.error : null,
       progress: job?.progress ?? null,
       cancelRequested: job?.cancelRequested ?? false,
       webhookUrlConfigured:
@@ -2491,6 +2504,46 @@ app.get(
       : undefined;
     const limit = parseInt(String(req.query.limit ?? "20"), 10);
     res.json(await listJobs(ctxOf(req), kind, Number.isFinite(limit) ? limit : 20));
+  })
+);
+
+/**
+ * GET /api/jobs/:id/logs — the caller's own run output, for the dashboard console.
+ *
+ * Deliberately NOT the process log that GET /api/logs serves: that file holds
+ * every workspace's queries and discovered business names and stays
+ * operator-only. These lines are captured per job (see
+ * src/tenancy/jobLogStream.ts) and the job itself is resolved through the
+ * tenant-scoped lookup, so one workspace cannot read another's feed.
+ *
+ * `after` is the last sequence number the client has, making the poll
+ * incremental rather than re-sending the whole run each time.
+ */
+app.get(
+  "/api/jobs/:id/logs",
+  resolveTenantContext,
+  requirePermission("VIEW_LEADS"),
+  asyncHandler(async (req, res) => {
+    const ctx = ctxOf(req);
+    const job = await getJob(ctx, req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: "Job not found.", code: "not_found" });
+    }
+
+    const after = parseInt(String(req.query.after ?? "0"), 10);
+    const captured = readJobLogLines(job.id, ctx.tenantId, Number.isFinite(after) && after > 0 ? after : 0);
+
+    res.json({
+      jobId: job.id,
+      jobStatus: job.status,
+      finished: isTerminal(job.status),
+      // Null when this process holds no buffer for the run (after a restart, or
+      // once an old run has been evicted). The job's own status still applies.
+      lines: captured?.lines ?? [],
+      nextSeq: captured?.nextSeq ?? 0,
+      available: captured !== null,
+      dropped: captured?.dropped ?? false,
+    });
   })
 );
 
@@ -2584,7 +2637,7 @@ async function startServer() {
   let cleanupJobInterval: NodeJS.Timeout | null = null;
 
   const server = app.listen(PORT, env.host, () => {
-    console.log(`NexaLeadAi Server running on http://localhost:${PORT} (${env.nodeEnv})`);
+    console.log(`LeadGenPilot Server running on http://localhost:${PORT} (${env.nodeEnv})`);
     console.log(`  Landing page : http://localhost:${PORT}/`);
     console.log(`  Dashboard    : http://localhost:${PORT}/app`);
     console.log(`  Health check : http://localhost:${PORT}/api/health`);

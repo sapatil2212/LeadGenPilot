@@ -262,13 +262,13 @@ export async function exportLeadsToPdf(crmLeads: Lead[]): Promise<void> {
           doc.setTextColor(79, 70, 229);
           doc.setFontSize(11);
           doc.setFont("helvetica", "bold");
-          doc.text("NexaLeadAI", 5, 11);
+          doc.text("LeadGenPilot", 5, 11);
         }
       } else {
         doc.setTextColor(79, 70, 229);
         doc.setFontSize(11);
         doc.setFont("helvetica", "bold");
-        doc.text("NexaLeadAI", 5, 11);
+        doc.text("LeadGenPilot", 5, 11);
       }
 
       // "Lead Report" next to the logo on the left side
@@ -548,7 +548,7 @@ export async function exportLeadsToWord(crmLeads: Lead[]): Promise<void> {
           },
           children: [
             new Paragraph({
-              children: [new TextRun({ text: "NexaLeadAI — CRM Leads Export", bold: true, size: 36, color: "4F46E5" })],
+              children: [new TextRun({ text: "LeadGenPilot — CRM Leads Export", bold: true, size: 36, color: "4F46E5" })],
               spacing: { after: 120 },
             }),
             new Paragraph({

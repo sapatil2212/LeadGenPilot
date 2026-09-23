@@ -69,8 +69,8 @@ export const openRouterProvider: AiProvider = {
             Authorization: `Bearer ${apiKey}`,
             "Content-Type": "application/json",
             // OpenRouter asks callers to identify themselves for attribution.
-            "HTTP-Referer": process.env.APP_URL || "https://nexaleadai.com",
-            "X-Title": process.env.APP_NAME || "NexaLeadAi",
+            "HTTP-Referer": process.env.APP_URL || "https://leadgenpilot.com",
+            "X-Title": process.env.APP_NAME || "LeadGenPilot",
           },
           timeout: request.timeoutMs ?? 30_000,
         }

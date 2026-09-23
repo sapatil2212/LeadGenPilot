@@ -170,7 +170,7 @@ export function initializeWhatsApp() {
   try {
     whatsappClient = new Client({
       authStrategy: new LocalAuth({
-        clientId: "nexaleadai-outreach"
+        clientId: "leadgenpilot-outreach"
       }),
       webVersionCache: {
         type: "remote",
@@ -279,15 +279,17 @@ export async function disconnectWhatsApp(): Promise<boolean> {
 
   // Hard logout: Wipe session credentials from disk to release locks and clear session
   try {
-    const sessionPath = path.join(process.cwd(), ".wwebjs_auth", "session-nexaleadai-outreach");
+    const sessionPath = path.join(process.cwd(), ".wwebjs_auth", "session-leadgenpilot-outreach");
+    const legacySessionPath = path.join(process.cwd(), ".wwebjs_auth", "session-nexaleadai-outreach");
     logger.info(`Session Path: ${sessionPath} | Exists: ${fs.existsSync(sessionPath)}`);
-    if (fs.existsSync(sessionPath)) {
+    if (fs.existsSync(sessionPath) || fs.existsSync(legacySessionPath)) {
       logger.info("Wiping local session authentication directories...");
       // Introduce a slight delay (1000ms) to allow OS to release any file locks after destroy()
       await new Promise(resolve => setTimeout(resolve, 1000));
-      fs.rmSync(sessionPath, { recursive: true, force: true });
-      logger.success("Session credentials wiped from disk.");
+      if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
+      if (fs.existsSync(legacySessionPath)) fs.rmSync(legacySessionPath, { recursive: true, force: true });
     }
+    logger.success("Session credentials wiped from disk.");
   } catch (err: any) {
     logger.warn("Failed to delete session files: " + (err?.message || String(err)));
   }
@@ -399,7 +401,7 @@ export async function sendWhatsAppTestMessage(phone?: string): Promise<boolean> 
       logger.warn(`Could not verify WhatsApp registration for ${targetChatId}: ${valErr?.message || String(valErr)}. Sending anyway...`);
     }
     
-    const text = "Hello from NexaLeadAi! This is a test outreach message verifying your gateway connection. 🚀";
+    const text = "Hello from LeadGenPilot! This is a test outreach message verifying your gateway connection. 🚀";
     logger.info(`Sending test WhatsApp message to: ${targetChatId}`);
     await whatsappClient.sendMessage(targetChatId, text);
     logger.success(`Test WhatsApp message successfully sent to ${targetChatId}!`);

@@ -74,6 +74,7 @@ import {
   type LucideIcon
 } from "lucide-react";
 import { Lead, LeadList } from "./types";
+import { ModalPortal } from "./ui/primitives";
 import {
   DASHBOARD_GROUPS,
   DASHBOARD_ROUTES,
@@ -185,14 +186,14 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     typeof window !== "undefined" &&
       (window.location.pathname.replace(/\/+$/, "") === "/app/knowledge" ||
         (window.location.pathname.replace(/\/+$/, "") === "/app" &&
-          localStorage.getItem("nexaleadai_activeTab") === "knowledge"))
+          (localStorage.getItem("leadgenpilot_activeTab") || localStorage.getItem("nexaleadai_activeTab")) === "knowledge"))
       ? "knowledge"
       : "learn"
   );
   // URL-based navigation. Pathname wins on deep links; the previous localStorage
   // preference is used only when someone enters through bare /app.
   const [activeTab, setActiveTab] = useState<DashboardTab>(() => {
-    const saved = typeof window !== "undefined" ? localStorage.getItem("nexaleadai_activeTab") : null;
+    const saved = typeof window !== "undefined" ? (localStorage.getItem("leadgenpilot_activeTab") || localStorage.getItem("nexaleadai_activeTab")) : null;
     // Keep the migration explicit here as well as in routeForTab because this
     // guards bare-/app entry before any navigation event can run.
     const migratedSaved =
@@ -226,7 +227,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     if (nextUrl !== currentUrl) {
       window.history.replaceState({ dashboardTab: route.id }, "", nextUrl);
     }
-    document.title = `${route.title} · NexaLeadAi`;
+    document.title = `${route.title} · LeadGenPilot`;
   }, [activeTab]);
 
   // Browser Back/Forward is a first-class navigation path, not just sidebar
@@ -246,24 +247,24 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("nexaleadai_activeTab", activeTab);
+    localStorage.setItem("leadgenpilot_activeTab", activeTab);
   }, [activeTab]);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
-    const saved = typeof window !== "undefined" ? localStorage.getItem("nexaleadai_sidebar_collapsed") : null;
+    const saved = typeof window !== "undefined" ? (localStorage.getItem("leadgenpilot_sidebar_collapsed") || localStorage.getItem("nexaleadai_sidebar_collapsed")) : null;
     return saved === "true";
   });
   useEffect(() => {
-    localStorage.setItem("nexaleadai_sidebar_collapsed", String(sidebarCollapsed));
+    localStorage.setItem("leadgenpilot_sidebar_collapsed", String(sidebarCollapsed));
   }, [sidebarCollapsed]);
 
   const [theme, setTheme] = useState<"light" | "dark">(() => {
-    const saved = typeof window !== "undefined" ? localStorage.getItem("nexaleadai_theme") : null;
+    const saved = typeof window !== "undefined" ? (localStorage.getItem("leadgenpilot_theme") || localStorage.getItem("nexaleadai_theme")) : null;
     return (saved as "light" | "dark") || "light";
   });
 
   useEffect(() => {
-    localStorage.setItem("nexaleadai_theme", theme);
+    localStorage.setItem("leadgenpilot_theme", theme);
     // Expose the active theme on <html> so global CSS (e.g. scrollbar colors)
     // can adapt without threading theme props through every component.
     document.documentElement.setAttribute("data-theme", theme);
@@ -287,18 +288,25 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
   // Scraper status
   const [isRunning, setIsRunning] = useState(false);
+  const [isStartingScraper, setIsStartingScraper] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [webhookConfigured, setWebhookConfigured] = useState(false);
   const [lastResult, setLastResult] = useState<any>(null);
 
   // Data logs & results
-  const [terminalLogs, setTerminalLogs] = useState("Initializing NexaLeadAi Terminal...\nReady.");
+  const [terminalLogs, setTerminalLogs] = useState("Initializing LeadGenPilot Terminal...\nReady.");
+  const activeScrapeJobIdRef = useRef<string | null>(null);
+  const reportedTerminalJobIdRef = useRef<string | null>(null);
+  // Last log sequence number consumed from the job's own feed, so each poll
+  // fetches only new lines instead of re-appending the whole run.
+  const scrapeLogSeqRef = useRef(0);
+  const isFetchingScrapeLogsRef = useRef(false);
   const [processedLeads, setProcessedLeads] = useState<Lead[]>([]);
   const [failedLeads, setFailedLeads] = useState<Lead[]>([]);
   
   // UI preferences (Persisted)
   const [activeDataView, setActiveDataView] = useState<"logs" | "processed" | "failed" | "webhook">(() => {
-    const saved = localStorage.getItem("nexaleadai_activeDataView");
+    const saved = localStorage.getItem("leadgenpilot_activeDataView") || localStorage.getItem("nexaleadai_activeDataView");
     return (saved as any) || "logs";
   });
   const [isRetryingFailed, setIsRetryingFailed] = useState(false);
@@ -421,7 +429,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
   const [autoScrollLogs, setAutoScrollLogs] = useState<boolean>(() => {
-    const saved = localStorage.getItem("nexaleadai_autoScrollLogs");
+    const saved = localStorage.getItem("leadgenpilot_autoScrollLogs") ?? localStorage.getItem("nexaleadai_autoScrollLogs");
     return saved === null ? true : saved === "true";
   });
 
@@ -557,7 +565,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    link.setAttribute("download", `nexaleadai_leads_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute("download", `leadgenpilot_leads_${new Date().toISOString().split('T')[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -595,6 +603,13 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
       if (statusRes.ok) {
         const status = await statusRes.json();
         setIsRunning(status.isRunning);
+        // Adopt a run already in flight (a reload mid-scrape) so its console
+        // feed resumes instead of staying empty until the next run.
+        if (status.isRunning && status.jobId && activeScrapeJobIdRef.current !== status.jobId) {
+          activeScrapeJobIdRef.current = status.jobId;
+          reportedTerminalJobIdRef.current = null;
+          scrapeLogSeqRef.current = 0;
+        }
         setWebhookConfigured(status.webhookUrlConfigured);
         setLastResult(status.lastResult);
       }
@@ -667,6 +682,44 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     }
   }, [activeTab]);
 
+  /**
+   * Pulls new lines from the active run's own tenant-scoped feed.
+   *
+   * This is the workspace's own job output, not the operator-wide process log,
+   * which is why the console can show it at all.
+   */
+  const fetchScrapeJobLogs = async () => {
+    const jobId = activeScrapeJobIdRef.current;
+    if (!jobId || isFetchingScrapeLogsRef.current) return;
+    isFetchingScrapeLogsRef.current = true;
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/logs?after=${scrapeLogSeqRef.current}`, {
+        credentials: "include",
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (activeScrapeJobIdRef.current !== jobId) return;
+      if (Array.isArray(data.lines) && data.lines.length > 0) {
+        const appended = data.lines.join("\n");
+        setTerminalLogs((prev) => `${prev}${prev.endsWith("\n") ? "" : "\n"}${appended}\n`);
+      }
+      if (typeof data.nextSeq === "number") scrapeLogSeqRef.current = data.nextSeq;
+    } catch {
+      /* the console is best-effort; status polling still reports the outcome */
+    } finally {
+      isFetchingScrapeLogsRef.current = false;
+    }
+  };
+
+  // While a run is in flight the console follows it closely; 2s keeps the feed
+  // readable without making the poll itself the load.
+  useEffect(() => {
+    if (!isRunning) return;
+    void fetchScrapeJobLogs();
+    const interval = setInterval(() => void fetchScrapeJobLogs(), 2000);
+    return () => clearInterval(interval);
+  }, [isRunning]);
+
   const fetchStatusAndLogs = async () => {
     try {
       const statusRes = await fetch("/api/status");
@@ -683,6 +736,37 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
         });
         setWebhookConfigured(status.webhookUrlConfigured);
         setLastResult(status.lastResult);
+
+        // The launch endpoint returns as soon as the durable job is accepted.
+        // Any later browser/network failure is persisted on that job, so report
+        // its terminal state here instead of leaving the console frozen on an
+        // optimistic "launching" message.
+        const belongsToCurrentRun =
+          !!status.jobId && status.jobId === activeScrapeJobIdRef.current;
+        if (
+          belongsToCurrentRun &&
+          !status.isRunning &&
+          status.jobStatus &&
+          reportedTerminalJobIdRef.current !== status.jobId
+        ) {
+          reportedTerminalJobIdRef.current = status.jobId;
+          // Drain whatever the run logged after the last poll before printing
+          // the verdict, so the console ends with the real final lines.
+          await fetchScrapeJobLogs();
+          if (status.jobStatus === "failed") {
+            setTerminalLogs((prev) =>
+              prev + `\n[ERROR] Lead discovery failed: ${status.error || "Unknown scraper error."}\n`
+            );
+          } else if (status.jobStatus === "cancelled") {
+            setTerminalLogs((prev) => prev + "\n[SYSTEM] Lead discovery was cancelled.\n");
+          } else if (status.jobStatus === "completed") {
+            const result = status.lastResult || {};
+            const found = Number(result.leadsPersisted ?? result.leadsFound ?? 0);
+            setTerminalLogs((prev) =>
+              prev + `\n[SUCCESS] Lead discovery completed. ${found} lead${found === 1 ? "" : "s"} saved.\n`
+            );
+          }
+        }
       }
 
       const waRes = await fetch("/api/whatsapp/status");
@@ -707,11 +791,11 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   }, [terminalLogs, autoScrollLogs]);
 
   useEffect(() => {
-    localStorage.setItem("nexaleadai_activeDataView", activeDataView);
+    localStorage.setItem("leadgenpilot_activeDataView", activeDataView);
   }, [activeDataView]);
 
   useEffect(() => {
-    localStorage.setItem("nexaleadai_autoScrollLogs", String(autoScrollLogs));
+    localStorage.setItem("leadgenpilot_autoScrollLogs", String(autoScrollLogs));
   }, [autoScrollLogs]);
 
   // Leaflet map setup for Geo Lead Finder tab
@@ -943,33 +1027,46 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   };
 
   const handleStartScraper = async () => {
-    if (isRunning) return;
+    if (isRunning || isStartingScraper) return;
+    setIsStartingScraper(true);
     try {
       setTerminalLogs(prev => prev + "\n[SYSTEM] Synchronizing search area parameters... saving config...\n");
+      const runCriteria = { businessType, location, maxResults, enableSimulation, headless, lat, lng, radius };
       
       const saveRes = await fetch("/api/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ businessType, location, maxResults, enableSimulation, headless, lat, lng, radius }),
+        body: JSON.stringify(runCriteria),
       });
 
       if (!saveRes.ok) {
-        setTerminalLogs(prev => prev + "[WARN] Parameter autosave failed. Proceeding with existing server settings...\n");
+        setTerminalLogs(prev => prev + "[WARN] Parameter autosave failed. The current form values will still be used for this run.\n");
       } else {
         setTerminalLogs(prev => prev + "[SYSTEM] Search parameters synchronized successfully.\n");
       }
 
-      setTerminalLogs(prev => prev + "[SYSTEM] Localizing Chromium Driver... Launching scraper environment thread...\n");
-      const res = await fetch("/api/run-scraper", { method: "POST" });
+      setTerminalLogs(prev => prev + "[SYSTEM] Checking Playwright Chromium and starting the lead discovery job...\n");
+      const res = await fetch("/api/run-scraper", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(runCriteria),
+      });
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
+        activeScrapeJobIdRef.current = data.jobId || null;
+        reportedTerminalJobIdRef.current = null;
+        scrapeLogSeqRef.current = 0;
+        setTerminalLogs(prev => prev + `[SYSTEM] Lead search accepted${data.jobId ? ` (job ${data.jobId})` : ""}. Waiting for browser startup...\n`);
         setIsRunning(true);
         setActiveDataView("logs");
       } else {
-        const errorData = await res.json();
-        setTerminalLogs(prev => prev + `[ERROR] Failed to start scraper: ${errorData.error || "Unknown error"}\n`);
+        setTerminalLogs(prev => prev + `[ERROR] Failed to start scraper: ${data.error || "Unknown error"}\n`);
       }
     } catch (e) {
-      alert("Error triggering scraper agent.");
+      const message = e instanceof Error ? e.message : "Could not reach the discovery service.";
+      setTerminalLogs(prev => prev + `[ERROR] ${message}\n`);
+    } finally {
+      setIsStartingScraper(false);
     }
   };
 
@@ -1875,7 +1972,16 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
           {/* Logo Brand */}
           <div className={`h-14 flex items-center ${sidebarCollapsed ? "justify-center px-0" : "px-5"} border-b ${isLight ? "border-slate-200/80" : "border-[#1e293b]/80"}`}>
             <div className="relative flex items-center gap-2.5">
-              <img src="/logo.png" alt="NexaLeadAi" className="h-6 w-auto object-contain" />
+              {/*
+                Two artworks rather than one: the light logo is dark navy text
+                that disappears against the dark sidebar, and the dark logo is
+                pale glowing text that disappears against the light one.
+              */}
+              <img
+                src={isLight ? "/logo.png" : "/logo-dark.png"}
+                alt="LeadGenPilot"
+                className="h-6 w-auto object-contain"
+              />
               {!sidebarCollapsed && (
                 <span className="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.2 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 shadow-xs">
                   AGENT V2
@@ -2556,7 +2662,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                             className={`px-2 py-0.5 text-[10px] font-semibold rounded-md transition-all cursor-pointer ${
                               overviewMapFilter === "HOT"
                                 ? "bg-rose-500 text-white shadow-xs font-bold"
-                                : "text-rose-400 hover:text-rose-300"
+                                : isLight ? "text-rose-600 hover:text-rose-700" : "text-rose-400 hover:text-rose-300"
                             }`}
                           >
                             🔥 Hot ({hotLeads})
@@ -2566,7 +2672,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                             className={`px-2 py-0.5 text-[10px] font-semibold rounded-md transition-all cursor-pointer ${
                               overviewMapFilter === "WARM"
                                 ? "bg-amber-500 text-white shadow-xs font-bold"
-                                : "text-amber-400 hover:text-amber-300"
+                                : isLight ? "text-amber-600 hover:text-amber-700" : "text-amber-400 hover:text-amber-300"
                             }`}
                           >
                             ⚡ Warm ({warmLeads})
@@ -2576,7 +2682,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                             className={`px-2 py-0.5 text-[10px] font-semibold rounded-md transition-all cursor-pointer ${
                               overviewMapFilter === "COLD"
                                 ? isLight ? "bg-slate-700 text-white shadow-xs font-bold" : "bg-slate-600 text-white shadow-xs font-bold"
-                                : "text-slate-400 hover:text-slate-200"
+                                : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-slate-200"
                             }`}
                           >
                             ❄️ Cold ({coldLeads})
@@ -3298,11 +3404,11 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                       ) : (
                         <button
                           onClick={handleStartScraper}
-                          disabled={isRunning}
+                          disabled={isRunning || isStartingScraper}
                           className="w-full py-2.5 px-3 rounded-lg font-bold text-xs bg-gradient-to-r from-indigo-600 via-indigo-500 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white flex items-center justify-center gap-1.5 shadow-md shadow-indigo-500/25 focus:outline-none transition-all disabled:opacity-50 cursor-pointer btn-interactive"
                         >
-                          <Play className="h-3.5 w-3.5 fill-white" />
-                          <span>Launch Lead Discovery Agent</span>
+                          {isStartingScraper ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5 fill-white" />}
+                          <span>{isStartingScraper ? "Starting Lead Discovery…" : "Launch Lead Discovery Agent"}</span>
                         </button>
                       )}
                     </div>
@@ -3329,7 +3435,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                       <div className="flex items-center gap-1.5">
                         <TerminalIcon className="h-3.5 w-3.5 text-indigo-400" />
                         <h3 className="text-[11px] font-bold font-mono text-slate-200 tracking-wide">
-                          Scraper Engine Stream — bash ~/maps-bot.sh
+                          Scraper Engine Stream — Lead Discovery Job
                         </h3>
                       </div>
                     </div>
@@ -3399,7 +3505,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
               onOpenOutreach={handleOpenOutreach}
               onFindLeads={() => navigateToTab("finder")}
               onAddToCampaign={(leadIds) => {
-                sessionStorage.setItem("nexaleadai_campaign_lead_ids", JSON.stringify(leadIds));
+                sessionStorage.setItem("leadgenpilot_campaign_lead_ids", JSON.stringify(leadIds));
                 navigateToTab("campaigns");
               }}
             />
@@ -3563,7 +3669,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                                           <button onClick={() => handleRenameList(list.id)} className="text-emerald-400 hover:text-emerald-300 p-0.5 shrink-0">
                                             <Check className="h-3.5 w-3.5" />
                                           </button>
-                                          <button onClick={() => setRenamingListId(null)} className="text-slate-400 hover:text-slate-300 p-0.5 shrink-0">
+                                          <button onClick={() => setRenamingListId(null)} className={`p-0.5 shrink-0 transition-colors ${isLight ? "text-slate-400 hover:text-slate-700" : "text-slate-400 hover:text-slate-300"}`}>
                                             <X className="h-3.5 w-3.5" />
                                           </button>
                                         </div>
@@ -3644,7 +3750,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                         className={`px-3 py-1 text-[11px] font-semibold rounded-lg transition-all cursor-pointer ${
                           crmPriorityFilter === "HOT"
                             ? "bg-rose-500 text-white shadow-xs font-bold"
-                            : "text-rose-400 hover:text-rose-300"
+                            : isLight ? "text-rose-600 hover:text-rose-700" : "text-rose-400 hover:text-rose-300"
                         }`}
                       >
                         🔥 Hot
@@ -3655,7 +3761,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                         className={`px-3 py-1 text-[11px] font-semibold rounded-lg transition-all cursor-pointer ${
                           crmPriorityFilter === "WARM"
                             ? "bg-amber-500 text-white shadow-xs font-bold"
-                            : "text-amber-400 hover:text-amber-300"
+                            : isLight ? "text-amber-600 hover:text-amber-700" : "text-amber-400 hover:text-amber-300"
                         }`}
                       >
                         ⚡ Warm
@@ -3666,7 +3772,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                         className={`px-3 py-1 text-[11px] font-semibold rounded-lg transition-all cursor-pointer ${
                           crmPriorityFilter === "COLD"
                             ? isLight ? "bg-slate-700 text-white shadow-xs font-bold" : "bg-slate-600 text-white shadow-xs font-bold"
-                            : "text-slate-400 hover:text-slate-200"
+                            : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-slate-200"
                         }`}
                       >
                         ❄️ Cold
@@ -4376,37 +4482,45 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
           {/* New List Modal */}
           {showNewListModal && (
-            <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-              <div className={`border rounded-2xl p-6 w-full max-w-sm shadow-2xl ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}>
-                <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${isLight ? "text-slate-900" : "text-white"}`}>
-                  <FolderPlus className="h-5 w-5 text-indigo-400" /> Create New List
-                </h3>
-                <input
-                  autoFocus
-                  type="text"
-                  placeholder="e.g. Dental Clinic – Nashik July 2026"
-                  value={newListName}
-                  onChange={e => setNewListName(e.target.value)}
-                  onKeyDown={e => { if (e.key === "Enter") handleCreateList(); if (e.key === "Escape") setShowNewListModal(false); }}
-                  className={`w-full text-sm border rounded-lg px-3 py-2.5 focus:outline-none focus:border-indigo-500 mb-4 ${isLight ? "bg-white border-slate-200 text-slate-800" : "bg-[#030712] border-[#1e293b] text-white"}`}
-                />
-                <div className="flex gap-2 justify-end">
-                  <button
-                    onClick={() => { setShowNewListModal(false); setNewListName(""); }}
-                    className={`px-4 py-2 border rounded-lg text-sm cursor-pointer transition-all ${isLight ? "border-slate-200 text-slate-600 hover:bg-slate-50" : "border-[#1e293b] text-slate-400 hover:bg-slate-800"}`}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleCreateList}
-                    disabled={isCreatingList || !newListName.trim()}
-                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold rounded-lg cursor-pointer transition-all disabled:opacity-50"
-                  >
-                    {isCreatingList ? "Creating…" : "Create List"}
-                  </button>
+            <ModalPortal>
+              <div
+                className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-fadeIn"
+                onMouseDown={() => { setShowNewListModal(false); setNewListName(""); }}
+              >
+                <div
+                  onMouseDown={(e) => e.stopPropagation()}
+                  className={`border rounded-2xl p-6 w-full max-w-sm shadow-2xl animate-scaleUp ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}
+                >
+                  <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${isLight ? "text-slate-900" : "text-white"}`}>
+                    <FolderPlus className="h-5 w-5 text-indigo-400" /> Create New List
+                  </h3>
+                  <input
+                    autoFocus
+                    type="text"
+                    placeholder="e.g. Dental Clinic – Nashik July 2026"
+                    value={newListName}
+                    onChange={e => setNewListName(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Enter") handleCreateList(); if (e.key === "Escape") setShowNewListModal(false); }}
+                    className={`w-full text-sm border rounded-lg px-3 py-2.5 focus:outline-none focus:border-indigo-500 mb-4 ${isLight ? "bg-white border-slate-200 text-slate-800" : "bg-[#030712] border-[#1e293b] text-white"}`}
+                  />
+                  <div className="flex gap-2 justify-end">
+                    <button
+                      onClick={() => { setShowNewListModal(false); setNewListName(""); }}
+                      className={`px-4 py-2 border rounded-lg text-sm cursor-pointer transition-all ${isLight ? "border-slate-200 text-slate-600 hover:bg-slate-50" : "border-[#1e293b] text-slate-400 hover:bg-slate-800"}`}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleCreateList}
+                      disabled={isCreatingList || !newListName.trim()}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold rounded-lg cursor-pointer transition-all disabled:opacity-50"
+                    >
+                      {isCreatingList ? "Creating…" : "Create List"}
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
+            </ModalPortal>
           )}
 
           {/* TAB 4: INTEGRATIONS & OUTREACH SETTINGS */}
@@ -5259,8 +5373,15 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
       {/* OUTREACH CONSOLE MODAL */}
       {selectedLeadForOutreach && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm overflow-y-auto">
-          <div className={`border rounded-2xl w-full max-w-4xl shadow-2xl relative flex flex-col max-h-[90vh] ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}>
+        <ModalPortal>
+          <div
+            className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm overflow-y-auto animate-fadeIn"
+            onMouseDown={() => setSelectedLeadForOutreach(null)}
+          >
+            <div
+              className={`border rounded-2xl w-full max-w-4xl shadow-2xl relative flex flex-col max-h-[90vh] animate-scaleUp ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
             
             {/* Modal Header */}
             <div className={`px-6 py-4 border-b flex items-center justify-between ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
@@ -5274,7 +5395,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
               </div>
               <button 
                 onClick={() => setSelectedLeadForOutreach(null)}
-                className={`p-1 rounded-lg text-slate-400 hover:text-slate-200 transition-colors cursor-pointer ${isLight ? "hover:bg-slate-100" : "hover:bg-slate-800"}`}
+                className={`p-1 rounded-lg transition-colors cursor-pointer ${isLight ? "text-slate-400 hover:text-slate-700 hover:bg-slate-100" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"}`}
               >
                 <X className="h-5 w-5" />
               </button>
@@ -5484,19 +5605,27 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
           </div>
         </div>
-      )}
+      </ModalPortal>
+    )}
 
       {/* ACCOUNT SETTINGS MODAL */}
       {showAccountModal && currentUser && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm overflow-y-auto">
-          <div className={`border rounded-3xl w-full max-w-3xl shadow-2xl relative flex flex-col ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}>
+        <ModalPortal>
+          <div
+            className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm overflow-y-auto animate-fadeIn"
+            onMouseDown={() => setShowAccountModal(false)}
+          >
+            <div
+              className={`border rounded-3xl w-full max-w-3xl shadow-2xl relative flex flex-col animate-scaleUp ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
             <div className={`px-6 py-4 border-b flex items-center justify-between ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
               <h2 className={`text-base font-bold flex items-center gap-2 ${isLight ? "text-slate-900" : "text-white"}`}>
                 <Settings className="h-5 w-5 text-indigo-400" /> Account Settings
               </h2>
               <button
                 onClick={() => setShowAccountModal(false)}
-                className={`p-1.5 rounded-lg text-slate-400 hover:text-slate-200 cursor-pointer ${isLight ? "hover:bg-slate-100" : "hover:bg-slate-800"}`}
+                className={`p-1.5 rounded-lg cursor-pointer transition-colors ${isLight ? "text-slate-400 hover:text-slate-700 hover:bg-slate-100" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"}`}
               >
                 <X className="h-5 w-5" />
               </button>
@@ -5642,12 +5771,20 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
             </div>
           </div>
         </div>
-      )}
+      </ModalPortal>
+    )}
 
       {/* PRICING PLANS MODAL */}
       {showPricingModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm overflow-y-auto">
-          <div className={`border rounded-2xl w-full max-w-3xl shadow-2xl relative flex flex-col ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}>
+        <ModalPortal>
+          <div
+            className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm overflow-y-auto animate-fadeIn"
+            onMouseDown={() => setShowPricingModal(false)}
+          >
+            <div
+              className={`border rounded-2xl w-full max-w-3xl shadow-2xl relative flex flex-col animate-scaleUp ${isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"}`}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
             {/* Modal Header */}
             <div className="px-5 pt-5 pb-1 relative">
               <div className="text-center max-w-xl mx-auto space-y-0.5">
@@ -5656,7 +5793,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
               </div>
               <button
                 onClick={() => setShowPricingModal(false)}
-                className={`absolute top-5 right-5 p-1.5 rounded-lg text-slate-400 hover:text-slate-200 cursor-pointer ${isLight ? "hover:bg-slate-100" : "hover:bg-slate-800"}`}
+                className={`absolute top-5 right-5 p-1.5 rounded-lg cursor-pointer transition-colors ${isLight ? "text-slate-400 hover:text-slate-700 hover:bg-slate-100" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"}`}
               >
                 <X className="h-4.5 w-4.5" />
               </button>
@@ -5883,51 +6020,60 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
           </div>
         </div>
-      )}
+      </ModalPortal>
+    )}
 
       {showContactOptions && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-          <div className={`border rounded-xl w-full max-w-xs shadow-xl p-5 relative ${isLight ? "bg-white border-slate-200" : "bg-[#0c111d] border-[#1e293b]"}`}>
-            <button
-              onClick={() => setShowContactOptions(false)}
-              className={`absolute top-3 right-3 p-1 rounded-lg text-slate-400 hover:text-slate-200 cursor-pointer ${isLight ? "hover:bg-slate-100" : "hover:bg-slate-800"}`}
+        <ModalPortal>
+          <div
+            className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn"
+            onMouseDown={() => setShowContactOptions(false)}
+          >
+            <div
+              className={`border rounded-xl w-full max-w-xs shadow-xl p-5 relative animate-scaleUp ${isLight ? "bg-white border-slate-200" : "bg-[#0c111d] border-[#1e293b]"}`}
+              onMouseDown={(e) => e.stopPropagation()}
             >
-              <X className="h-4 w-4" />
-            </button>
-            <h4 className={`text-xs font-bold uppercase tracking-wider mb-3.5 ${isLight ? "text-slate-900" : "text-white"}`}>Contact Sales</h4>
-            <div className="space-y-2">
-              <a
-                href="tel:8830553868"
-                className={`flex items-center gap-2.5 p-2.5 rounded-lg border text-xs font-medium transition-all ${
-                  isLight ? "border-slate-200 hover:bg-slate-50 text-slate-700 hover:border-slate-300" : "border-[#1e293b] hover:bg-slate-800/60 text-slate-200 hover:border-[#334155]"
-                }`}
+              <button
+                onClick={() => setShowContactOptions(false)}
+                className={`absolute top-3 right-3 p-1 rounded-lg cursor-pointer transition-colors ${isLight ? "text-slate-400 hover:text-slate-700 hover:bg-slate-100" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"}`}
               >
-                <Phone className="h-4 w-4 text-emerald-500 shrink-0" />
-                <span>Call +91 8830553868</span>
-              </a>
-              <a
-                href="https://wa.me/918830553868"
-                target="_blank"
-                rel="noreferrer"
-                className={`flex items-center gap-2.5 p-2.5 rounded-lg border text-xs font-medium transition-all ${
-                  isLight ? "border-slate-200 hover:bg-slate-50 text-slate-700 hover:border-slate-300" : "border-[#1e293b] hover:bg-slate-800/60 text-slate-200 hover:border-[#334155]"
-                }`}
-              >
-                <MessageSquare className="h-4 w-4 text-emerald-500 shrink-0" />
-                <span>WhatsApp chat</span>
-              </a>
-              <a
-                href="mailto:chatnexgen@gmail.com?subject=Outreach Campaign custom pricing request"
-                className={`flex items-center gap-2.5 p-2.5 rounded-lg border text-xs font-medium transition-all ${
-                  isLight ? "border-slate-200 hover:bg-slate-50 text-slate-700 hover:border-slate-300" : "border-[#1e293b] hover:bg-slate-800/60 text-slate-200 hover:border-[#334155]"
-                }`}
-              >
-                <Mail className="h-4 w-4 text-indigo-500 shrink-0" />
-                <span className="truncate">Email chatnexgen@gmail.com</span>
-              </a>
+                <X className="h-4 w-4" />
+              </button>
+              <h4 className={`text-xs font-bold uppercase tracking-wider mb-3.5 ${isLight ? "text-slate-900" : "text-white"}`}>Contact Sales</h4>
+              <div className="space-y-2">
+                <a
+                  href="tel:8830553868"
+                  className={`flex items-center gap-2.5 p-2.5 rounded-lg border text-xs font-medium transition-all ${
+                    isLight ? "border-slate-200 hover:bg-slate-50 text-slate-700 hover:border-slate-300" : "border-[#1e293b] hover:bg-slate-800/60 text-slate-200 hover:border-[#334155]"
+                  }`}
+                >
+                  <Phone className="h-4 w-4 text-emerald-500 shrink-0" />
+                  <span>Call +91 8830553868</span>
+                </a>
+                <a
+                  href="https://wa.me/918830553868"
+                  target="_blank"
+                  rel="noreferrer"
+                  className={`flex items-center gap-2.5 p-2.5 rounded-lg border text-xs font-medium transition-all ${
+                    isLight ? "border-slate-200 hover:bg-slate-50 text-slate-700 hover:border-slate-300" : "border-[#1e293b] hover:bg-slate-800/60 text-slate-200 hover:border-[#334155]"
+                  }`}
+                >
+                  <MessageSquare className="h-4 w-4 text-emerald-500 shrink-0" />
+                  <span>WhatsApp chat</span>
+                </a>
+                <a
+                  href="mailto:chatnexgen@gmail.com?subject=Outreach Campaign custom pricing request"
+                  className={`flex items-center gap-2.5 p-2.5 rounded-lg border text-xs font-medium transition-all ${
+                    isLight ? "border-slate-200 hover:bg-slate-50 text-slate-700 hover:border-slate-300" : "border-[#1e293b] hover:bg-slate-800/60 text-slate-200 hover:border-[#334155]"
+                  }`}
+                >
+                  <Mail className="h-4 w-4 text-indigo-500 shrink-0" />
+                  <span className="truncate">Email chatnexgen@gmail.com</span>
+                </a>
+              </div>
             </div>
           </div>
-        </div>
+        </ModalPortal>
       )}
 
     </div>

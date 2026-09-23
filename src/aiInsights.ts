@@ -60,7 +60,7 @@ export async function generateSalesInsight(lead: {
    */
   try {
     const result = await generateText(
-      { messages: leadInsightPrompt.build(lead), timeoutMs: 15_000 },
+      { messages: leadInsightPrompt.build(lead), timeoutMs: 15_000, maxTokens: 1_024 },
       {
         operation: "lead.insight",
         tenantId: options?.tenantId,

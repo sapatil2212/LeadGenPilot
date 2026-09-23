@@ -301,7 +301,7 @@ router.post("/whatsapp-cloud/send-test", async (req: AuthRequest, res: Response)
           templateName || config.defaultTemplateName || "",
           templateLang || config.defaultTemplateLang || "en_US"
         )
-      : await sendCloudText(config, phone, message || "Test message from NexaLeadAi.");
+      : await sendCloudText(config, phone, message || "Test message from LeadGenPilot.");
 
     if (result.ok) {
       return res.json({ ok: true, message: "Test message sent", messageId: result.messageId });

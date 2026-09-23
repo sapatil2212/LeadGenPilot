@@ -411,6 +411,100 @@ export interface ExtractionResult {
 }
 
 /**
+ * Applies a validated extraction exactly as it was reviewed by the user.
+ *
+ * Keeping inference and persistence separate is essential: asking the model a
+ * second time on Apply could produce a different catalogue than the preview.
+ * The route validates and normalises the client payload before it reaches here.
+ */
+export async function applyBusinessExtraction(
+  ctx: TenantContext,
+  value: BusinessExtractionOutput,
+  source = "reviewed extraction"
+): Promise<ExtractionResult> {
+  const existing = await getBusinessProfile(ctx);
+
+  // Scalars fill gaps only; uploaded marketing copy never overwrites a user's
+  // explicit profile edits.
+  const patch: BusinessProfilePatch = {};
+  if (!existing.businessName && value.businessName) patch.businessName = value.businessName;
+  if (!existing.industry && value.industry) patch.industry = value.industry;
+  if (!existing.businessType && value.businessType) patch.businessType = value.businessType;
+  if (!existing.description && value.description) patch.description = value.description;
+  if (!existing.brandVoice && value.brandVoice) patch.brandVoice = value.brandVoice;
+
+  const mergeList = (current: string[], incoming: string[]) =>
+    Array.from(new Set([...current, ...incoming])).slice(0, LIMITS.listLength);
+
+  if (value.locationsServed.length) {
+    patch.locationsServed = mergeList(existing.locationsServed, value.locationsServed);
+  }
+  if (value.targetCustomerTypes.length) {
+    patch.targetCustomerTypes = mergeList(existing.targetCustomerTypes, value.targetCustomerTypes);
+  }
+  if (value.targetIndustries.length) {
+    patch.targetIndustries = mergeList(existing.targetIndustries, value.targetIndustries);
+  }
+  if (value.uniqueSellingPoints.length) {
+    patch.uniqueSellingPoints = mergeList(existing.uniqueSellingPoints, value.uniqueSellingPoints);
+  }
+  if (value.certifications.length) {
+    patch.certifications = mergeList(existing.certifications, value.certifications);
+  }
+  if (value.decisionMakerRoles.length) {
+    patch.decisionMakerRoles = mergeList(existing.decisionMakerRoles, value.decisionMakerRoles);
+  }
+
+  await updateBusinessProfile(ctx, patch);
+  await prisma.businessProfile.update({
+    where: { tenantId: ctx.tenantId },
+    data: {
+      aiConfidence: value.confidence,
+      missingInformation: JSON.stringify(value.missingInformation.slice(0, 20)),
+      lastExtractedAt: new Date(),
+      lastPromptName: businessExtractionPrompt.name,
+      lastPromptVersion: businessExtractionPrompt.version,
+    },
+  });
+
+  const [currentProducts, currentServices] = await Promise.all([
+    listProducts(ctx, true),
+    listServices(ctx, true),
+  ]);
+  const productNames = new Set(currentProducts.map((product) => product.name.toLowerCase()));
+  const serviceNames = new Set(currentServices.map((service) => service.name.toLowerCase()));
+
+  let createdProducts = 0;
+  for (const product of value.products) {
+    if (productNames.has(product.name.toLowerCase())) continue;
+    await createProduct(ctx, {
+      name: product.name,
+      category: product.category,
+      description: product.description,
+      keyFeatures: product.keyFeatures,
+      idealFor: product.idealFor,
+    });
+    productNames.add(product.name.toLowerCase());
+    createdProducts++;
+  }
+
+  let createdServices = 0;
+  for (const service of value.services) {
+    if (serviceNames.has(service.name.toLowerCase())) continue;
+    await createService(ctx, { name: service.name, description: service.description });
+    serviceNames.add(service.name.toLowerCase());
+    createdServices++;
+  }
+
+  logger.info(
+    `Business extraction applied for workspace ${ctx.tenantId} from ${source}: ` +
+      `+${createdProducts} product(s), +${createdServices} service(s).`
+  );
+
+  return { extracted: value, applied: true, createdProducts, createdServices };
+}
+
+/**
  * Turns free text about the business into structured fields.
  *
  * `apply` decides whether the result is written or only returned for review.
@@ -457,88 +551,7 @@ export async function extractBusinessKnowledge(
     return { extracted: value, applied: false, createdProducts: 0, createdServices: 0 };
   }
 
-  // Scalars: fill only what is currently empty.
-  const patch: BusinessProfilePatch = {};
-  if (!existing.businessName && value.businessName) patch.businessName = value.businessName;
-  if (!existing.industry && value.industry) patch.industry = value.industry;
-  if (!existing.businessType && value.businessType) patch.businessType = value.businessType;
-  if (!existing.description && value.description) patch.description = value.description;
-  if (!existing.brandVoice && value.brandVoice) patch.brandVoice = value.brandVoice;
-
-  // Lists: union, so a second document adds to what the first found.
-  const mergeList = (current: string[], incoming: string[]) =>
-    Array.from(new Set([...current, ...incoming])).slice(0, LIMITS.listLength);
-
-  if (value.locationsServed.length) {
-    patch.locationsServed = mergeList(existing.locationsServed, value.locationsServed);
-  }
-  if (value.targetCustomerTypes.length) {
-    patch.targetCustomerTypes = mergeList(existing.targetCustomerTypes, value.targetCustomerTypes);
-  }
-  if (value.targetIndustries.length) {
-    patch.targetIndustries = mergeList(existing.targetIndustries, value.targetIndustries);
-  }
-  if (value.uniqueSellingPoints.length) {
-    patch.uniqueSellingPoints = mergeList(existing.uniqueSellingPoints, value.uniqueSellingPoints);
-  }
-  if (value.certifications.length) {
-    patch.certifications = mergeList(existing.certifications, value.certifications);
-  }
-  if (value.decisionMakerRoles.length) {
-    patch.decisionMakerRoles = mergeList(existing.decisionMakerRoles, value.decisionMakerRoles);
-  }
-
-  await updateBusinessProfile(ctx, patch);
-
-  // Provenance and the model's own open questions.
-  await prisma.businessProfile.update({
-    where: { tenantId: ctx.tenantId },
-    data: {
-      aiConfidence: value.confidence,
-      missingInformation: JSON.stringify(value.missingInformation.slice(0, 20)),
-      lastExtractedAt: new Date(),
-      lastPromptName: businessExtractionPrompt.name,
-      lastPromptVersion: businessExtractionPrompt.version,
-    },
-  });
-
-  // Products and services: add new names only, matched case-insensitively, so
-  // re-processing a document does not duplicate the catalogue.
-  const [currentProducts, currentServices] = await Promise.all([
-    listProducts(ctx, true),
-    listServices(ctx, true),
-  ]);
-  const productNames = new Set(currentProducts.map((p) => p.name.toLowerCase()));
-  const serviceNames = new Set(currentServices.map((s) => s.name.toLowerCase()));
-
-  let createdProducts = 0;
-  for (const product of value.products) {
-    if (productNames.has(product.name.toLowerCase())) continue;
-    await createProduct(ctx, {
-      name: product.name,
-      category: product.category,
-      description: product.description,
-      keyFeatures: product.keyFeatures,
-      idealFor: product.idealFor,
-    });
-    productNames.add(product.name.toLowerCase());
-    createdProducts++;
-  }
-
-  let createdServices = 0;
-  for (const service of value.services) {
-    if (serviceNames.has(service.name.toLowerCase())) continue;
-    await createService(ctx, { name: service.name, description: service.description });
-    serviceNames.add(service.name.toLowerCase());
-    createdServices++;
-  }
-
-  logger.info(
-    `Business extraction applied for workspace ${ctx.tenantId} via ${result.provider}: ` +
-      `+${createdProducts} product(s), +${createdServices} service(s).`
-  );
-
-  return { extracted: value, applied: true, createdProducts, createdServices };
+  return applyBusinessExtraction(ctx, value, `AI provider ${result.provider}`);
 }
 
 /**

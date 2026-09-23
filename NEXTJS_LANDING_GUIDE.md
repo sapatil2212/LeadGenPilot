@@ -7,7 +7,7 @@ Your application is **already configured** to use Next.js for the landing page!
 ### Architecture
 
 ```
-NexaLeadAi Server (Port 3000)
+LeadGenPilot Server (Port 3000)
 ├─ /                    → Next.js Landing Page (from leadfinder-landing/out)
 ├─ /app                 → React Dashboard (from dist)
 └─ /api/*               → Backend API Routes

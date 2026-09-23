@@ -31,8 +31,10 @@ import {
   Smile,
   Paperclip,
   Camera,
-  Mic
+  Mic,
+  Loader2
 } from "lucide-react";
+import { api, messageOf } from "./ui/api";
 
 interface EmailTemplate {
   id: string;
@@ -66,83 +68,25 @@ interface EmailTemplate {
   createdAt: string;
 }
 
-const STARTER_TEMPLATES: EmailTemplate[] = [
-  {
-    id: "sample-ai-outreach",
-    name: "AI Email Outreach Shell",
-    templateType: "email",
-    subject: "Outreach: Helping {{company}} scale lead generation in {{city}}",
-    designMode: "builder",
-    htmlCode: "",
-    useLogo: true,
-    logoType: "text",
-    logoValue: "NexaLead AI Services",
-    introText: "Hi {{name}},\n\nHope you are doing well.",
-    useAiBody: true,
-    customBodyText: "I wanted to reach out because we noticed your business listing in {{city}} and believe we can assist with automation.",
-    useCta: true,
-    ctaText: "Book Outreach Demo",
-    ctaUrl: "https://nexaleadai.com/demo",
-    ctaBgColor: "#4f46e5",
-    useContact: true,
-    contactText: "Outreach Desk • support@nexaleadai.com • +1 (555) outreach",
-    useFooter: true,
-    footerText: "Sent via NexaLead AI • 101 Innovation Way • Unsubscribe",
-    createdAt: new Date().toISOString()
-  },
-  {
-    id: "sample-custom-thankyou",
-    name: "Standard Email Welcomer",
-    templateType: "email",
-    subject: "Thank you for connecting with us!",
-    designMode: "builder",
-    htmlCode: "",
-    useLogo: false,
-    logoType: "text",
-    logoValue: "",
-    introText: "Hi {{name}},\n\nThank you for taking the time to review our services.",
-    useAiBody: false,
-    customBodyText: "We are thrilled to work with {{company}}. Below are the details regarding our geo-lead scraping tools.",
-    useCta: true,
-    ctaText: "Access Portal",
-    ctaUrl: "https://nexaleadai.com/portal",
-    ctaBgColor: "#0ea5e9",
-    useContact: false,
-    contactText: "",
-    useFooter: true,
-    footerText: "© NexaLead AI Group. All rights reserved.",
-    createdAt: new Date().toISOString()
-  },
-  {
-    id: "sample-wa-ai-outreach",
-    name: "AI WhatsApp Outreach Shell",
-    templateType: "whatsapp",
-    subject: "",
-    designMode: "builder",
-    htmlCode: "",
-    useLogo: false,
-    logoType: "text",
-    logoValue: "",
-    introText: "Hi {{name}},\n\nI noticed your listing for {{company}} in {{city}}.",
-    useAiBody: true,
-    customBodyText: "We help local businesses automate lead generation.",
-    useCta: true,
-    ctaText: "See demo here:",
-    ctaUrl: "https://nexaleadai.com/demo",
-    ctaBgColor: "",
-    useContact: false,
-    contactText: "",
-    useFooter: true,
-    footerText: "Reply STOP to unsubscribe.",
-    createdAt: new Date().toISOString()
-  }
-];
+interface GeneratedTemplateResponse {
+  draft: EmailTemplate;
+  rationale: string | null;
+  missingInformation: string[];
+  confidence: number;
+  sources: { documentId: string; documentTitle: string }[];
+  provider: string;
+  model: string;
+  promptName: string;
+  promptVersion: number;
+}
 
 interface EmailTemplatesProps {
   isLight: boolean;
+  workspaceId?: string;
 }
 
-export default function EmailTemplates({ isLight }: EmailTemplatesProps) {
+export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesProps) {
+  const storageKey = `leadfinder_email_templates_v3:${workspaceId || "default"}`;
   const [templates, setTemplates] = useState<EmailTemplate[]>([]);
   const [selectedTemplate, setSelectedTemplate] = useState<EmailTemplate | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -150,6 +94,19 @@ export default function EmailTemplates({ isLight }: EmailTemplatesProps) {
   const [copiedNotification, setCopiedNotification] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [currentTab, setCurrentTab] = useState<"email" | "whatsapp">("email");
+  const [generationObjective, setGenerationObjective] = useState(
+    "Introduce our most relevant offering and start a sales conversation."
+  );
+  const [generationTone, setGenerationTone] = useState("");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generationError, setGenerationError] = useState("");
+  const [templateError, setTemplateError] = useState("");
+  const [isLoadingTemplates, setIsLoadingTemplates] = useState(true);
+  const [legacyTemplates, setLegacyTemplates] = useState<EmailTemplate[]>([]);
+  const [legacyCodeTemplateCount, setLegacyCodeTemplateCount] = useState(0);
+  const [legacyStorageKeys, setLegacyStorageKeys] = useState<string[]>([]);
+  const [isImportingLegacy, setIsImportingLegacy] = useState(false);
+  const [generationResult, setGenerationResult] = useState<GeneratedTemplateResponse | null>(null);
   
   const highlightVariables = (text: string) => {
     if (!text) return "";
@@ -184,49 +141,130 @@ export default function EmailTemplates({ isLight }: EmailTemplatesProps) {
     onConfirm: () => {}
   });
 
-  // Load from local storage
+  // Templates are workspace data: load them through the authenticated API so
+  // teammates, campaigns and other devices all see the same reviewed records.
   useEffect(() => {
-    const saved = localStorage.getItem("leadfinder_email_templates_v3");
-    if (saved) {
+    let alive = true;
+    setIsLoadingTemplates(true);
+    setTemplateError("");
+    api.get<EmailTemplate[]>("/api/templates")
+      .then((rows) => {
+        if (alive) setTemplates(rows);
+      })
+      .catch((error) => {
+        if (alive) setTemplateError(messageOf(error));
+      })
+      .finally(() => {
+        if (alive) setIsLoadingTemplates(false);
+      });
+
+    // Existing browser-only records cannot be assigned silently. Surface an
+    // explicit import action for the currently selected workspace instead.
+    const candidates: EmailTemplate[] = [];
+    const seenIds = new Set<string>();
+    const keys: string[] = [];
+    let codeTemplateCount = 0;
+    for (const key of ["leadfinder_email_templates_v3", storageKey]) {
+      const saved = localStorage.getItem(key);
+      if (!saved) continue;
       try {
         const parsed = JSON.parse(saved);
-        setTemplates(parsed);
-      } catch (err) {
-        setTemplates(STARTER_TEMPLATES);
+        if (!Array.isArray(parsed)) continue;
+        const reviewed = parsed.filter(
+          (template: EmailTemplate) =>
+            template && !String(template.id || "").startsWith("sample-")
+        );
+        for (const template of reviewed) {
+          if (template.designMode === "code") {
+            codeTemplateCount++;
+            continue;
+          }
+          const legacyId = String(template.id || "");
+          if (!legacyId || seenIds.has(legacyId)) continue;
+          seenIds.add(legacyId);
+          candidates.push(template);
+        }
+        if (reviewed.length) keys.push(key);
+      } catch {
+        // Leave malformed legacy data untouched; the user can clear it manually.
       }
-    } else {
-      localStorage.setItem("leadfinder_email_templates_v3", JSON.stringify(STARTER_TEMPLATES));
-      setTemplates(STARTER_TEMPLATES);
     }
-  }, []);
+    setLegacyTemplates(candidates);
+    setLegacyCodeTemplateCount(codeTemplateCount);
+    setLegacyStorageKeys(keys);
 
-  const saveToStorage = (updatedList: EmailTemplate[]) => {
-    localStorage.setItem("leadfinder_email_templates_v3", JSON.stringify(updatedList));
-    setTemplates(updatedList);
+    return () => {
+      alive = false;
+    };
+  }, [storageKey]);
+
+  const upsertTemplate = (saved: EmailTemplate) => {
+    setTemplates((current) => {
+      const exists = current.some((template) => template.id === saved.id);
+      return exists
+        ? current.map((template) => (template.id === saved.id ? saved : template))
+        : [saved, ...current];
+    });
+  };
+
+  const handleImportLegacy = async () => {
+    if (!legacyTemplates.length) return;
+    setIsImportingLegacy(true);
+    setTemplateError("");
+    try {
+      const result = await api.post<{ templates: EmailTemplate[]; imported: number }>(
+        "/api/templates/import",
+        { templates: legacyTemplates }
+      );
+      setTemplates((current) => [...result.templates, ...current]);
+      const importedIds = new Set(legacyTemplates.map((template) => String(template.id)));
+      for (const key of legacyStorageKeys) {
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        try {
+          const parsed = JSON.parse(raw);
+          if (!Array.isArray(parsed)) continue;
+          const remaining = parsed.filter(
+            (template: EmailTemplate) => !importedIds.has(String(template?.id || ""))
+          );
+          if (remaining.length) localStorage.setItem(key, JSON.stringify(remaining));
+          else localStorage.removeItem(key);
+        } catch {
+          // Never delete a source key we could not safely update.
+        }
+      }
+      setLegacyTemplates([]);
+      setLegacyStorageKeys([]);
+    } catch (error) {
+      setTemplateError(messageOf(error));
+    } finally {
+      setIsImportingLegacy(false);
+    }
   };
 
   const handleCreateNew = () => {
+    setGenerationResult(null);
     const newTpl: EmailTemplate = {
       id: `tpl-${Date.now()}`,
-      name: currentTab === "email" ? "New Custom Email Shell" : "New WhatsApp Script Shell",
+      name: currentTab === "email" ? "Untitled Email Template" : "Untitled WhatsApp Template",
       templateType: currentTab,
-      subject: currentTab === "email" ? "Outreach check for {{company}}" : "",
+      subject: "",
       designMode: "builder",
       htmlCode: "",
       useLogo: false,
       logoType: "text",
-      logoValue: "My Brand Banner",
-      introText: "Hi {{name}},",
-      useAiBody: true,
-      customBodyText: "We wanted to reach out regarding our automation services.",
-      useCta: currentTab === "email",
-      ctaText: currentTab === "email" ? "Get Started" : "Check our website:",
-      ctaUrl: "https://example.com",
+      logoValue: "",
+      introText: "Hi {{company}} team,",
+      useAiBody: false,
+      customBodyText: "",
+      useCta: false,
+      ctaText: "",
+      ctaUrl: "",
       ctaBgColor: "#4f46e5",
       useContact: false,
       contactText: "",
-      useFooter: true,
-      footerText: currentTab === "email" ? "© 2026 My Business. All rights reserved." : "Reply STOP to opt out.",
+      useFooter: false,
+      footerText: "",
       createdAt: new Date().toISOString()
     };
     setSelectedTemplate(newTpl);
@@ -234,55 +272,71 @@ export default function EmailTemplates({ isLight }: EmailTemplatesProps) {
     setIsEditing(true);
   };
 
-  const handleDuplicate = (tpl: EmailTemplate, e: React.MouseEvent) => {
-    e.stopPropagation();
-    const cloned: EmailTemplate = {
-      ...tpl,
-      id: `tpl-${Date.now()}`,
-      name: `${tpl.name} (Copy)`,
-      createdAt: new Date().toISOString()
-    };
-    const updated = [cloned, ...templates];
-    saveToStorage(updated);
+  const handleGenerateWithAi = async () => {
+    setIsGenerating(true);
+    setGenerationError("");
+    setGenerationResult(null);
+    try {
+      const result = await api.post<GeneratedTemplateResponse>("/api/templates/ai-draft", {
+        channel: currentTab,
+        objective: generationObjective,
+        tone: generationTone || undefined,
+      });
+      setGenerationResult(result);
+      setSelectedTemplate(result.draft);
+      setActiveMode("builder");
+      setIsEditing(true);
+    } catch (error) {
+      setGenerationError(messageOf(error));
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
-  const handleSave = () => {
+  const handleDuplicate = async (tpl: EmailTemplate, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setTemplateError("");
+    try {
+      const cloned = await api.post<EmailTemplate>("/api/templates", {
+        template: { ...tpl, name: `${tpl.name} (Copy)` },
+      });
+      upsertTemplate(cloned);
+    } catch (error) {
+      setTemplateError(messageOf(error));
+    }
+  };
+
+  const handleSave = async () => {
     if (!selectedTemplate) return;
     setSaveStatus("saving");
-    
-    // Compile output based on type
-    const outputString = selectedTemplate.templateType === "email" 
-      ? generateHtml(selectedTemplate)
-      : generateWhatsappText(selectedTemplate);
+    setTemplateError("");
 
-    const updatedTemplate = {
-      ...selectedTemplate,
-      designMode: activeMode,
-      htmlCode: activeMode === "code" ? selectedTemplate.htmlCode : outputString
-    };
-    
-    const exists = templates.some(t => t.id === selectedTemplate.id);
-    let updatedList: EmailTemplate[];
-    if (exists) {
-      updatedList = templates.map(t => t.id === selectedTemplate.id ? updatedTemplate : t);
-    } else {
-      updatedList = [updatedTemplate, ...templates];
-    }
-    
-    saveToStorage(updatedList);
-    setSelectedTemplate(updatedTemplate);
-    setTimeout(() => {
+    const exists = templates.some((template) => template.id === selectedTemplate.id);
+    try {
+      const saved = exists
+        ? await api.put<EmailTemplate>(`/api/templates/${selectedTemplate.id}`, {
+            template: { ...selectedTemplate, designMode: "builder", htmlCode: "" },
+          })
+        : await api.post<EmailTemplate>("/api/templates", {
+            template: { ...selectedTemplate, designMode: "builder", htmlCode: "" },
+          });
+      upsertTemplate(saved);
+      setSelectedTemplate(saved);
+      setActiveMode("builder");
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus("idle"), 2000);
       setModalConfig({
         isOpen: true,
         type: "success",
         title: "Template Saved Successfully",
-        message: `"${selectedTemplate.name}" has been saved successfully and is ready for use in campaigns.`,
+        message: `"${saved.name}" is now available to this workspace and can be selected when generating a campaign.`,
         confirmLabel: "Done",
-        onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
+        onConfirm: () => setModalConfig((previous) => ({ ...previous, isOpen: false })),
       });
-    }, 500);
+    } catch (error) {
+      setSaveStatus("idle");
+      setTemplateError(messageOf(error));
+    }
   };
 
   const handleDelete = (id: string, e: React.MouseEvent) => {
@@ -294,12 +348,12 @@ export default function EmailTemplates({ isLight }: EmailTemplatesProps) {
       message: "Are you sure you want to permanently delete this outreach template shell? This action cannot be undone.",
       confirmLabel: "Delete Template",
       isLoading: false,
-      onConfirm: () => {
+      onConfirm: async () => {
         setModalConfig(prev => ({ ...prev, isLoading: true }));
-        
-        setTimeout(() => {
-          const updated = templates.filter(t => t.id !== id);
-          saveToStorage(updated);
+        setTemplateError("");
+        try {
+          await api.del(`/api/templates/${id}`);
+          setTemplates((current) => current.filter((template) => template.id !== id));
           if (selectedTemplate?.id === id) {
             setSelectedTemplate(null);
             setIsEditing(false);
@@ -308,17 +362,21 @@ export default function EmailTemplates({ isLight }: EmailTemplatesProps) {
             isOpen: true,
             type: "success",
             title: "Template Deleted",
-            message: "The outreach template has been successfully deleted.",
+            message: "The outreach template has been removed from this workspace.",
             confirmLabel: "Done",
             isLoading: false,
             onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
           });
-        }, 900);
+        } catch (error) {
+          setTemplateError(messageOf(error));
+          setModalConfig((previous) => ({ ...previous, isOpen: false, isLoading: false }));
+        }
       }
     });
   };
 
   const handleEditClick = (tpl: EmailTemplate) => {
+    setGenerationResult(null);
     setSelectedTemplate(tpl);
     setActiveMode(tpl.designMode || "builder");
     setIsEditing(true);
@@ -514,45 +572,194 @@ export default function EmailTemplates({ isLight }: EmailTemplatesProps) {
       {/* ── VIEW 1: TEMPLATE CARDS DASHBOARD GRID ── */}
       {!isEditing ? (
         <div className="space-y-6 animate-fadeIn">
+          {/* AI generation starts from the tenant's uploaded business knowledge. */}
+          <div className={`relative overflow-hidden rounded-xl border p-3.5 sm:p-4 transition-all ${
+            isLight
+              ? "border-indigo-200/90 bg-gradient-to-br from-indigo-50/70 to-white shadow-xs"
+              : "border-indigo-500/20 bg-gradient-to-br from-indigo-500/10 to-[#090d16] shadow-md"
+          }`}>
+            <div className="absolute -right-12 -top-12 h-32 w-32 rounded-full bg-indigo-500/10 blur-2xl pointer-events-none" />
+            <div className="relative grid gap-3 lg:grid-cols-[1fr_200px_auto] lg:items-end">
+              <div>
+                <div className="mb-1 flex items-center gap-1.5">
+                  <div className="p-1 rounded-md bg-indigo-500/10 text-indigo-500">
+                    <Sparkles className="h-3.5 w-3.5" />
+                  </div>
+                  <h3 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                    AI Campaign Copy Generator
+                  </h3>
+                </div>
+                <p className="mb-2 text-[10px] leading-relaxed text-slate-500">
+                  Gemini drafts hyper-relevant copy synthesized from your Company Profile, Products, and knowledge docs.
+                </p>
+                <label className="mb-1 block text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                  Campaign Objective
+                </label>
+                <textarea
+                  value={generationObjective}
+                  onChange={(event) => setGenerationObjective(event.target.value)}
+                  rows={2}
+                  maxLength={500}
+                  className={`w-full resize-none rounded-lg border px-2.5 py-1.5 text-xs outline-none transition-all focus:ring-2 focus:ring-indigo-500/15 ${
+                    isLight
+                      ? "border-slate-200 bg-white text-slate-800 focus:border-indigo-500"
+                      : "border-[#1e293b] bg-[#030712] text-white focus:border-indigo-500/60"
+                  }`}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                  Tone of Voice (Optional)
+                </label>
+                <input
+                  value={generationTone}
+                  onChange={(event) => setGenerationTone(event.target.value)}
+                  maxLength={120}
+                  placeholder="e.g. Consultative, direct"
+                  className={`w-full rounded-lg border px-2.5 py-2 text-xs outline-none transition-all focus:ring-2 focus:ring-indigo-500/15 ${
+                    isLight
+                      ? "border-slate-200 bg-white text-slate-800 focus:border-indigo-500"
+                      : "border-[#1e293b] bg-[#030712] text-white focus:border-indigo-500/60"
+                  }`}
+                />
+              </div>
+              <button
+                onClick={handleGenerateWithAi}
+                disabled={isGenerating || !generationObjective.trim()}
+                className="btn-interactive flex items-center justify-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-600 via-indigo-500 to-violet-600 px-4 py-2 text-xs font-bold text-white shadow-xs shadow-indigo-600/20 transition-all hover:from-indigo-500 hover:to-violet-500 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+              >
+                {isGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                {isGenerating ? "Synthesizing…" : `Generate ${currentTab === "email" ? "Email" : "WhatsApp"}`}
+              </button>
+            </div>
+            {generationError && (
+              <div className="relative mt-2.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs text-rose-700">
+                {generationError}
+              </div>
+            )}
+          </div>
+
+          {legacyTemplates.length > 0 && (
+            <div className={`flex flex-col gap-3 rounded-xl border px-4 py-3 sm:flex-row sm:items-center sm:justify-between ${
+              isLight
+                ? "border-amber-200 bg-amber-50 text-amber-900"
+                : "border-amber-500/20 bg-amber-500/10 text-amber-200"
+            }`}>
+              <div>
+                <div className="text-xs font-bold">Existing browser templates found</div>
+                <p className="mt-0.5 text-[10px] leading-relaxed opacity-80">
+                  Import {legacyTemplates.length} reviewed template{legacyTemplates.length === 1 ? "" : "s"} into this workspace so your team and Campaigns can use them.
+                </p>
+              </div>
+              <button
+                onClick={handleImportLegacy}
+                disabled={isImportingLegacy}
+                className="shrink-0 rounded-lg bg-amber-600 px-3 py-2 text-[10px] font-bold text-white hover:bg-amber-500 disabled:opacity-50"
+              >
+                {isImportingLegacy ? "Importing…" : "Import into this workspace"}
+              </button>
+            </div>
+          )}
+
+          {legacyCodeTemplateCount > 0 && (
+            <div className={`rounded-xl border px-4 py-3 ${
+              isLight
+                ? "border-slate-200 bg-slate-50 text-slate-700"
+                : "border-slate-700 bg-slate-900 text-slate-300"
+            }`}>
+              <div className="text-xs font-bold">
+                {legacyCodeTemplateCount} legacy code template{legacyCodeTemplateCount === 1 ? "" : "s"} kept in browser storage
+              </div>
+              <p className="mt-1 text-[10px] leading-relaxed opacity-75">
+                Arbitrary HTML or raw-code templates cannot be imported safely. They were not deleted; recreate their content with the safe builder or Generate with AI.
+              </p>
+            </div>
+          )}
+
+          {templateError && (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700">
+              {templateError}
+            </div>
+          )}
+
           {/* Header Channel selector & Add Action */}
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800/10 pb-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/60 dark:border-slate-800/60 pb-3">
             {/* Tabs for Email vs WhatsApp */}
-            <div className={`flex rounded-xl p-0.5 border ${
-              isLight ? "border-slate-200 bg-slate-50" : "border-[#1e293b] bg-slate-950/40"
+            <div className={`inline-flex p-0.5 rounded-xl border transition-all ${
+              isLight ? "bg-slate-100/80 border-slate-200/80" : "bg-black/30 border-[#1e293b]"
             }`}>
               <button
                 onClick={() => setCurrentTab("email")}
-                className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold uppercase transition-all cursor-pointer ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                   currentTab === "email"
-                    ? "bg-indigo-600 text-white shadow-sm"
-                    : "text-slate-400 hover:text-slate-250"
+                    ? "bg-indigo-600 text-white shadow-xs shadow-indigo-600/30"
+                    : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-white"
                 }`}
               >
-                <Mail className="h-4 w-4" /> Email Templates
+                <Mail className="h-3.5 w-3.5" /> 
+                <span>Email Templates</span>
+                <span className={`text-[9.5px] px-1.5 py-0.2 rounded-full font-bold tabular-nums ${
+                  currentTab === "email" ? "bg-white/20 text-white" : isLight ? "bg-slate-200 text-slate-700" : "bg-slate-800 text-slate-300"
+                }`}>
+                  {templates.filter(t => t.templateType === "email").length}
+                </span>
               </button>
               <button
                 onClick={() => setCurrentTab("whatsapp")}
-                className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold uppercase transition-all cursor-pointer ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                   currentTab === "whatsapp"
-                    ? "bg-indigo-600 text-white shadow-sm"
-                    : "text-slate-400 hover:text-slate-250"
+                    ? "bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-xs shadow-emerald-600/30"
+                    : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-white"
                 }`}
               >
-                <WhatsAppLogo className="h-4 w-4 fill-emerald-500 text-emerald-500" /> WhatsApp Templates
+                <WhatsAppLogo className="h-3.5 w-3.5 fill-current" /> 
+                <span>WhatsApp Templates</span>
+                <span className={`text-[9.5px] px-1.5 py-0.2 rounded-full font-bold tabular-nums ${
+                  currentTab === "whatsapp" ? "bg-white/20 text-white" : isLight ? "bg-slate-200 text-slate-700" : "bg-slate-800 text-slate-300"
+                }`}>
+                  {templates.filter(t => t.templateType === "whatsapp").length}
+                </span>
               </button>
             </div>
 
             <button
               onClick={handleCreateNew}
-              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-md shadow-indigo-600/10 cursor-pointer transition-all hover:scale-105"
+              className={`btn-interactive px-3 py-1.5 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 shadow-xs cursor-pointer transition-all ${
+                currentTab === "whatsapp"
+                  ? "bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 shadow-emerald-600/20"
+                  : "bg-gradient-to-r from-indigo-600 via-indigo-500 to-violet-600 hover:from-indigo-500 hover:to-violet-500 shadow-indigo-600/20"
+              }`}
             >
-              <PlusCircle className="h-4 w-4" />
-              <span>Create {currentTab === "email" ? "Email Template" : "WhatsApp Template"}</span>
+              <PlusCircle className="h-3.5 w-3.5" />
+              <span>New {currentTab === "email" ? "Email" : "WhatsApp"} Template</span>
             </button>
           </div>
 
           {/* Cards Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {isLoadingTemplates && (
+              <div className={`col-span-full rounded-xl border p-8 text-center text-xs ${
+                isLight ? "border-slate-200 bg-white text-slate-500" : "border-[#1e293b] bg-[#090d16] text-slate-400"
+              }`}>
+                <Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin text-indigo-500" />
+                Loading workspace templates…
+              </div>
+            )}
+            {!isLoadingTemplates && filteredTemplates.length === 0 && (
+              <div className={`col-span-full rounded-xl border border-dashed p-8 text-center relative overflow-hidden ${
+                isLight ? "border-indigo-200/90 bg-indigo-50/30" : "border-indigo-500/25 bg-indigo-500/5"
+              }`}>
+                <div className="w-10 h-10 rounded-xl bg-indigo-500/10 flex items-center justify-center mx-auto mb-2.5 text-indigo-500">
+                  <Sparkles className="h-5 w-5" />
+                </div>
+                <div className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                  No {currentTab} templates yet
+                </div>
+                <p className="mx-auto mt-1 max-w-md text-[11px] leading-relaxed text-slate-500">
+                  Use the AI composer above to let Gemini create high-converting outreach copy based on your business signals.
+                </p>
+              </div>
+            )}
             {filteredTemplates.map(tpl => {
               const activeFeatures = [
                 tpl.useLogo && "Logo",
@@ -565,28 +772,28 @@ export default function EmailTemplates({ isLight }: EmailTemplatesProps) {
               return (
                 <div
                   key={tpl.id}
-                  className={`border rounded-2xl p-5 flex flex-col justify-between h-56 transition-all hover:-translate-y-0.5 hover:shadow-md cursor-pointer group ${
+                  className={`border rounded-xl p-3.5 flex flex-col justify-between h-42 transition-all duration-200 hover:-translate-y-1 hover:shadow-md cursor-pointer group ${
                     isLight 
-                      ? "bg-white border-slate-200 hover:border-slate-300" 
-                      : "bg-[#090d16] border-[#1e293b] hover:border-[#334155]"
+                      ? "bg-white border-slate-200 hover:border-indigo-300" 
+                      : "bg-[#090d16] border-[#1e293b] hover:border-indigo-500/40"
                   }`}
                   onClick={() => handleEditClick(tpl)}
                 >
-                  <div className="space-y-3.5 flex-grow">
+                  <div className="space-y-2 flex-grow min-w-0">
                     <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className={`p-2 rounded-lg ${
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className={`p-1.5 rounded-lg shrink-0 ${
                           tpl.templateType === "email"
                             ? (isLight ? "bg-indigo-50 text-indigo-600" : "bg-indigo-950/40 text-indigo-400")
                             : (isLight ? "bg-emerald-50 text-emerald-600" : "bg-emerald-950/40 text-emerald-400")
                         }`}>
-                          {tpl.templateType === "email" ? <Mail className="h-4 w-4" /> : <WhatsAppLogo className="h-4 w-4 fill-emerald-500 text-emerald-500" />}
+                          {tpl.templateType === "email" ? <Mail className="h-3.5 w-3.5" /> : <WhatsAppLogo className="h-3.5 w-3.5 fill-emerald-500 text-emerald-500" />}
                         </div>
                         <h4 className={`text-xs font-bold leading-tight truncate max-w-[150px] ${isLight ? "text-slate-900" : "text-white"}`}>
                           {tpl.name}
                         </h4>
                       </div>
-                      <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full border uppercase ${
+                      <span className={`text-[8.5px] font-bold px-1.5 py-0.2 rounded-full border uppercase shrink-0 ${
                         tpl.designMode === "code"
                           ? "bg-amber-500/10 border-amber-500/20 text-amber-400"
                           : "bg-indigo-500/10 border-indigo-500/20 text-indigo-400"
@@ -601,19 +808,19 @@ export default function EmailTemplates({ isLight }: EmailTemplatesProps) {
                           <strong>Subject:</strong> {tpl.subject || "(No Subject)"}
                         </div>
                       ) : (
-                        <p className="text-[10px] text-slate-450 line-clamp-2 italic leading-relaxed">
+                        <p className="text-[10px] text-slate-400 line-clamp-2 italic leading-relaxed">
                           {tpl.introText || tpl.customBodyText || "No text preview defined..."}
                         </p>
                       )}
                       
-                      <div className="flex flex-wrap gap-1 mt-2">
+                      <div className="flex flex-wrap gap-1 mt-1">
                         {activeFeatures.map((feat, idx) => (
                           <span 
                             key={idx} 
-                            className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
+                            className={`text-[8.5px] px-1.5 py-0.2 rounded font-medium ${
                               feat === "AI Body"
                                 ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/15"
-                                : isLight ? "bg-slate-150 text-slate-650" : "bg-slate-900 text-slate-400"
+                                : isLight ? "bg-slate-100 text-slate-600" : "bg-slate-900 text-slate-400"
                             }`}
                           >
                             {feat}
@@ -623,40 +830,40 @@ export default function EmailTemplates({ isLight }: EmailTemplatesProps) {
                     </div>
                   </div>
 
-                  <div className={`pt-3 border-t flex items-center justify-between text-[10px] ${
+                  <div className={`pt-2 border-t flex items-center justify-between text-[10px] ${
                     isLight ? "border-slate-100" : "border-[#1e293b]/60"
                   }`}>
-                    <span className="text-slate-500 flex items-center gap-1">
-                      <Clock className="h-3 w-3" />
+                    <span className="text-slate-500 flex items-center gap-1 text-[9.5px]">
+                      <Clock className="h-2.5 w-2.5" />
                       {new Date(tpl.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                     </span>
 
                     <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
                       <button
                         onClick={(e) => handleDuplicate(tpl, e)}
-                        className={`p-1.5 rounded-lg border hover:scale-105 transition-all cursor-pointer ${
+                        className={`p-1 rounded-md border hover:scale-105 transition-all cursor-pointer ${
                           isLight 
                             ? "border-slate-200 bg-white hover:bg-slate-50 text-slate-500" 
                             : "border-slate-800 bg-[#0c111d] hover:bg-slate-800 text-slate-400"
                         }`}
                         title="Duplicate Template"
                       >
-                        <Copy className="h-3.5 w-3.5" />
+                        <Copy className="h-3 w-3" />
                       </button>
                       <button
                         onClick={(e) => handleDelete(tpl.id, e)}
-                        className={`p-1.5 rounded-lg border hover:scale-105 hover:text-rose-500 hover:border-rose-500/30 transition-all cursor-pointer ${
+                        className={`p-1 rounded-md border hover:scale-105 hover:text-rose-500 hover:border-rose-500/30 transition-all cursor-pointer ${
                           isLight 
                             ? "border-slate-200 bg-white hover:bg-slate-50 text-slate-500" 
                             : "border-slate-800 bg-[#0c111d] hover:bg-slate-800 text-slate-400"
                         }`}
                         title="Delete Template"
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
+                        <Trash2 className="h-3 w-3" />
                       </button>
                       <button
                         onClick={() => handleEditClick(tpl)}
-                        className="px-2.5 py-1.5 rounded-lg bg-indigo-650 hover:bg-indigo-600 text-white font-bold transition-all cursor-pointer"
+                        className="px-2 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold transition-all cursor-pointer shadow-2xs"
                       >
                         Edit
                       </button>
@@ -669,17 +876,20 @@ export default function EmailTemplates({ isLight }: EmailTemplatesProps) {
             {/* Create Card placeholder */}
             <div
               onClick={handleCreateNew}
-              className={`border border-dashed rounded-2xl flex flex-col items-center justify-center h-56 transition-all hover:border-indigo-500/50 cursor-pointer group ${
+              className={`border border-dashed rounded-xl flex flex-col items-center justify-center h-42 transition-all hover:border-indigo-500/50 cursor-pointer group ${
                 isLight ? "bg-slate-50/30 border-slate-300" : "bg-slate-900/10 border-slate-800"
               }`}
             >
-              <div className={`p-3 rounded-2xl mb-2.5 transition-all group-hover:scale-110 ${
+              <div className={`p-2.5 rounded-xl mb-2 transition-all group-hover:scale-110 ${
                 isLight ? "bg-slate-100 text-slate-500" : "bg-slate-800/40 text-slate-400"
               }`}>
-                <Plus className="h-5 w-5" />
+                <PlusCircle className="h-4 w-4" />
               </div>
-              <span className="text-xs font-bold text-slate-450 group-hover:text-indigo-400 transition-all">
-                Create {currentTab === "email" ? "Email Template" : "WhatsApp Template"}
+              <span className={`text-xs font-bold ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+                Create Blank Template
+              </span>
+              <span className="text-[10px] text-slate-500 mt-0.5">
+                Design custom blocks from scratch
               </span>
             </div>
           </div>
@@ -713,6 +923,46 @@ export default function EmailTemplates({ isLight }: EmailTemplatesProps) {
               )}
             </span>
           </div>
+
+          {generationResult && (
+            <div className={`rounded-xl border px-4 py-3 text-xs ${
+              isLight
+                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                : "border-emerald-500/20 bg-emerald-500/10 text-emerald-200"
+            }`}>
+              <div className="flex items-start gap-2">
+                <Sparkles className="mt-0.5 h-4 w-4 shrink-0" />
+                <div className="min-w-0">
+                  <div className="font-bold">
+                    AI draft ready — review and edit before saving
+                  </div>
+                  {generationResult.rationale && (
+                    <p className="mt-1 leading-relaxed">{generationResult.rationale}</p>
+                  )}
+                  <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[10px] opacity-75">
+                    <span>Confidence {Math.round(generationResult.confidence * 100)}%</span>
+                    <span>{generationResult.provider} / {generationResult.model}</span>
+                    <span>
+                      {generationResult.sources.length
+                        ? `${generationResult.sources.length} uploaded source${generationResult.sources.length === 1 ? "" : "s"}`
+                        : "Profile and catalogue context"}
+                    </span>
+                  </div>
+                  {generationResult.missingInformation.length > 0 && (
+                    <p className="mt-2 text-[10px] leading-relaxed">
+                      Could be improved with: {generationResult.missingInformation.join(" • ")}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {templateError && (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700">
+              {templateError}
+            </div>
+          )}
 
           {/* Top Metadata row */}
           {selectedTemplate && (
@@ -750,29 +1000,10 @@ export default function EmailTemplates({ isLight }: EmailTemplatesProps) {
 
                 {/* Mode switch and actions */}
                 <div className="flex items-center gap-2">
-                  <div className={`flex rounded-lg p-0.5 border ${
-                    isLight ? "border-slate-200 bg-slate-50" : "border-[#1e293b] bg-slate-950/40"
+                  <div className={`flex items-center rounded-lg border px-3 py-1.5 text-[10px] font-bold uppercase ${
+                    isLight ? "border-slate-200 bg-slate-50 text-slate-600" : "border-[#1e293b] bg-slate-950/40 text-slate-300"
                   }`}>
-                    <button
-                      onClick={() => setActiveMode("builder")}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all cursor-pointer ${
-                        activeMode === "builder"
-                          ? "bg-indigo-600 text-white shadow-sm"
-                          : "text-slate-400 hover:text-slate-250"
-                      }`}
-                    >
-                      <LayoutIcon className="h-3.5 w-3.5" /> Wizard
-                    </button>
-                    <button
-                      onClick={() => setActiveMode("code")}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all cursor-pointer ${
-                        activeMode === "code"
-                          ? "bg-indigo-600 text-white shadow-sm"
-                          : "text-slate-400 hover:text-slate-250"
-                      }`}
-                    >
-                      <Code className="h-3.5 w-3.5" /> {selectedTemplate.templateType === "email" ? "Paste Code" : "Raw Text"}
-                    </button>
+                    <LayoutIcon className="mr-1.5 h-3.5 w-3.5" /> Safe builder
                   </div>
 
                   <button

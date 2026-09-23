@@ -42,10 +42,11 @@ export interface OutreachTemplate {
   createdAt: string;
 }
 
-/** Load all templates from localStorage (safe: returns [] on any error). */
-export function loadOutreachTemplates(): OutreachTemplate[] {
+/** Load this workspace's reviewed templates from localStorage. */
+export function loadOutreachTemplates(workspaceId?: string): OutreachTemplate[] {
   try {
-    const raw = localStorage.getItem(TEMPLATES_STORAGE_KEY);
+    const key = `${TEMPLATES_STORAGE_KEY}:${workspaceId || "default"}`;
+    const raw = localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? (parsed as OutreachTemplate[]) : [];

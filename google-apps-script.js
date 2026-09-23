@@ -1,5 +1,5 @@
 // ============================================
-// Google Apps Script for NexaLeadAi Web App
+// Google Apps Script for LeadGenPilot Web App
 // PASTE THIS ENTIRE CODE IN YOUR APPS SCRIPT
 // Then: Deploy → New deployment → Web app
 // ============================================

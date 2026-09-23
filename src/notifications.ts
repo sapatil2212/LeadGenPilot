@@ -230,7 +230,7 @@ class NotificationService {
       "info",
       "auth",
       `Welcome${userName ? ", " + userName : ""}!`,
-      "Your NexaLeadAi account is ready. Start by configuring your first scraper.",
+      "Your LeadGenPilot account is ready. Start by configuring your first scraper.",
       { actionUrl: "/settings", actionLabel: "Get Started" }
     );
   }

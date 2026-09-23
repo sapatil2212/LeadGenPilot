@@ -43,7 +43,7 @@ router.post(
   "/",
   heavyActionRateLimiter(),
   resolveTenantContext,
-  requirePermission("SEND_CAMPAIGN"),
+  requirePermission("CREATE_CAMPAIGN"),
   async (req: Request, res: Response) => {
     try {
       const ctx = ctxOf(req);

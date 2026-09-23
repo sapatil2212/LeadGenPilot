@@ -163,14 +163,14 @@ export default function SuppressionPanel({ isLight = false }: SuppressionPanelPr
   );
 
   return (
-    <div className="space-y-6">
-      <section className={`p-6 border rounded-2xl ${surface}`}>
+    <div className="space-y-5">
+      <section className={`p-4 sm:p-5 border rounded-xl ${surface}`}>
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <ShieldOff className="h-5 w-5 text-rose-500 mt-0.5" aria-hidden="true" />
+          <div className="flex items-start gap-2.5">
+            <ShieldOff className="h-4 w-4 text-rose-500 mt-0.5" aria-hidden="true" />
             <div>
-              <h2 className={`text-base font-bold tracking-tight ${heading}`}>Do not contact</h2>
-              <p className={`text-xs mt-1 max-w-2xl ${muted}`}>
+              <h2 className={`text-xs font-bold tracking-tight ${heading}`}>Do not contact</h2>
+              <p className={`text-[11px] mt-0.5 max-w-2xl leading-relaxed ${muted}`}>
                 Anyone listed here is excluded when a campaign is generated and checked again before every send.
                 Replies containing STOP or unsubscribe are added automatically. Entries are per channel: an email
                 opt-out does not silence WhatsApp.
@@ -180,7 +180,7 @@ export default function SuppressionPanel({ isLight = false }: SuppressionPanelPr
           <button
             onClick={() => void fetchRecords()}
             disabled={isLoading}
-            className={`shrink-0 flex items-center gap-1.5 text-xs px-3 py-2 border rounded-lg cursor-pointer transition-all disabled:opacity-50 ${
+            className={`shrink-0 flex items-center gap-1.5 text-xs px-2.5 py-1.5 border rounded-lg cursor-pointer transition-all disabled:opacity-50 ${
               isLight ? "border-slate-200 text-slate-600 hover:bg-slate-50" : "border-[#1e293b] text-slate-300 hover:bg-slate-800/40"
             }`}
           >
@@ -191,25 +191,25 @@ export default function SuppressionPanel({ isLight = false }: SuppressionPanelPr
       </section>
 
       {/* Add an entry for a request that arrived by phone or in person. */}
-      <section className={`p-6 border rounded-2xl ${surface}`}>
-        <h3 className={`text-sm font-semibold mb-4 ${heading}`}>Add a contact</h3>
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+      <section className={`p-4 sm:p-5 border rounded-xl ${surface}`}>
+        <h3 className={`text-xs font-bold mb-3 ${heading}`}>Add a contact</h3>
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-end">
           <div className="md:col-span-3">
-            <label htmlFor="suppression-channel" className={`block text-[11px] font-medium mb-1.5 ${muted}`}>
+            <label htmlFor="suppression-channel" className={`block text-[10px] font-bold tracking-wider uppercase mb-1 ${muted}`}>
               Channel
             </label>
             <select
               id="suppression-channel"
               value={newChannel}
               onChange={(event) => setNewChannel(event.target.value as SuppressionChannel)}
-              className={`w-full border rounded-lg px-3 py-2 text-xs cursor-pointer focus:outline-none focus:border-indigo-500 ${input}`}
+              className={`w-full border rounded-lg px-2.5 py-1.5 text-xs cursor-pointer focus:outline-none focus:border-indigo-500 ${input}`}
             >
               <option value="email">Email</option>
               <option value="whatsapp">WhatsApp</option>
             </select>
           </div>
           <div className="md:col-span-4">
-            <label htmlFor="suppression-contact" className={`block text-[11px] font-medium mb-1.5 ${muted}`}>
+            <label htmlFor="suppression-contact" className={`block text-[10px] font-bold tracking-wider uppercase mb-1 ${muted}`}>
               {newChannel === "email" ? "Email address" : "Phone number"}
             </label>
             <input
@@ -221,18 +221,18 @@ export default function SuppressionPanel({ isLight = false }: SuppressionPanelPr
                 if (event.key === "Enter") void addSuppression();
               }}
               placeholder={newChannel === "email" ? "owner@business.example" : "+1 555 010 2030"}
-              className={`w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-indigo-500 ${input}`}
+              className={`w-full border rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-indigo-500 ${input}`}
             />
           </div>
           <div className="md:col-span-3">
-            <label htmlFor="suppression-reason" className={`block text-[11px] font-medium mb-1.5 ${muted}`}>
+            <label htmlFor="suppression-reason" className={`block text-[10px] font-bold tracking-wider uppercase mb-1 ${muted}`}>
               Reason
             </label>
             <select
               id="suppression-reason"
               value={newReason}
               onChange={(event) => setNewReason(event.target.value)}
-              className={`w-full border rounded-lg px-3 py-2 text-xs cursor-pointer focus:outline-none focus:border-indigo-500 ${input}`}
+              className={`w-full border rounded-lg px-2.5 py-1.5 text-xs cursor-pointer focus:outline-none focus:border-indigo-500 ${input}`}
             >
               {REASONS.map((reason) => (
                 <option key={reason.value} value={reason.value}>
@@ -245,14 +245,14 @@ export default function SuppressionPanel({ isLight = false }: SuppressionPanelPr
             <button
               onClick={() => void addSuppression()}
               disabled={isSaving || !newContact.trim()}
-              className="w-full flex items-center justify-center gap-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold px-3 py-2 rounded-lg cursor-pointer transition-all disabled:opacity-50"
+              className="w-full flex items-center justify-center gap-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg cursor-pointer transition-all disabled:opacity-50"
             >
               {isSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <Plus className="h-3.5 w-3.5" aria-hidden="true" />}
               Add
             </button>
           </div>
           <div className="md:col-span-12">
-            <label htmlFor="suppression-notes" className={`block text-[11px] font-medium mb-1.5 ${muted}`}>
+            <label htmlFor="suppression-notes" className={`block text-[10px] font-bold tracking-wider uppercase mb-1 ${muted}`}>
               Note (optional)
             </label>
             <input
@@ -261,26 +261,26 @@ export default function SuppressionPanel({ isLight = false }: SuppressionPanelPr
               value={newNotes}
               onChange={(event) => setNewNotes(event.target.value)}
               placeholder="Where the request came from, so the record is defensible later"
-              className={`w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-indigo-500 ${input}`}
+              className={`w-full border rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-indigo-500 ${input}`}
             />
           </div>
         </div>
 
         {error && (
-          <p className="mt-3 flex items-center gap-1.5 text-xs text-rose-500" role="alert">
+          <p className="mt-2.5 flex items-center gap-1.5 text-xs text-rose-500" role="alert">
             <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
             {error}
           </p>
         )}
         {notice && (
-          <p className="mt-3 text-xs text-emerald-500" role="status">
+          <p className="mt-2.5 text-xs text-emerald-500" role="status">
             {notice}
           </p>
         )}
       </section>
 
       {/* The list itself. */}
-      <section className={`border rounded-2xl overflow-hidden ${surface}`}>
+      <section className={`border rounded-xl overflow-hidden ${surface}`}>
         <div className={`p-4 flex flex-col md:flex-row md:items-center gap-3 border-b ${isLight ? "border-slate-200" : "border-[#1e293b]"}`}>
           <div className="relative flex-grow">
             <Search className={`absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 ${muted}`} aria-hidden="true" />

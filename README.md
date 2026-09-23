@@ -1,6 +1,6 @@
-# NexaLeadAi - Maps Lead Automation Agent
+# LeadGenPilot - Maps Lead Automation Agent
 
-**NexaLeadAi** is a complete, powerful, and modular AI scraping automation bot that scans **Google Maps** to identify high-quality local business leads which **do not have a website**. It calculates a customized **Lead Score** out of 100, deduplicates entries, and pipes qualified leads directly to your **Google Sheet** in real-time via a clean, secure **Google Apps Script Webhook**.
+**LeadGenPilot** is a complete, powerful, and modular AI scraping automation bot that scans **Google Maps** to identify high-quality local business leads which **do not have a website**. It calculates a customized **Lead Score** out of 100, deduplicates entries, and pipes qualified leads directly to your **Google Sheet** in real-time via a clean, secure **Google Apps Script Webhook**.
 
 ---
 

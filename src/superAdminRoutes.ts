@@ -132,6 +132,7 @@ router.post("/login", superadminLimiter, async (req: Request, res: Response) => 
  */
 router.post("/logout", (_req: Request, res: Response) => {
   res.clearCookie(env.auth.cookieName, { ...sessionCookieOptions(), maxAge: undefined });
+  res.clearCookie("nexaleadai_session", { ...sessionCookieOptions(), maxAge: undefined });
   res.json({ success: true });
 });
 
@@ -140,7 +141,7 @@ router.post("/logout", (_req: Request, res: Response) => {
  * Returns session info if the current session is a valid admin.
  */
 router.get("/verify", (req: Request, res: Response) => {
-  const token = req.cookies?.[env.auth.cookieName];
+  const token = req.cookies?.[env.auth.cookieName] || req.cookies?.["nexaleadai_session"];
   if (!token) return res.status(401).json({ error: "Not authenticated.", code: "no_session" });
 
   const payload = verifySessionToken(token);

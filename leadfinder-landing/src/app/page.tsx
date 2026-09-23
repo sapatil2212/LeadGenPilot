@@ -1,7 +1,9 @@
 import Navbar from "@/components/Navbar";
 import Hero from "@/components/Hero";
-import Features from "@/components/Features";
 import HowItWorks from "@/components/HowItWorks";
+import Features from "@/components/Features";
+import OutreachShowcase from "@/components/OutreachShowcase";
+import WhatsAppShowcase from "@/components/WhatsAppShowcase";
 import Scoring from "@/components/Scoring";
 import Testimonials from "@/components/Testimonials";
 import Pricing from "@/components/Pricing";
@@ -14,8 +16,10 @@ export default function LandingPage() {
     <main>
       <Navbar />
       <Hero />
-      <Features />
       <HowItWorks />
+      <Features />
+      <OutreachShowcase />
+      <WhatsAppShowcase />
       <Scoring />
       <Testimonials />
       <Pricing />

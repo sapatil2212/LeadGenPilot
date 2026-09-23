@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NexaLeadAi — Automated Google Maps Lead Generation</title>
-  <meta name="description" content="NexaLeadAi automatically scrapes Google Maps to find high-quality local business leads without websites, scores them with AI, and delivers them straight to your Google Sheet in real-time." />
+  <title>LeadGenPilot — Automated Google Maps Lead Generation</title>
+  <meta name="description" content="LeadGenPilot automatically scrapes Google Maps to find high-quality local business leads without websites, scores them with AI, and delivers them straight to your Google Sheet in real-time." />
   <meta name="keywords" content="lead generation, Google Maps scraper, AI leads, local business leads, sales automation, CRM" />
-  <meta property="og:title" content="NexaLeadAi — Automated Lead Generation" />
+  <meta property="og:title" content="LeadGenPilot — Automated Lead Generation" />
   <meta property="og:description" content="Find, score, and reach local business leads automatically with AI-powered Google Maps scraping." />
   <link rel="icon" href="data:," />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -511,7 +511,7 @@
       background: var(--gray-900); color: var(--gray-300);
       padding: 72px 0 36px;
     }
-    .footer-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 48px; margin-bottom: 56px; }
+    .footer-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1.4fr; gap: 36px; margin-bottom: 56px; }
     .footer-brand { }
     .footer-logo { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 1.125rem; color: white; letter-spacing: -.03em; margin-bottom: 14px; }
     .footer-logo-mark { width: 36px; height: 36px; background: linear-gradient(135deg, var(--indigo-500), var(--violet-500)); border-radius: 10px; display: flex; align-items: center; justify-content: center; }
@@ -530,6 +530,12 @@
     .footer-links { list-style: none; display: flex; flex-direction: column; gap: 8px; }
     .footer-links li a { font-size: .875rem; color: var(--gray-400); transition: color var(--transition); }
     .footer-links li a:hover { color: var(--indigo-400); }
+    .footer-contact-list { list-style: none; display: flex; flex-direction: column; gap: 12px; }
+    .contact-label { display: block; font-size: 0.6875rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray-500); margin-bottom: 2px; }
+    .contact-item { font-size: 0.8125rem; color: var(--gray-300); display: flex; align-items: flex-start; gap: 8px; line-height: 1.5; }
+    .contact-item a { color: var(--gray-300); text-decoration: none; transition: color var(--transition); word-break: break-all; }
+    .contact-item a:hover { color: var(--indigo-400); }
+    .contact-item svg { width: 14px; height: 14px; color: var(--indigo-400); flex-shrink: 0; margin-top: 3px; }
     .footer-bottom {
       border-top: 1px solid var(--gray-800); padding-top: 28px;
       display: flex; justify-content: space-between; align-items: center; flex-wrap: gap-16px;
@@ -605,11 +611,11 @@
 <nav id="navbar">
   <div class="nav-inner">
     <!-- Logo -->
-    <a href="#" class="nav-logo" aria-label="NexaLeadAi Home">
+    <a href="#" class="nav-logo" aria-label="LeadGenPilot Home">
       <div class="nav-logo-mark">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3M11 8v6M8 11h6"/></svg>
       </div>
-      Nexa<span style="color:var(--indigo-500);">LeadAi</span>
+      LeadGen<span style="color:var(--indigo-500);">Pilot</span>
     </a>
 
     <!-- Desktop Nav Links -->
@@ -673,7 +679,7 @@
           with AI
         </h1>
         <p class="hero-desc animate-fade-up delay-200">
-          NexaLeadAi scans Google Maps to surface high-intent local businesses without a web presence — scores them with AI, and delivers qualified leads straight to your Google Sheet in real-time.
+          LeadGenPilot scans Google Maps to surface high-intent local businesses without a web presence — scores them with AI, and delivers qualified leads straight to your Google Sheet in real-time.
         </p>
         <div class="hero-ctas animate-fade-up delay-300">
           <a href="#cta-banner" class="btn btn-primary btn-lg" id="hero-cta-primary">
@@ -706,7 +712,7 @@
               <div class="tl tl-y"></div>
               <div class="tl tl-g"></div>
             </div>
-            <span class="hero-card-title">NexaLeadAi — LIVE RESULTS</span>
+            <span class="hero-card-title">LeadGenPilot — LIVE RESULTS</span>
           </div>
           <div class="hero-card-body">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
@@ -1014,7 +1020,7 @@
     <div class="section-header reveal">
       <span class="badge">Customer Stories</span>
       <h2>Loved by Sales Teams &amp; Agencies</h2>
-      <p>Real results from real users who've transformed their lead generation with NexaLeadAi.</p>
+      <p>Real results from real users who've transformed their lead generation with LeadGenPilot.</p>
     </div>
     <div class="testimonials-grid">
 
@@ -1227,11 +1233,11 @@
 
       <div class="faq-item">
         <button class="faq-question" aria-expanded="false" id="faq-q1">
-          Does NexaLeadAi work for any business type or location?
+          Does LeadGenPilot work for any business type or location?
           <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         </button>
         <div class="faq-answer" id="faq-a1">
-          Yes! NexaLeadAi works with any business type that appears on Google Maps — dental clinics, gyms, restaurants, salons, law firms, and more. You can target any city or region worldwide.
+          Yes! LeadGenPilot works with any business type that appears on Google Maps — dental clinics, gyms, restaurants, salons, law firms, and more. You can target any city or region worldwide.
         </div>
       </div>
 
@@ -1277,11 +1283,11 @@
 
       <div class="faq-item">
         <button class="faq-question" aria-expanded="false" id="faq-q6">
-          Can I run NexaLeadAi on a server or cloud?
+          Can I run LeadGenPilot on a server or cloud?
           <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         </button>
         <div class="faq-answer" id="faq-a6">
-          Absolutely. NexaLeadAi ships with a Dockerfile and Render deployment config. It automatically falls back to High-Fidelity Simulation Mode in sandboxed environments where Playwright can't launch a real browser.
+          Absolutely. LeadGenPilot ships with a Dockerfile and Render deployment config. It automatically falls back to High-Fidelity Simulation Mode in sandboxed environments where Playwright can't launch a real browser.
         </div>
       </div>
 
@@ -1294,7 +1300,7 @@
   <div class="container">
     <div class="cta-banner-inner reveal">
       <h2>Start Finding Leads Today</h2>
-      <p>Join 500+ sales teams and agencies using NexaLeadAi to land more clients — on autopilot.</p>
+      <p>Join 500+ sales teams and agencies using LeadGenPilot to land more clients — on autopilot.</p>
       <div class="cta-btns">
         <a href="/app" class="btn btn-secondary btn-lg" id="cta-demo">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
@@ -1320,48 +1326,34 @@
           <div class="footer-logo-mark">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3M11 8v6M8 11h6"/></svg>
           </div>
-          Nexa<span style="color:var(--indigo-400);">LeadAi</span>
+          LeadGen<span style="color:var(--indigo-400);">Pilot</span>
         </div>
         <p class="footer-desc">AI-powered Google Maps scraping and lead automation. Find, score, and reach local businesses — automatically.</p>
-        <div class="footer-socials">
-          <!-- GitHub -->
-          <a href="https://github.com/sapatil2212/Lead-Finder-Automation" class="social-btn" aria-label="GitHub" target="_blank" rel="noopener">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
-          </a>
-          <!-- Twitter/X -->
-          <a href="#" class="social-btn" aria-label="Twitter">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 4s-.7 2.1-2 3.4c1.6 10-9.4 17.3-18 11.6 2.2.1 4.4-.6 6-2C3 15.5.5 9.6 3 5c2.2 2.6 5.6 4.1 9 4-.9-4.2 4-6.6 7-3.8 1.1 0 3-1.2 3-1.2z"/></svg>
-          </a>
-          <!-- LinkedIn -->
-          <a href="#" class="social-btn" aria-label="LinkedIn">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z"/><rect x="2" y="9" width="4" height="12"/><circle cx="4" cy="4" r="2"/></svg>
-          </a>
-        </div>
       </div>
 
-      <!-- Product -->
+      <!-- Features -->
       <div class="footer-col">
-        <h4>Product</h4>
+        <h4>Features</h4>
         <ul class="footer-links">
-          <li><a href="#features">Features</a></li>
-          <li><a href="#how-it-works">How It Works</a></li>
-          <li><a href="#scoring">Lead Scoring</a></li>
-          <li><a href="#pricing">Pricing</a></li>
-          <li><a href="#">Changelog</a></li>
-          <li><a href="#">Roadmap</a></li>
+          <li><a href="#features">Google Maps Scraper</a></li>
+          <li><a href="#features">AI Opportunity Analysis</a></li>
+          <li><a href="#scoring">Smart 0–100 Lead Scoring</a></li>
+          <li><a href="#features">Real-Time Google Sheets Sync</a></li>
+          <li><a href="#outreach">Email & WhatsApp Outreach</a></li>
+          <li><a href="#features">Deduplication & CRM</a></li>
         </ul>
       </div>
 
-      <!-- Resources -->
+      <!-- Navigation -->
       <div class="footer-col">
-        <h4>Resources</h4>
+        <h4>Navigation</h4>
         <ul class="footer-links">
-          <li><a href="#">Documentation</a></li>
-          <li><a href="#">API Reference</a></li>
-          <li><a href="#">GitHub</a></li>
-          <li><a href="#">Deployment Guide</a></li>
+          <li><a href="#how-it-works">How It Works</a></li>
+          <li><a href="#scoring">Scoring Methodology</a></li>
+          <li><a href="#outreach">Outreach Engine</a></li>
+          <li><a href="#pricing">Pricing & Plans</a></li>
           <li><a href="#faq">FAQ</a></li>
-          <li><a href="#">Blog</a></li>
+          <li><a href="/app">Launch Dashboard</a></li>
         </ul>
       </div>
 
@@ -1370,17 +1362,44 @@
         <h4>Company</h4>
         <ul class="footer-links">
           <li><a href="#">About</a></li>
-          <li><a href="#">Contact</a></li>
           <li><a href="#">Privacy Policy</a></li>
           <li><a href="#">Terms of Service</a></li>
           <li><a href="#">Cookie Policy</a></li>
+        </ul>
+      </div>
+
+      <!-- Contact Us -->
+      <div class="footer-col">
+        <h4>Contact Us</h4>
+        <ul class="footer-contact-list">
+          <li>
+            <span class="contact-label">Email</span>
+            <div class="contact-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+              <a href="mailto:bookmytime1355@gmail.com">bookmytime1355@gmail.com</a>
+            </div>
+          </li>
+          <li>
+            <span class="contact-label">Phone</span>
+            <div class="contact-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+              <a href="tel:+919168081355">+91 9168 08 1355</a>
+            </div>
+          </li>
+          <li>
+            <span class="contact-label">Address</span>
+            <div class="contact-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></svg>
+              <span>Pune, Maharashtra, India</span>
+            </div>
+          </li>
         </ul>
       </div>
     </div>
 
     <!-- Footer Bottom -->
     <div class="footer-bottom">
-      <p class="footer-copyright">© 2025 NexaLeadAi. All rights reserved. Built with ❤️ for sales teams.</p>
+      <p class="footer-copyright">Copyright © 2026 BookMyTime All rights reserved. | A product of Brightwave Digital Products LLP.</p>
       <div class="footer-bottom-links">
         <a href="#">Privacy</a>
         <a href="#">Terms</a>

@@ -74,6 +74,14 @@ function handleError(res: Response, err: unknown) {
   return res.status(500).json({ error: "Something went wrong. Please try again.", code: "internal" });
 }
 
+function getSessionToken(req: Request): string | undefined {
+  return req.cookies?.[env.auth.cookieName] || req.cookies?.["nexaleadai_session"];
+}
+
+function getTenantCookie(req: Request): string {
+  return String(req.cookies?.[env.auth.tenantCookieName] || req.cookies?.["nexaleadai_tenant"] || "").trim();
+}
+
 router.use(requireDatabase);
 
 // ── Sign up ──
@@ -166,7 +174,7 @@ router.post("/reset-password", authLimiter, async (req: Request, res: Response) 
 // ── Current session and workspace context ──
 router.get("/me", async (req: Request, res: Response) => {
   try {
-    const token = req.cookies?.[env.auth.cookieName];
+    const token = getSessionToken(req);
     if (!token) return res.status(401).json({ error: "Not authenticated.", code: "no_session" });
     const payload = verifySessionToken(token);
     if (!payload) return res.status(401).json({ error: "Session expired.", code: "invalid_session" });
@@ -190,7 +198,7 @@ router.get("/me", async (req: Request, res: Response) => {
       });
     }
 
-    const requestedTenantId = String(req.cookies?.[env.auth.tenantCookieName] || "").trim();
+    const requestedTenantId = getTenantCookie(req);
     const activeWorkspace =
       workspaces.find((workspace) => workspace.id === requestedTenantId) ||
       (workspaces.length === 1 ? workspaces[0] : null);
@@ -230,7 +238,7 @@ router.get("/me", async (req: Request, res: Response) => {
 // ── Select an active workspace ──
 router.post("/select-workspace", authLimiter, async (req: Request, res: Response) => {
   try {
-    const token = req.cookies?.[env.auth.cookieName];
+    const token = getSessionToken(req);
     const payload = token ? verifySessionToken(token) : null;
     if (!payload) return res.status(401).json({ error: "Authentication required.", code: "no_session" });
 
@@ -256,7 +264,9 @@ router.post("/select-workspace", authLimiter, async (req: Request, res: Response
 router.post("/logout", (req: Request, res: Response) => {
   const clearOptions = { ...sessionCookieOptions(), maxAge: undefined };
   res.clearCookie(env.auth.cookieName, clearOptions);
+  res.clearCookie("nexaleadai_session", clearOptions);
   res.clearCookie(env.auth.tenantCookieName, clearOptions);
+  res.clearCookie("nexaleadai_tenant", clearOptions);
   res.json({ success: true });
 });
 
@@ -265,7 +275,7 @@ router.post("/logout", (req: Request, res: Response) => {
 // Send phone verification OTP
 router.post("/phone/send-otp", otpLimiter, async (req: Request, res: Response) => {
   try {
-    const token = req.cookies?.[env.auth.cookieName];
+    const token = getSessionToken(req);
     if (!token) return res.status(401).json({ error: "Authentication required.", code: "no_session" });
 
     const payload = verifySessionToken(token);
@@ -286,7 +296,7 @@ router.post("/phone/send-otp", otpLimiter, async (req: Request, res: Response) =
 // Verify phone OTP
 router.post("/phone/verify-otp", otpLimiter, async (req: Request, res: Response) => {
   try {
-    const token = req.cookies?.[env.auth.cookieName];
+    const token = getSessionToken(req);
     if (!token) return res.status(401).json({ error: "Authentication required.", code: "no_session" });
 
     const payload = verifySessionToken(token);
@@ -307,7 +317,7 @@ router.post("/phone/verify-otp", otpLimiter, async (req: Request, res: Response)
 // Resend phone OTP
 router.post("/phone/resend-otp", otpLimiter, async (req: Request, res: Response) => {
   try {
-    const token = req.cookies?.[env.auth.cookieName];
+    const token = getSessionToken(req);
     if (!token) return res.status(401).json({ error: "Authentication required.", code: "no_session" });
 
     const payload = verifySessionToken(token);
@@ -327,7 +337,7 @@ export default router;
  * Use to protect any route that must only be reachable by signed-in users.
  */
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
-  const token = req.cookies?.[env.auth.cookieName];
+  const token = getSessionToken(req);
   if (!token) return res.status(401).json({ error: "Authentication required.", code: "no_session" });
   const payload = verifySessionToken(token);
   if (!payload) return res.status(401).json({ error: "Session expired.", code: "invalid_session" });
@@ -353,7 +363,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
  * JWT_SECRET is now a fatal boot error in production (see validateEnv).
  */
 export async function requireAdmin(req: Request, res: Response, next: NextFunction) {
-  const token = req.cookies?.[env.auth.cookieName];
+  const token = getSessionToken(req);
   if (!token) return res.status(401).json({ error: "Authentication required.", code: "no_session" });
   const payload = verifySessionToken(token);
   if (!payload) return res.status(401).json({ error: "Session expired.", code: "invalid_session" });

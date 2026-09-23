@@ -65,76 +65,75 @@ const marqueeList = [...testimonials, ...testimonials];
 
 export default function Testimonials() {
   return (
-    <section id="testimonials" className="py-24 bg-gradient-to-b from-white to-slate-50 relative overflow-hidden">
-      <div className="max-w-7xl mx-auto px-6 mb-12">
+    <section id="testimonials" className="py-24 bg-gradient-to-b from-white to-slate-50 border-b border-slate-100 relative overflow-hidden">
+      <div className="max-w-6xl mx-auto px-6 mb-12">
         {/* Header */}
         <motion.div
-          initial={{ opacity: 0, y: 20 }}
+          initial={{ opacity: 0, y: 16 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
           className="text-center max-w-2xl mx-auto"
         >
-          <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest bg-amber-50 text-amber-600 border border-amber-200/60 mb-4 shadow-sm">
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200/80 mb-3">
             <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" /> Customer Stories
           </span>
-          <h2 className="text-4xl lg:text-5xl font-extrabold text-slate-900 tracking-tight mb-4">
-            Loved by Sales Teams<br />
-            <span className="gradient-text">&amp; Agencies</span>
+          <h2 className="text-3xl sm:text-4xl font-semibold text-slate-900 tracking-tight mb-3">
+            Proven Results for <span className="gradient-text">Agencies & Founders</span>
           </h2>
-          <p className="text-slate-500 text-lg">
-            Real results from real users who transformed lead generation with NexaLeadAi.
+          <p className="text-sm sm:text-base text-slate-500 leading-relaxed max-w-lg mx-auto">
+            See how forward-thinking sales professionals streamline client acquisition with LeadGenPilot.
           </p>
         </motion.div>
       </div>
 
       {/* Infinite Marquee Container */}
-      <div className="relative w-full overflow-hidden py-4">
+      <div className="relative w-full overflow-hidden py-3">
         {/* Left & Right Gradient Fade Overlays */}
-        <div className="absolute top-0 bottom-0 left-0 w-24 sm:w-40 bg-gradient-to-r from-white via-white/80 to-transparent z-10 pointer-events-none" />
-        <div className="absolute top-0 bottom-0 right-0 w-24 sm:w-40 bg-gradient-to-l from-white via-white/80 to-transparent z-10 pointer-events-none" />
+        <div className="absolute top-0 bottom-0 left-0 w-20 sm:w-36 bg-gradient-to-r from-white via-white/80 to-transparent z-10 pointer-events-none" />
+        <div className="absolute top-0 bottom-0 right-0 w-20 sm:w-36 bg-gradient-to-l from-white via-white/80 to-transparent z-10 pointer-events-none" />
 
         {/* Marquee Track */}
-        <div className="animate-marquee gap-6 px-4">
+        <div className="animate-marquee gap-5 px-4">
           {marqueeList.map((t, i) => (
             <div
               key={i}
-              className="w-[320px] sm:w-[380px] flex-shrink-0 relative bg-white rounded-3xl border border-slate-200 p-7 hover:border-indigo-200 hover:shadow-xl hover:shadow-indigo-500/10 transition-all duration-300 group flex flex-col justify-between"
+              className="w-[300px] sm:w-[350px] flex-shrink-0 relative bg-white rounded-2xl border border-slate-200/90 p-6 hover:border-indigo-300 hover:shadow-lg hover:shadow-indigo-500/5 transition-all duration-300 group flex flex-col justify-between min-h-[260px]"
             >
               <div>
                 {/* Quote icon background */}
-                <div className="absolute top-6 right-6 opacity-10 group-hover:opacity-20 transition-opacity">
-                  <Quote className="w-10 h-10 text-indigo-500" />
+                <div className="absolute top-5 right-5 opacity-10 group-hover:opacity-20 transition-opacity">
+                  <Quote className="w-8 h-8 text-indigo-500" />
                 </div>
 
                 {/* Stars */}
-                <div className="flex gap-1 mb-4">
+                <div className="flex gap-1 mb-3">
                   {[...Array(t.stars)].map((_, j) => (
-                    <Star key={j} className="w-4 h-4 fill-amber-400 text-amber-400" />
+                    <Star key={j} className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
                   ))}
                 </div>
 
                 {/* Quote */}
-                <p className="text-slate-600 text-sm leading-relaxed mb-6 italic">
+                <p className="text-slate-600 text-xs sm:text-sm leading-relaxed mb-4 italic font-normal">
                   "{t.quote}"
                 </p>
               </div>
 
               <div>
                 {/* Metric pill */}
-                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 text-xs font-bold border border-indigo-100 mb-5">
-                  📈 {t.metric}
+                <div className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-[11px] font-semibold border border-indigo-100 mb-4">
+                  <span>📈</span> {t.metric}
                 </div>
 
                 {/* Author */}
-                <div className="flex items-center gap-3 pt-4 border-t border-slate-100">
+                <div className="flex items-center gap-3 pt-3 border-t border-slate-100">
                   <div
-                    className={`w-10 h-10 rounded-full bg-gradient-to-br ${t.color} flex items-center justify-center text-white text-xs font-extrabold flex-shrink-0 shadow-sm`}
+                    className={`w-9 h-9 rounded-full bg-gradient-to-br ${t.color} flex items-center justify-center text-white text-xs font-bold flex-shrink-0 shadow-sm`}
                   >
                     {t.initials}
                   </div>
                   <div className="min-w-0">
-                    <p className="text-sm font-bold text-slate-900 truncate">{t.name}</p>
-                    <p className="text-xs text-slate-400 truncate">{t.role}</p>
+                    <p className="text-xs sm:text-sm font-semibold text-slate-900 truncate">{t.name}</p>
+                    <p className="text-[11px] text-slate-400 truncate">{t.role}</p>
                   </div>
                 </div>
               </div>

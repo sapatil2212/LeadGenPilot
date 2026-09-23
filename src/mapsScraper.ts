@@ -218,9 +218,9 @@ async function launchChromium(isHeadless: boolean): Promise<Browser> {
 
     if (/Executable doesn'?t exist|Failed to launch|ENOENT/i.test(message)) {
       throw new Error(
-        "Chromium is not installed for Playwright on this host. Run 'npx playwright install --with-deps chromium' " +
+        "Chromium is not installed for the Playwright runtime used by this server. Run 'npm run setup:browsers' " +
         "as the same user that runs the server (or set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH to an existing Chrome binary). " +
-        `Playwright looks for browsers in ${process.env.PLAYWRIGHT_BROWSERS_PATH || "$HOME/.cache/ms-playwright"}. ` +
+        `Expected executable: ${chromium.executablePath()}. ` +
         `Original error: ${message}`
       );
     }
@@ -507,7 +507,7 @@ async function executeScrape(
     const axios = (await import("axios")).default;
     const geoResponse = await axios.get(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(criteria.location)}&format=json&limit=1`, {
       headers: {
-        "User-Agent": "NexaLeadAi-Agent/1.0"
+        "User-Agent": "LeadGenPilot-Agent/1.0"
       },
       timeout: 5000
     });

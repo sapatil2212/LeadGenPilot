@@ -32,7 +32,7 @@ interface SmsOptions {
  * Formats the SMS message based on purpose
  */
 function formatSmsMessage(code: string, purpose: SmsPurpose): string {
-  const appName = env.auth.appName || "NexaLeadAi";
+  const appName = env.auth.appName || "LeadGenPilot";
   
   switch (purpose) {
     case "phone_verify":

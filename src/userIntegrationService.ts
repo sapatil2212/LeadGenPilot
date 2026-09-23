@@ -261,7 +261,7 @@ export async function testGoogleSheetWebhook(config: GoogleSheetConfig): Promise
     const testData = {
       test: true,
       timestamp: new Date().toISOString(),
-      message: "Test connection from NexaLeadAi",
+      message: "Test connection from LeadGenPilot",
     };
 
     const response = await fetch(config.webhookUrl, {

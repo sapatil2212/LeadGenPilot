@@ -6,6 +6,7 @@
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
+import { captureJobLogLine } from "./tenancy/jobLogStream";
 
 // Ensure environment variables are available before reading log configuration.
 // dotenv.config() is idempotent, so calling it here (the earliest-loaded util)
@@ -61,6 +62,15 @@ try {
 function write(level: string, formatted: string): void {
   const line = redact(formatted);
   const threshold = LEVELS[level] ?? 20;
+
+  // Attribute the line to the job whose run emitted it, so the dashboard can
+  // show a workspace its own progress without exposing the process-wide log.
+  // A no-op outside a run, and never a reason to drop a log line.
+  try {
+    captureJobLogLine(line);
+  } catch {
+    /* capture is best-effort */
+  }
 
   if (threshold >= configuredLevel) {
     if (level === "error") console.error(line);

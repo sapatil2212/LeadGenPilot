@@ -214,7 +214,7 @@ export function apiKeyAuth(): RequestHandler {
       return next();
     }
 
-    const sessionToken = req.cookies?.[env.auth.cookieName];
+    const sessionToken = req.cookies?.[env.auth.cookieName] || req.cookies?.["nexaleadai_session"];
     if (sessionToken && verifySessionToken(sessionToken)) {
       return next();
     }

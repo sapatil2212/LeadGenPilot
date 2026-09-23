@@ -26,20 +26,19 @@ export default function CTABanner() {
         <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }} transition={{ duration: 0.7 }}>
 
-          <h2 className="text-4xl md:text-5xl font-bold text-white tracking-tight mb-5 leading-tight">
+          <h2 className="text-3xl sm:text-4xl font-semibold text-white tracking-tight mb-4 leading-tight">
             Ready to Simplify Your<br />
-            <span className="text-blue-500">Lead Generation Process?</span>
+            <span className="text-sky-400">Lead Generation Process?</span>
           </h2>
 
-          <p className="text-slate-400 text-base md:text-lg mb-8 max-w-xl mx-auto leading-relaxed">
-            Automate prospecting, cut out manual research, and deliver a seamless outreach
-            experience with NexaLeadAi. Let AI handle the leads while you focus on closing deals.
+          <p className="text-slate-400 text-sm sm:text-base mb-8 max-w-lg mx-auto leading-relaxed">
+            Automate prospecting, cut out manual research, and deliver hyper-personalized outreach at scale. Start free with zero commitment.
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
             <a href="/app"
-              className="px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-500 shadow-lg shadow-blue-600/30 transition-colors duration-200">
-              Start your 7-day free trial
+              className="px-6 py-3 rounded-xl text-sm font-semibold text-slate-900 bg-white hover:bg-slate-100 shadow-xl shadow-sky-500/20 transition-all duration-200 hover:-translate-y-0.5">
+              Start Finding Leads Free
             </a>
           </div>
         </motion.div>

@@ -30,7 +30,7 @@ npm run worker                # worker        (dist/worker.cjs), repeat per repl
 
 Local worker iteration: `npm run worker:dev`.
 
-Render already declares both services (`nexaleadai`, `nexaleadai-campaign-worker`).
+Render already declares both services (`leadgenpilot`, `leadgenpilot-campaign-worker`).
 Scale the worker by raising its replica count; no configuration changes are
 needed because replicas coordinate through database leases.
 

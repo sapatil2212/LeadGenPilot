@@ -12,6 +12,7 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   AlertTriangle,
   Check,
@@ -33,18 +34,22 @@ export interface Themed {
 
 export function tokens(isLight: boolean) {
   return {
-    card: isLight ? "bg-white border-slate-200" : "bg-[#0f172a] border-[#1e293b]",
-    inset: isLight ? "bg-slate-50 border-slate-200" : "bg-[#0b1220] border-[#1e293b]",
-    border: isLight ? "border-slate-200" : "border-[#1e293b]",
+    card: isLight
+      ? "bg-white/95 border-slate-200/90 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] backdrop-blur-md"
+      : "bg-[#090d16]/90 border-[#1e293b] shadow-[0_8px_30px_rgb(0,0,0,0.3)] backdrop-blur-md",
+    inset: isLight
+      ? "bg-slate-50/80 border-slate-200/80"
+      : "bg-[#050811] border-[#1e293b]",
+    border: isLight ? "border-slate-200/90" : "border-[#1e293b]",
     heading: isLight ? "text-slate-900" : "text-white",
     body: isLight ? "text-slate-700" : "text-slate-300",
     muted: isLight ? "text-slate-500" : "text-slate-400",
     faint: isLight ? "text-slate-400" : "text-slate-500",
     input: isLight
-      ? "bg-white border-slate-300 text-slate-900 placeholder-slate-400"
-      : "bg-[#0b1220] border-[#1e293b] text-slate-100 placeholder-slate-600",
-    hover: isLight ? "hover:bg-slate-100" : "hover:bg-slate-800/50",
-    chip: isLight ? "bg-slate-100 text-slate-700" : "bg-[#1e293b] text-slate-300",
+      ? "bg-white border-slate-200 text-slate-900 placeholder-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/10"
+      : "bg-[#050811] border-[#1e293b] text-slate-100 placeholder-slate-600 focus:border-indigo-500/60 focus:ring-2 focus:ring-indigo-500/15",
+    hover: isLight ? "hover:bg-slate-100/80" : "hover:bg-slate-800/60",
+    chip: isLight ? "bg-slate-100/90 text-slate-700 border border-slate-200/70" : "bg-[#1e293b]/70 text-slate-300 border border-slate-700/50",
   };
 }
 
@@ -70,25 +75,140 @@ export function Card({
 }) {
   const t = tokens(isLight);
   return (
-    <section className={`border rounded-2xl ${t.card} ${className}`}>
+    <section className={`border rounded-xl ${t.card} relative overflow-hidden transition-all duration-200 hover:border-indigo-500/30 ${className}`}>
       {(title || actions) && (
         <header
-          className={`flex items-start justify-between gap-4 px-5 py-4 border-b ${t.border}`}
+          className={`flex items-center justify-between gap-3 px-4 py-2.5 border-b ${t.border} ${isLight ? "bg-slate-50/50" : "bg-white/[0.02]"}`}
         >
-          <div className="flex items-start gap-2.5 min-w-0">
-            {Icon && <Icon className="h-4 w-4 mt-0.5 text-indigo-500 shrink-0" />}
+          <div className="flex items-center gap-2 min-w-0">
+            {Icon && (
+              <div className={`p-1 rounded-lg shrink-0 ${isLight ? "bg-indigo-50 text-indigo-600" : "bg-indigo-500/10 text-indigo-400"}`}>
+                <Icon className="h-3.5 w-3.5" />
+              </div>
+            )}
             <div className="min-w-0">
               {title && (
-                <h3 className={`text-sm font-semibold tracking-tight ${t.heading}`}>{title}</h3>
+                <h3 className={`text-xs font-bold tracking-tight ${t.heading}`}>{title}</h3>
               )}
-              {subtitle && <p className={`text-xs mt-0.5 ${t.muted}`}>{subtitle}</p>}
+              {subtitle && <p className={`text-[11px] ${t.muted}`}>{subtitle}</p>}
             </div>
           </div>
-          {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
+          {actions && <div className="flex items-center gap-1.5 shrink-0">{actions}</div>}
         </header>
       )}
-      <div className="p-5">{children}</div>
+      <div className="p-4">{children}</div>
     </section>
+  );
+}
+
+export function StatCard({
+  isLight,
+  label,
+  value,
+  unit,
+  description,
+  icon: Icon,
+  iconColor = "indigo",
+  trend,
+  trendDirection = "neutral",
+  onClick,
+  className = "",
+}: Themed & {
+  label: string;
+  value: React.ReactNode;
+  unit?: string;
+  description?: string;
+  icon?: React.ComponentType<{ className?: string }>;
+  iconColor?: "indigo" | "rose" | "amber" | "emerald" | "cyan";
+  trend?: string;
+  trendDirection?: "up" | "down" | "neutral";
+  onClick?: () => void;
+  className?: string;
+}) {
+  const colorMap = {
+    indigo: {
+      wrap: isLight ? "bg-indigo-50 text-indigo-600" : "bg-indigo-500/10 text-indigo-400",
+      glow: "group-hover:bg-indigo-500/10",
+      border: isLight ? "hover:border-indigo-200" : "hover:border-indigo-500/30",
+    },
+    rose: {
+      wrap: isLight ? "bg-rose-50 text-rose-600" : "bg-rose-500/10 text-rose-400",
+      glow: "group-hover:bg-rose-500/10",
+      border: isLight ? "hover:border-rose-200" : "hover:border-rose-500/30",
+    },
+    amber: {
+      wrap: isLight ? "bg-amber-50 text-amber-600" : "bg-amber-500/10 text-amber-400",
+      glow: "group-hover:bg-amber-500/10",
+      border: isLight ? "hover:border-amber-200" : "hover:border-amber-500/30",
+    },
+    emerald: {
+      wrap: isLight ? "bg-emerald-50 text-emerald-600" : "bg-emerald-500/10 text-emerald-400",
+      glow: "group-hover:bg-emerald-500/10",
+      border: isLight ? "hover:border-emerald-200" : "hover:border-emerald-500/30",
+    },
+    cyan: {
+      wrap: isLight ? "bg-cyan-50 text-cyan-600" : "bg-cyan-500/10 text-cyan-400",
+      glow: "group-hover:bg-cyan-500/10",
+      border: isLight ? "hover:border-cyan-200" : "hover:border-cyan-500/30",
+    },
+  }[iconColor];
+
+  return (
+    <div
+      onClick={onClick}
+      className={`rounded-xl p-3.5 border relative group overflow-hidden transition-all duration-200 ${
+        isLight
+          ? "bg-white/95 border-slate-200/90 shadow-[0_2px_10px_-2px_rgba(0,0,0,0.04)]"
+          : "bg-[#090d16]/90 border-[#1e293b] shadow-[0_4px_20px_rgb(0,0,0,0.2)]"
+      } ${colorMap.border} hover:-translate-y-0.5 ${onClick ? "cursor-pointer" : ""} ${className}`}
+    >
+      <div className={`absolute -top-8 -right-8 w-20 h-20 rounded-full blur-xl transition-all pointer-events-none opacity-30 ${colorMap.glow}`} />
+      
+      <div className="flex items-center justify-between">
+        <span className={`text-[10px] font-bold tracking-wider uppercase ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+          {label}
+        </span>
+        {Icon && (
+          <div className={`p-1.5 rounded-lg transition-transform duration-200 group-hover:scale-105 ${colorMap.wrap}`}>
+            <Icon className="h-3.5 w-3.5" />
+          </div>
+        )}
+      </div>
+
+      <div className="mt-2 flex items-baseline gap-1.5">
+        <span className={`text-2xl font-black tracking-tight tabular-nums ${isLight ? "text-slate-900" : "text-white"}`}>
+          {value}
+        </span>
+        {unit && (
+          <span className={`text-[11px] font-semibold ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+            {unit}
+          </span>
+        )}
+      </div>
+
+      {(description || trend) && (
+        <div className="mt-2 flex items-center justify-between text-[11px]">
+          {description && (
+            <span className={`truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+              {description}
+            </span>
+          )}
+          {trend && (
+            <span
+              className={`text-[9.5px] font-bold px-1.5 py-0.2 rounded shrink-0 ml-auto ${
+                trendDirection === "up"
+                  ? isLight ? "bg-emerald-50 text-emerald-700" : "bg-emerald-500/15 text-emerald-400"
+                  : trendDirection === "down"
+                    ? isLight ? "bg-rose-50 text-rose-700" : "bg-rose-500/15 text-rose-400"
+                    : isLight ? "bg-slate-100 text-slate-600" : "bg-slate-800 text-slate-300"
+              }`}
+            >
+              {trend}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -104,29 +224,37 @@ export function SubTabs<T extends string>({
 }) {
   const t = tokens(isLight);
   return (
-    <div className={`flex items-center gap-1 border-b ${t.border} -mx-1 px-1`}>
-      {tabs.map(({ id, label, icon: Icon, count }) => (
-        <button
-          key={id}
-          onClick={() => onChange(id)}
-          className={`relative flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors cursor-pointer ${
-            value === id
-              ? "text-indigo-600"
-              : `${t.muted} hover:${isLight ? "text-slate-800" : "text-slate-200"}`
-          }`}
-        >
-          {Icon && <Icon className="h-3.5 w-3.5" />}
-          {label}
-          {count !== undefined && (
-            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${t.chip}`}>
-              {count}
-            </span>
-          )}
-          {value === id && (
-            <span className="absolute left-2 right-2 -bottom-px h-0.5 rounded-full bg-indigo-600" />
-          )}
-        </button>
-      ))}
+    <div className={`flex items-center gap-1 overflow-x-auto border-b ${t.border} pb-1.5 -mx-1 px-1`}>
+      {tabs.map(({ id, label, icon: Icon, count }) => {
+        const isActive = value === id;
+        return (
+          <button
+            key={id}
+            onClick={() => onChange(id)}
+            className={`btn-interactive relative flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+              isActive
+                ? isLight
+                  ? "bg-indigo-50 text-indigo-600 border border-indigo-200/80 shadow-xs"
+                  : "bg-indigo-600/15 text-indigo-400 border border-indigo-500/25 shadow-xs shadow-indigo-500/10"
+                : isLight
+                  ? "text-slate-600 border border-transparent hover:bg-slate-100 hover:text-slate-900"
+                  : "text-slate-400 border border-transparent hover:bg-slate-800/50 hover:text-white"
+            }`}
+          >
+            {Icon && <Icon className={`h-3 w-3 shrink-0 ${isActive ? "text-indigo-500" : ""}`} />}
+            <span>{label}</span>
+            {count !== undefined && (
+              <span className={`text-[9.5px] px-1.5 py-0.2 rounded-full font-bold tabular-nums ${
+                isActive
+                  ? isLight ? "bg-indigo-100 text-indigo-700" : "bg-indigo-500/30 text-indigo-200"
+                  : t.chip
+              }`}>
+                {count}
+              </span>
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -153,21 +281,21 @@ export function Button({
   }) {
   const t = tokens(isLight);
   const styles: Record<ButtonVariant, string> = {
-    primary: "bg-indigo-600 text-white hover:bg-indigo-500 border-indigo-600",
-    secondary: `${t.card} ${t.body} ${t.hover}`,
+    primary: "bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white shadow-xs shadow-indigo-500/25 border-transparent",
+    secondary: `${t.card} ${t.body} ${t.hover} border ${t.border}`,
     ghost: `border-transparent ${t.muted} ${t.hover}`,
     danger: isLight
-      ? "bg-white border-rose-200 text-rose-600 hover:bg-rose-50"
-      : "bg-transparent border-rose-900/60 text-rose-400 hover:bg-rose-950/30",
+      ? "bg-rose-50 border-rose-200 text-rose-600 hover:bg-rose-100"
+      : "bg-rose-500/10 border-rose-500/25 text-rose-400 hover:bg-rose-500/20",
   };
 
   return (
     <button
       {...rest}
       disabled={rest.disabled || busy}
-      className={`inline-flex items-center justify-center gap-1.5 border rounded-lg px-3 py-1.5 text-xs font-semibold transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${styles[variant]} ${className}`}
+      className={`btn-interactive inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${styles[variant]} ${className}`}
     >
-      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : Icon && <Icon className="h-3.5 w-3.5" />}
+      {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : Icon && <Icon className="h-3 w-3" />}
       {children}
     </button>
   );
@@ -515,22 +643,31 @@ export function EmptyState({
 export function Badge({
   isLight,
   tone = "neutral",
+  dot = false,
   children,
-}: Themed & { tone?: "neutral" | "hot" | "warm" | "cold" | "good" | "bad" | "info"; children: React.ReactNode }) {
+}: Themed & {
+  tone?: "neutral" | "hot" | "warm" | "cold" | "good" | "bad" | "info" | "emerald" | "amber" | "rose";
+  dot?: boolean;
+  children: React.ReactNode;
+}) {
   const t = tokens(isLight);
   const palette: Record<string, string> = {
     neutral: t.chip,
-    info: isLight ? "bg-indigo-100 text-indigo-700" : "bg-indigo-500/15 text-indigo-300",
-    hot: isLight ? "bg-rose-100 text-rose-700" : "bg-rose-500/15 text-rose-300",
-    warm: isLight ? "bg-amber-100 text-amber-700" : "bg-amber-500/15 text-amber-300",
-    cold: isLight ? "bg-slate-100 text-slate-600" : "bg-slate-500/15 text-slate-400",
-    good: isLight ? "bg-emerald-100 text-emerald-700" : "bg-emerald-500/15 text-emerald-300",
-    bad: isLight ? "bg-rose-100 text-rose-700" : "bg-rose-500/15 text-rose-300",
+    info: isLight ? "bg-indigo-50 text-indigo-700 border border-indigo-200/70" : "bg-indigo-500/15 text-indigo-300 border border-indigo-500/25",
+    hot: isLight ? "bg-rose-50 text-rose-700 border border-rose-200/70" : "bg-rose-500/15 text-rose-300 border border-rose-500/25",
+    warm: isLight ? "bg-amber-50 text-amber-700 border border-amber-200/70" : "bg-amber-500/15 text-amber-300 border border-amber-500/25",
+    cold: isLight ? "bg-slate-100 text-slate-600 border border-slate-200/70" : "bg-slate-800/80 text-slate-300 border border-slate-700/50",
+    good: isLight ? "bg-emerald-50 text-emerald-700 border border-emerald-200/70" : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/25",
+    bad: isLight ? "bg-rose-50 text-rose-700 border border-rose-200/70" : "bg-rose-500/15 text-rose-300 border border-rose-500/25",
+    emerald: isLight ? "bg-emerald-50 text-emerald-700 border border-emerald-200/70" : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/25",
+    amber: isLight ? "bg-amber-50 text-amber-700 border border-amber-200/70" : "bg-amber-500/15 text-amber-300 border border-amber-500/25",
+    rose: isLight ? "bg-rose-50 text-rose-700 border border-rose-200/70" : "bg-rose-500/15 text-rose-300 border border-rose-500/25",
   };
   return (
     <span
-      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide ${palette[tone]}`}
+      className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold tracking-wide ${palette[tone]}`}
     >
+      {dot && <span className="h-1.5 w-1.5 rounded-full bg-current" />}
       {children}
     </span>
   );
@@ -740,3 +877,32 @@ export function formatAgo(iso: string | null | undefined): string {
   if (days < 30) return `${days}d ago`;
   return new Date(iso).toLocaleDateString();
 }
+
+let activeModalCount = 0;
+
+/**
+ * Portals any modal or dialog overlay directly into document.body
+ * so that it cleanly covers the entire viewport (including fixed sidebars and headers)
+ * without being trapped by parent stacking contexts or overflow constraints.
+ */
+export function ModalPortal({ children }: { children: React.ReactNode }) {
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+    activeModalCount++;
+    if (activeModalCount === 1) {
+      document.body.style.overflow = "hidden";
+    }
+    return () => {
+      activeModalCount = Math.max(0, activeModalCount - 1);
+      if (activeModalCount === 0) {
+        document.body.style.overflow = "";
+      }
+    };
+  }, []);
+
+  if (!mounted || typeof document === "undefined") return null;
+  return createPortal(children, document.body);
+}
+

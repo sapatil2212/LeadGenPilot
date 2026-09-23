@@ -16,16 +16,19 @@
  * become factual claims in messages sent under the customer's own name.
  */
 
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import {
   Boxes,
   Briefcase,
   Building2,
   Check,
+  FileText,
+  Library,
   Pencil,
   Plus,
   Sparkles,
   Trash2,
+  Upload,
   Wand2,
   X,
 } from "lucide-react";
@@ -51,16 +54,21 @@ import {
   TextArea,
   TextInput,
   formatAgo,
+  formatBytes,
   tokens,
   useAction,
   useAsync,
   type Themed,
 } from "../ui/primitives";
 
-type Tab = "profile" | "products" | "services" | "learn";
+type Tab = "learn" | "profile" | "products" | "services" | "knowledge";
 
-export default function BusinessPanel({ isLight }: Themed) {
-  const [tab, setTab] = useState<Tab>("profile");
+const KnowledgePanel = React.lazy(() => import("./KnowledgePanel"));
+
+type BusinessPanelProps = Themed & { initialTab?: "learn" | "knowledge" };
+
+export default function BusinessPanel({ isLight, initialTab = "learn" }: BusinessPanelProps) {
+  const [tab, setTab] = useState<Tab>(initialTab);
   const products = useAsync<ProductView[]>(() => api.get("/api/business/products"));
   const services = useAsync<ServiceView[]>(() => api.get("/api/business/services"));
 
@@ -71,16 +79,14 @@ export default function BusinessPanel({ isLight }: Themed) {
         value={tab}
         onChange={setTab}
         tabs={[
+          { id: "learn", label: "Upload & teach AI", icon: Wand2 },
           { id: "profile", label: "Company profile", icon: Building2 },
           { id: "products", label: "Products", icon: Boxes, count: products.data?.length },
           { id: "services", label: "Services", icon: Briefcase, count: services.data?.length },
-          { id: "learn", label: "Teach the AI", icon: Wand2 },
+          { id: "knowledge", label: "Knowledge library", icon: Library },
         ]}
       />
 
-      {tab === "profile" && <ProfileTab isLight={isLight} />}
-      {tab === "products" && <ProductsTab isLight={isLight} state={products} />}
-      {tab === "services" && <ServicesTab isLight={isLight} state={services} />}
       {tab === "learn" && (
         <LearnTab
           isLight={isLight}
@@ -89,6 +95,14 @@ export default function BusinessPanel({ isLight }: Themed) {
             services.reload();
           }}
         />
+      )}
+      {tab === "profile" && <ProfileTab isLight={isLight} />}
+      {tab === "products" && <ProductsTab isLight={isLight} state={products} />}
+      {tab === "services" && <ServicesTab isLight={isLight} state={services} />}
+      {tab === "knowledge" && (
+        <React.Suspense fallback={<Spinner isLight={isLight} label="Loading knowledge library…" />}>
+          <KnowledgePanel isLight={isLight} />
+        </React.Suspense>
       )}
     </div>
   );
@@ -674,60 +688,209 @@ function CatalogueTab({
 // AI extraction
 // ─────────────────────────────────────────────────────────────────────────────
 
+interface ExtractedFields {
+  businessName: string | null;
+  industry: string | null;
+  businessType: string | null;
+  description: string | null;
+  products: { name: string; category: string | null; description: string | null }[];
+  services: { name: string; description: string | null }[];
+  targetCustomerTypes: string[];
+  targetIndustries: string[];
+  locationsServed: string[];
+  uniqueSellingPoints: string[];
+  certifications: string[];
+  decisionMakerRoles: string[];
+  brandVoice: string | null;
+  missingInformation: string[];
+  confidence: number;
+}
+
 interface ExtractionResult {
-  extracted: {
-    businessName: string | null;
-    industry: string | null;
-    businessType: string | null;
-    description: string | null;
-    products: { name: string; category: string | null; description: string | null }[];
-    services: { name: string; description: string | null }[];
-    targetCustomerTypes: string[];
-    targetIndustries: string[];
-    locationsServed: string[];
-    uniqueSellingPoints: string[];
-    certifications: string[];
-    decisionMakerRoles: string[];
-    brandVoice: string | null;
-    missingInformation: string[];
-    confidence: number;
-  };
+  /** Null only when a file was read but held no usable text. */
+  extracted: ExtractedFields | null;
   applied: boolean;
   createdProducts: number;
   createdServices: number;
+  /** Present on the file path: where the text came from and how it was read. */
+  fileName?: string;
+  kind?: "document" | "spreadsheet" | "image";
+  charCount?: number;
+  sourceText?: string;
+  warning?: string;
 }
+
+/** Human label for how a file was read, shown next to the result. */
+const KIND_LABEL: Record<string, string> = {
+  document: "Read as a document",
+  spreadsheet: "Read as a spreadsheet",
+  image: "Read with AI vision",
+};
+
+/** 20 MB, mirroring the server's upload cap. */
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
 function LearnTab({ isLight, onApplied }: Themed & { onApplied: () => void }) {
   const t = tokens(isLight);
   const [text, setText] = useState("");
-  const extract = useAction();
-  const apply = useAction();
+  const [dragging, setDragging] = useState(false);
+  const [sizeError, setSizeError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const extract = useAction(); // read pasted text
+  const readFile = useAction(); // read an uploaded file
+  const apply = useAction(); // write the reviewed result to the profile
   const [result, setResult] = useState<ExtractionResult | null>(null);
+  const [source, setSource] = useState<string | null>(null);
 
   const tooShort = text.trim().length < 40;
 
-  const run = async (shouldApply: boolean) => {
-    const runner = shouldApply ? apply : extract;
-    const outcome = await runner.run<ExtractionResult>(
-      () => api.post("/api/business/extract", { text, apply: shouldApply }),
-      shouldApply ? "Applied to your profile." : undefined
+  const readText = async () => {
+    const outcome = await extract.run<ExtractionResult>(() =>
+      api.post("/api/business/extract", { text, apply: false })
     );
     if (outcome) {
       setResult(outcome);
-      if (outcome.applied) onApplied();
+      setSource("pasted text");
     }
   };
+
+  const submitFile = async (file: File) => {
+    setSizeError(null);
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setSizeError(`"${file.name}" is ${formatBytes(file.size)}. Files must be ${formatBytes(MAX_UPLOAD_BYTES)} or smaller.`);
+      return;
+    }
+    const form = new FormData();
+    form.append("file", file);
+    form.append("apply", "false");
+    const outcome = await readFile.run<ExtractionResult>(() =>
+      api.upload<ExtractionResult>("/api/business/extract-file", form)
+    );
+    if (outcome) {
+      setResult(outcome);
+      setSource(outcome.fileName ?? file.name);
+    }
+  };
+
+  const applyNow = async () => {
+    const reviewed = result?.extracted;
+    if (!reviewed) return;
+    const outcome = await apply.run<ExtractionResult>(
+      () => api.post("/api/business/apply-extraction", { extracted: reviewed }),
+      "Applied to your profile."
+    );
+    if (outcome) {
+      // Keep the reviewed reading on screen; only fold in the write outcome.
+      setResult((prev) =>
+        prev
+          ? {
+              ...prev,
+              applied: true,
+              createdProducts: outcome.createdProducts,
+              createdServices: outcome.createdServices,
+            }
+          : outcome
+      );
+      onApplied();
+    }
+  };
+
+  const onPick = (files: FileList | null) => {
+    const file = files?.[0];
+    if (file) submitFile(file);
+  };
+
+  const extracted = result?.extracted ?? null;
 
   return (
     <div className="space-y-5">
       <Card
         isLight={isLight}
-        title="Teach the AI about your business"
-        subtitle="Paste anything descriptive — an about page, a brochure, a pitch. The model turns it into structured fields."
+        title="Upload a file and let the AI read it"
+        subtitle="Drop in a brochure, company profile, price list, deck or even a photo. The AI pulls out your company details, products and services so you don't type them in."
+        icon={Upload}
+      >
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragging(false);
+            onPick(e.dataTransfer.files);
+          }}
+          onClick={() => fileInputRef.current?.click()}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") fileInputRef.current?.click();
+          }}
+          className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors ${
+            dragging
+              ? isLight
+                ? "border-indigo-400 bg-indigo-50"
+                : "border-indigo-400 bg-indigo-500/10"
+              : isLight
+                ? "border-slate-300 hover:border-slate-400 bg-slate-50"
+                : "border-white/15 hover:border-white/25 bg-white/[0.02]"
+          }`}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            onChange={(e) => {
+              onPick(e.target.files);
+              e.target.value = "";
+            }}
+          />
+          {readFile.busy ? (
+            <div className="flex flex-col items-center gap-2">
+              <Spinner isLight={isLight} label="Reading your file…" />
+              <p className={`text-[11px] ${t.faint}`}>
+                Large PDFs and images can take a moment.
+              </p>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-2">
+              <div
+                className={`w-11 h-11 rounded-full flex items-center justify-center ${
+                  isLight ? "bg-indigo-100 text-indigo-600" : "bg-indigo-500/15 text-indigo-300"
+                }`}
+              >
+                <Upload className="w-5 h-5" />
+              </div>
+              <div className={`text-sm font-semibold ${t.heading}`}>
+                Drop a file here, or click to browse
+              </div>
+              <p className={`text-[11px] leading-relaxed max-w-md ${t.muted}`}>
+                PDF, Word, PowerPoint, Excel, CSV, text or an image (JPG, PNG). Up to{" "}
+                {formatBytes(MAX_UPLOAD_BYTES)}. Scanned PDFs and photos are read with AI vision.
+              </p>
+            </div>
+          )}
+        </div>
+
+        {sizeError && (
+          <div className="mt-3">
+            <Notice isLight={isLight} tone="warn" onDismiss={() => setSizeError(null)}>
+              {sizeError}
+            </Notice>
+          </div>
+        )}
+        <ErrorNotice isLight={isLight} error={readFile.error} onDismiss={readFile.clearError} />
+      </Card>
+
+      <Card
+        isLight={isLight}
+        title="Or paste text about your business"
+        subtitle="An about page, a pitch, anything descriptive. Handy when you don't have a file."
         icon={Wand2}
       >
         <Notice isLight={isLight} tone="info" title="Nothing is saved until you say so">
-          The model's reading is shown for review first. When you do apply it, fields you have already
+          The AI's reading is shown for review first. When you apply it, fields you have already
           filled in are never overwritten and lists are merged, not replaced — a brochure's marketing
           copy should not silently replace something you wrote by hand.
         </Notice>
@@ -754,20 +917,29 @@ function LearnTab({ isLight, onApplied }: Themed & { onApplied: () => void }) {
             icon={Sparkles}
             busy={extract.busy}
             disabled={tooShort}
-            onClick={() => run(false)}
+            onClick={readText}
           >
             Read it
           </Button>
         </div>
 
-        <ErrorNotice isLight={isLight} error={extract.error || apply.error} />
+        <ErrorNotice isLight={isLight} error={extract.error} onDismiss={extract.clearError} />
       </Card>
 
-      {result && (
+      {result && !extracted && result.warning && (
+        <Notice isLight={isLight} tone="warn" title="Nothing to read">
+          {result.warning}
+        </Notice>
+      )}
+
+      {result && extracted && (
         <Card
           isLight={isLight}
-          title={result.applied ? "Applied" : "What the model read"}
-          subtitle={`Confidence ${Math.round(result.extracted.confidence * 100)}% — its own estimate of how completely the text describes the business.`}
+          title={result.applied ? "Applied" : "What the AI read"}
+          subtitle={
+            `Confidence ${Math.round(extracted.confidence * 100)}% — its own estimate of how completely the source describes the business.` +
+            (source ? ` Source: ${source}.` : "")
+          }
           icon={result.applied ? Check : Sparkles}
           actions={
             !result.applied && (
@@ -776,13 +948,28 @@ function LearnTab({ isLight, onApplied }: Themed & { onApplied: () => void }) {
                 variant="primary"
                 icon={Check}
                 busy={apply.busy}
-                onClick={() => run(true)}
+                disabled={!extracted}
+                onClick={applyNow}
               >
                 Apply to my profile
               </Button>
             )
           }
         >
+          {result.kind && (
+            <div className="mb-3 flex items-center gap-1.5">
+              <Badge isLight={isLight} tone="info">
+                <FileText className="w-3 h-3 mr-1 inline" />
+                {KIND_LABEL[result.kind] ?? "Read from file"}
+              </Badge>
+              {typeof result.charCount === "number" && result.charCount > 0 && (
+                <span className={`text-[11px] ${t.faint}`}>
+                  {result.charCount.toLocaleString()} characters read
+                </span>
+              )}
+            </div>
+          )}
+
           {result.applied && (
             <div className="mb-4">
               <Notice isLight={isLight} tone="success">
@@ -793,55 +980,57 @@ function LearnTab({ isLight, onApplied }: Themed & { onApplied: () => void }) {
             </div>
           )}
 
+          <ErrorNotice isLight={isLight} error={apply.error} onDismiss={apply.clearError} />
+
           <div className="grid md:grid-cols-2 gap-x-6 gap-y-3">
-            <ReadRow isLight={isLight} label="Business name" value={result.extracted.businessName} />
-            <ReadRow isLight={isLight} label="Industry" value={result.extracted.industry} />
-            <ReadRow isLight={isLight} label="Business type" value={result.extracted.businessType} />
-            <ReadRow isLight={isLight} label="Brand voice" value={result.extracted.brandVoice} />
+            <ReadRow isLight={isLight} label="Business name" value={extracted.businessName} />
+            <ReadRow isLight={isLight} label="Industry" value={extracted.industry} />
+            <ReadRow isLight={isLight} label="Business type" value={extracted.businessType} />
+            <ReadRow isLight={isLight} label="Brand voice" value={extracted.brandVoice} />
             <ReadRow
               isLight={isLight}
               label="Description"
-              value={result.extracted.description}
+              value={extracted.description}
               className="md:col-span-2"
             />
-            <ReadList isLight={isLight} label="Customer types" values={result.extracted.targetCustomerTypes} />
-            <ReadList isLight={isLight} label="Locations served" values={result.extracted.locationsServed} />
-            <ReadList isLight={isLight} label="Differentiators" values={result.extracted.uniqueSellingPoints} />
-            <ReadList isLight={isLight} label="Decision makers" values={result.extracted.decisionMakerRoles} />
-            <ReadList isLight={isLight} label="Industries" values={result.extracted.targetIndustries} />
-            <ReadList isLight={isLight} label="Certifications" values={result.extracted.certifications} />
+            <ReadList isLight={isLight} label="Customer types" values={extracted.targetCustomerTypes} />
+            <ReadList isLight={isLight} label="Locations served" values={extracted.locationsServed} />
+            <ReadList isLight={isLight} label="Differentiators" values={extracted.uniqueSellingPoints} />
+            <ReadList isLight={isLight} label="Decision makers" values={extracted.decisionMakerRoles} />
+            <ReadList isLight={isLight} label="Industries" values={extracted.targetIndustries} />
+            <ReadList isLight={isLight} label="Certifications" values={extracted.certifications} />
           </div>
 
-          {(result.extracted.products.length > 0 || result.extracted.services.length > 0) && (
+          {(extracted.products.length > 0 || extracted.services.length > 0) && (
             <div className={`mt-5 pt-4 border-t ${t.border} grid md:grid-cols-2 gap-5`}>
               <div>
                 <div className={`text-[11px] font-semibold uppercase tracking-wide mb-2 ${t.muted}`}>
-                  Products found ({result.extracted.products.length})
+                  Products found ({extracted.products.length})
                 </div>
                 <ul className="space-y-1">
-                  {result.extracted.products.map((p) => (
+                  {extracted.products.map((p) => (
                     <li key={p.name} className={`text-xs ${t.body}`}>
                       <span className="font-semibold">{p.name}</span>
                       {p.description && <span className={t.muted}> — {p.description}</span>}
                     </li>
                   ))}
-                  {result.extracted.products.length === 0 && (
+                  {extracted.products.length === 0 && (
                     <li className={`text-xs ${t.faint}`}>None</li>
                   )}
                 </ul>
               </div>
               <div>
                 <div className={`text-[11px] font-semibold uppercase tracking-wide mb-2 ${t.muted}`}>
-                  Services found ({result.extracted.services.length})
+                  Services found ({extracted.services.length})
                 </div>
                 <ul className="space-y-1">
-                  {result.extracted.services.map((s) => (
+                  {extracted.services.map((s) => (
                     <li key={s.name} className={`text-xs ${t.body}`}>
                       <span className="font-semibold">{s.name}</span>
                       {s.description && <span className={t.muted}> — {s.description}</span>}
                     </li>
                   ))}
-                  {result.extracted.services.length === 0 && (
+                  {extracted.services.length === 0 && (
                     <li className={`text-xs ${t.faint}`}>None</li>
                   )}
                 </ul>
@@ -849,11 +1038,11 @@ function LearnTab({ isLight, onApplied }: Themed & { onApplied: () => void }) {
             </div>
           )}
 
-          {result.extracted.missingInformation.length > 0 && (
+          {extracted.missingInformation.length > 0 && (
             <div className="mt-5">
-              <Notice isLight={isLight} tone="warn" title="The model could not find these">
+              <Notice isLight={isLight} tone="warn" title="The AI could not find these">
                 <ul className="space-y-0.5 mt-1">
-                  {result.extracted.missingInformation.map((q, i) => (
+                  {extracted.missingInformation.map((q, i) => (
                     <li key={i}>• {q}</li>
                   ))}
                 </ul>

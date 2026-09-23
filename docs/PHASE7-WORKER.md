@@ -11,7 +11,7 @@ npm start                    # web API
 npm run worker               # dedicated campaign worker (one or more replicas)
 ```
 
-For local worker development use `npm run worker:dev`. Configure `WORKER_ID` uniquely per replica and tune `CAMPAIGN_WORKER_POLL_MS` (default 2000). Render is configured with a separate `nexaleadai-campaign-worker` worker service; set its `DATABASE_URL` and `ENCRYPTION_KEY` to the same values used by the web service.
+For local worker development use `npm run worker:dev`. Configure `WORKER_ID` uniquely per replica and tune `CAMPAIGN_WORKER_POLL_MS` (default 2000). Render is configured with a separate `leadgenpilot-campaign-worker` worker service; set its `DATABASE_URL` and `ENCRYPTION_KEY` to the same values used by the web service.
 
 ## Delivery guarantees
 

@@ -46,7 +46,8 @@ export default function HeroDashboard() {
         <div className="p-4 flex flex-col h-full">
           {/* logo */}
           <div className="flex items-center mb-5">
-            <img src="/logo.png" alt="NexaLeadAi" className="h-5 w-auto object-contain" />
+            {/* Mock window is bg-[#0a0b10], so the dark-background artwork. */}
+            <img src="/logo-dark.png" alt="LeadGenPilot" className="h-5 w-auto object-contain" />
           </div>
 
           {/* search */}

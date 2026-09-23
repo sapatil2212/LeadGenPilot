@@ -510,7 +510,7 @@ export default function IntegrationSettings({
         credentials: "include",
         body: JSON.stringify({
           phone: cloudTestPhone,
-          message: "Test message from NexaLeadAi. Your WhatsApp Cloud API connection is working.",
+          message: "Test message from LeadGenPilot. Your WhatsApp Cloud API connection is working.",
         }),
       });
       const data = await res.json();
@@ -610,7 +610,7 @@ export default function IntegrationSettings({
 
   const copyAppsScriptCode = () => {
     const code = `// ============================================
-// Google Apps Script for NexaLeadAi Web App
+// Google Apps Script for LeadGenPilot Web App
 // PASTE THIS ENTIRE CODE IN YOUR APPS SCRIPT
 // Then: Deploy > New deployment > Web app
 // ============================================
@@ -902,15 +902,15 @@ function doGet(e) {
   return (
     <div className="space-y-6 max-w-5xl animate-fadeIn">
       {/* Header Info Panel */}
-      <div className={`border rounded-2xl p-6 relative overflow-hidden ${
+      <div className={`border rounded-xl p-4 sm:p-5 relative overflow-hidden ${
         isLight 
           ? "bg-white border-slate-200" 
           : "bg-slate-900/60 border-slate-800 backdrop-blur-md"
       }`}>
         <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none -mr-20 -mt-20"></div>
-        <div className="relative z-10 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <div className="relative z-10 flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
           <div>
-            <h2 className={`text-xl font-bold tracking-tight mb-1.5 ${isLight ? "text-slate-900" : "text-white"}`}>
+            <h2 className={`text-base font-bold tracking-tight mb-1 ${isLight ? "text-slate-900" : "text-white"}`}>
               Integration Hub
             </h2>
             <p className={`text-xs leading-relaxed max-w-2xl ${isLight ? "text-slate-500" : "text-slate-400"}`}>
@@ -918,8 +918,8 @@ function doGet(e) {
             </p>
           </div>
           
-          <div className="flex items-center gap-3 shrink-0">
-            <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${
+          <div className="flex items-center gap-2.5 shrink-0">
+            <span className={`text-[9.5px] px-2 py-0.5 rounded font-bold ${
               isLight ? "bg-slate-100 text-slate-600" : "bg-slate-800 text-slate-300"
             }`}>
               Active Nodes: {integrations.filter(i => i.enabled).length + (whatsappStatus.status === "CONNECTED" ? 1 : 0)}
@@ -929,12 +929,12 @@ function doGet(e) {
       </div>
 
       {/* Tab Switcher Segmented Control */}
-      <div className="flex p-1 gap-1.5 rounded-xl border border-slate-200/40 bg-slate-100/10 max-w-md">
+      <div className="flex p-0.5 gap-1 rounded-xl border border-slate-200/40 bg-slate-100/10 max-w-md">
         <button
           onClick={() => setActiveTab("smtp")}
-          className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+          className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
             activeTab === "smtp"
-              ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/10"
+              ? "bg-indigo-600 text-white shadow-xs shadow-indigo-600/20"
               : `${isLight ? "text-slate-600 hover:bg-white hover:text-slate-950" : "text-slate-400 hover:bg-slate-800/40 hover:text-slate-200"}`
           }`}
         >
@@ -943,9 +943,9 @@ function doGet(e) {
         </button>
         <button
           onClick={() => setActiveTab("google_sheet")}
-          className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+          className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
             activeTab === "google_sheet"
-              ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/10"
+              ? "bg-indigo-600 text-white shadow-xs shadow-indigo-600/20"
               : `${isLight ? "text-slate-600 hover:bg-white hover:text-slate-950" : "text-slate-400 hover:bg-slate-800/40 hover:text-slate-200"}`
           }`}
         >
@@ -954,9 +954,9 @@ function doGet(e) {
         </button>
         <button
           onClick={() => setActiveTab("whatsapp")}
-          className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+          className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
             activeTab === "whatsapp"
-              ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/10"
+              ? "bg-indigo-600 text-white shadow-xs shadow-indigo-600/20"
               : `${isLight ? "text-slate-600 hover:bg-white hover:text-slate-950" : "text-slate-400 hover:bg-slate-800/40 hover:text-slate-200"}`
           }`}
         >
@@ -968,7 +968,7 @@ function doGet(e) {
       {/* Message Banner */}
       {message && (
         <div
-          className={`p-3.5 rounded-xl border flex items-center gap-2.5 transition-all text-xs font-medium ${
+          className={`p-3 rounded-xl border flex items-center gap-2 transition-all text-xs font-medium ${
             message.type === "success"
               ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-500"
               : "bg-rose-500/5 border-rose-500/20 text-rose-500"
@@ -985,23 +985,23 @@ function doGet(e) {
 
       {/* TAB 1: SMTP Settings */}
       {activeTab === "smtp" && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          <div className="lg:col-span-8 space-y-6">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+          <div className="lg:col-span-8 space-y-5">
             {smtpInt && !isEditingSmtp ? (
               /* Active SMTP connection detail card */
-              <div className={`border rounded-2xl p-6 ${
+              <div className={`border rounded-xl p-4 sm:p-4.5 ${
                 isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
               }`}>
-                <div className="flex justify-between items-start border-b border-slate-200/20 pb-4 mb-4">
-                  <div className="flex items-center gap-3.5">
-                    <div className="w-12 h-12 rounded-xl bg-indigo-500/10 flex items-center justify-center">
-                      <Mail className="w-5.5 h-5.5 text-indigo-500" />
+                <div className="flex justify-between items-start border-b border-slate-200/20 pb-3 mb-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-lg bg-indigo-500/10 flex items-center justify-center">
+                      <Mail className="w-4 h-4 text-indigo-500" />
                     </div>
                     <div>
-                      <h4 className={`text-sm font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                      <h4 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
                         {smtpInt.label || "SMTP Email Gateway"}
                       </h4>
-                      <p className="text-[10px] text-slate-500 mt-0.5">
+                      <p className="text-[9.5px] text-slate-500 mt-0.5">
                         Connected on {new Date(smtpInt.createdAt).toLocaleDateString()}
                       </p>
                     </div>
@@ -1009,7 +1009,7 @@ function doGet(e) {
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => toggleIntegration(smtpInt.id, "smtp", !smtpInt.enabled)}
-                      className={`px-3 py-1.5 rounded-lg text-[10px] font-bold border transition-all cursor-pointer flex items-center gap-1.5 ${
+                      className={`px-2.5 py-1 rounded-lg text-[9.5px] font-bold border transition-all cursor-pointer flex items-center gap-1.5 ${
                         smtpInt.enabled
                           ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
                           : "bg-slate-500/10 border-slate-500/20 text-slate-400"
@@ -1089,26 +1089,26 @@ function doGet(e) {
               </div>
             ) : (
               /* SMTP Edit/Add form */
-              <div className={`border rounded-2xl p-6 space-y-4 ${
+              <div className={`border rounded-xl p-4 sm:p-4.5 space-y-3.5 ${
                 isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
               }`}>
-                <div className="pb-3 border-b border-slate-200/20">
-                  <h3 className={`text-sm font-bold flex items-center gap-2 ${isLight ? "text-slate-800" : "text-white"}`}>
-                    <Key className="w-4 h-4 text-indigo-400" />
+                <div className="pb-2.5 border-b border-slate-200/20">
+                  <h3 className={`text-xs font-bold flex items-center gap-2 ${isLight ? "text-slate-800" : "text-white"}`}>
+                    <Key className="w-3.5 h-3.5 text-indigo-400" />
                     {isEditingSmtp ? "Modify SMTP Settings" : "Configure Custom SMTP"}
                   </h3>
                 </div>
 
-                <div className="space-y-4 text-xs">
-                  <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-3 text-xs">
+                  <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-1">SMTP Host</label>
+                      <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">SMTP Host</label>
                       <input
                         type="text"
                         value={smtpForm.host}
                         onChange={(e) => setSmtpForm({ ...smtpForm, host: e.target.value })}
                         placeholder="smtp.gmail.com"
-                        className={`w-full px-3 py-2 rounded-lg border focus:outline-none focus:border-indigo-500 ${
+                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
                           isLight
                             ? "bg-white border-slate-200 text-slate-900"
                             : "bg-[#030712] border-slate-700 text-white"
@@ -1116,13 +1116,13 @@ function doGet(e) {
                       />
                     </div>
                     <div>
-                      <label className="block text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-1">Port</label>
+                      <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">Port</label>
                       <input
                         type="number"
                         value={smtpForm.port}
                         onChange={(e) => setSmtpForm({ ...smtpForm, port: e.target.value })}
                         placeholder="587"
-                        className={`w-full px-3 py-2 rounded-lg border focus:outline-none focus:border-indigo-500 ${
+                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
                           isLight
                             ? "bg-white border-slate-200 text-slate-900"
                             : "bg-[#030712] border-slate-700 text-white"
@@ -1132,7 +1132,7 @@ function doGet(e) {
                   </div>
 
                   <div>
-                    <label className="flex items-center gap-2 py-1 cursor-pointer">
+                    <label className="flex items-center gap-2 py-0.5 cursor-pointer">
                       <input
                         type="checkbox"
                         checked={smtpForm.secure}
@@ -1146,13 +1146,13 @@ function doGet(e) {
                   </div>
 
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-1">Username / Email</label>
+                    <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">Username / Email</label>
                     <input
                       type="text"
                       value={smtpForm.user}
                       onChange={(e) => setSmtpForm({ ...smtpForm, user: e.target.value })}
                       placeholder="yourname@gmail.com"
-                      className={`w-full px-3 py-2 rounded-lg border focus:outline-none focus:border-indigo-500 ${
+                      className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
                         isLight
                           ? "bg-white border-slate-200 text-slate-900"
                           : "bg-[#030712] border-slate-700 text-white"
@@ -1161,14 +1161,14 @@ function doGet(e) {
                   </div>
 
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-1">Password / App Password</label>
+                    <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">Password / App Password</label>
                     <div className="relative">
                       <input
                         type={showPassword ? "text" : "password"}
                         value={smtpForm.password}
                         onChange={(e) => setSmtpForm({ ...smtpForm, password: e.target.value })}
                         placeholder="••••••••••••"
-                        className={`w-full px-3 py-2.5 rounded-lg border focus:outline-none focus:border-indigo-500 pr-10 ${
+                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 pr-9 ${
                           isLight
                             ? "bg-white border-slate-200 text-slate-900"
                             : "bg-[#030712] border-slate-700 text-white"
@@ -1177,22 +1177,22 @@ function doGet(e) {
                       <button
                         type="button"
                         onClick={() => setShowPassword(!showPassword)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
                       >
-                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                       </button>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-1">From Email</label>
+                      <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">From Email</label>
                       <input
                         type="email"
                         value={smtpForm.fromEmail}
                         onChange={(e) => setSmtpForm({ ...smtpForm, fromEmail: e.target.value })}
                         placeholder="noreply@domain.com"
-                        className={`w-full px-3 py-2 rounded-lg border focus:outline-none focus:border-indigo-500 ${
+                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
                           isLight
                             ? "bg-white border-slate-200 text-slate-900"
                             : "bg-[#030712] border-slate-700 text-white"
@@ -1200,13 +1200,13 @@ function doGet(e) {
                       />
                     </div>
                     <div>
-                      <label className="block text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-1">From Name</label>
+                      <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">From Name</label>
                       <input
                         type="text"
                         value={smtpForm.fromName}
                         onChange={(e) => setSmtpForm({ ...smtpForm, fromName: e.target.value })}
                         placeholder="e.g. Sales Team"
-                        className={`w-full px-3 py-2 rounded-lg border focus:outline-none focus:border-indigo-500 ${
+                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
                           isLight
                             ? "bg-white border-slate-200 text-slate-900"
                             : "bg-[#030712] border-slate-700 text-white"
@@ -1215,15 +1215,15 @@ function doGet(e) {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 gap-4">
+                  <div className="grid grid-cols-1 gap-3">
                     <div>
-                      <label className="block text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-1">Custom Label</label>
+                      <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">Custom Label</label>
                       <input
                         type="text"
                         value={smtpForm.label}
                         onChange={(e) => setSmtpForm({ ...smtpForm, label: e.target.value })}
                         placeholder="e.g. Gmail SMTP Gateway"
-                        className={`w-full px-3 py-2 rounded-lg border focus:outline-none focus:border-indigo-500 ${
+                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
                           isLight
                             ? "bg-white border-slate-200 text-slate-900"
                             : "bg-[#030712] border-slate-700 text-white"
@@ -1232,30 +1232,30 @@ function doGet(e) {
                     </div>
                   </div>
 
-                  <div className="flex gap-2.5 pt-4 border-t border-slate-200/20">
+                  <div className="flex gap-2 pt-3 border-t border-slate-200/20">
                     <button
                       type="button"
                       onClick={testSMTP}
                       disabled={testing || !smtpForm.host || !smtpForm.user || !smtpForm.password}
-                      className="px-4 py-2 bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-300 text-xs font-bold rounded-lg cursor-pointer flex items-center gap-1.5 transition-all disabled:opacity-50"
+                      className="px-3 py-1.5 bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-300 text-xs font-bold rounded-lg cursor-pointer flex items-center gap-1.5 transition-all disabled:opacity-50"
                     >
-                      {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                      {testing ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
                       Test Connection
                     </button>
                     <button
                       type="button"
                       onClick={saveSMTP}
                       disabled={saving || !smtpForm.host || !smtpForm.user || !smtpForm.password || !smtpForm.fromEmail}
-                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer flex items-center gap-1.5 transition-all disabled:opacity-50"
+                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer flex items-center gap-1.5 transition-all disabled:opacity-50"
                     >
-                      {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                      {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
                       Save Configuration
                     </button>
                     {isEditingSmtp && (
                       <button
                         type="button"
                         onClick={() => setIsEditingSmtp(false)}
-                        className={`ml-auto px-4 py-2 border rounded-lg text-xs font-semibold cursor-pointer transition-all ${
+                        className={`ml-auto px-3 py-1.5 border rounded-lg text-xs font-semibold cursor-pointer transition-all ${
                           isLight ? "border-slate-200 text-slate-600 hover:bg-slate-50" : "border-slate-800 text-slate-400 hover:bg-slate-850"
                         }`}
                       >
@@ -1268,24 +1268,24 @@ function doGet(e) {
             )}
           </div>
 
-          <div className="lg:col-span-4 space-y-6">
+          <div className="lg:col-span-4 space-y-4">
             {/* Gmail SMTP Guide Banner */}
-            <div className={`p-5 rounded-2xl border font-sans space-y-3.5 ${
+            <div className={`p-4 rounded-xl border font-sans space-y-2.5 ${
               isLight 
                 ? "bg-amber-50/50 border-amber-200 text-amber-950" 
                 : "bg-amber-500/5 border-amber-500/15 text-amber-400"
             }`}>
               <div className="flex items-center gap-2">
-                <AlertTriangle className="w-4.5 h-4.5 text-amber-500" />
+                <AlertTriangle className="w-4 h-4 text-amber-500" />
                 <h4 className="font-bold text-xs">Gmail SMTP Advisory</h4>
               </div>
               <p className="text-[11px] leading-relaxed">
                 To prevent Google authorization blocks, do NOT use your standard account password.
               </p>
-              <ol className="text-[10px] space-y-1.5 list-decimal pl-4 leading-relaxed text-slate-400">
+              <ol className="text-[10px] space-y-1 list-decimal pl-4 leading-relaxed text-slate-400">
                 <li>Enable <strong className={isLight ? "text-slate-800" : "text-white"}>2-Step Verification</strong> on your Google Account.</li>
                 <li>Search Google Account settings for <strong className={isLight ? "text-slate-800" : "text-white"}>App Passwords</strong>.</li>
-                <li>Select App type "Other" and label it "NexaLeadAi".</li>
+                <li>Select App type "Other" and label it "LeadGenPilot".</li>
                 <li>Copy the 16-character passcode generated and paste it as your SMTP password here.</li>
               </ol>
             </div>
@@ -1295,23 +1295,23 @@ function doGet(e) {
 
       {/* TAB 2: Google Sheets Settings */}
       {activeTab === "google_sheet" && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          <div className="lg:col-span-8 space-y-6">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+          <div className="lg:col-span-8 space-y-5">
             {sheetInt && !isEditingGoogleSheet ? (
               /* Active sheets connection card */
-              <div className={`border rounded-2xl p-6 ${
+              <div className={`border rounded-xl p-4 sm:p-4.5 ${
                 isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
               }`}>
-                <div className="flex justify-between items-start border-b border-slate-200/20 pb-4 mb-4">
-                  <div className="flex items-center gap-3.5">
-                    <div className="w-12 h-12 rounded-xl bg-emerald-500/10 flex items-center justify-center">
-                      <FileSpreadsheet className="w-5.5 h-5.5 text-emerald-500" />
+                <div className="flex justify-between items-start border-b border-slate-200/20 pb-3 mb-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-lg bg-emerald-500/10 flex items-center justify-center">
+                      <FileSpreadsheet className="w-4 h-4 text-emerald-500" />
                     </div>
                     <div>
-                      <h4 className={`text-sm font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                      <h4 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
                         {sheetInt.label || "Google Sheet Sync Node"}
                       </h4>
-                      <p className="text-[10px] text-slate-500 mt-0.5">
+                      <p className="text-[9.5px] text-slate-500 mt-0.5">
                         Connected on {new Date(sheetInt.createdAt).toLocaleDateString()}
                       </p>
                     </div>
@@ -1319,7 +1319,7 @@ function doGet(e) {
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => toggleIntegration(sheetInt.id, "google_sheet", !sheetInt.enabled)}
-                      className={`px-3 py-1.5 rounded-lg text-[10px] font-bold border transition-all cursor-pointer flex items-center gap-1.5 ${
+                      className={`px-2.5 py-1 rounded-lg text-[9.5px] font-bold border transition-all cursor-pointer flex items-center gap-1.5 ${
                         sheetInt.enabled
                           ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
                           : "bg-slate-500/10 border-slate-500/20 text-slate-400"
@@ -1394,44 +1394,44 @@ function doGet(e) {
               </div>
             ) : (
               /* Add/Edit Sheets form */
-              <div className={`border rounded-2xl p-6 space-y-4 ${
+              <div className={`border rounded-xl p-4 sm:p-4.5 space-y-3.5 ${
                 isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
               }`}>
-                <div className="pb-3 border-b border-slate-200/20">
-                  <h3 className={`text-sm font-bold flex items-center gap-2 ${isLight ? "text-slate-800" : "text-white"}`}>
-                    <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
+                <div className="pb-2.5 border-b border-slate-200/20">
+                  <h3 className={`text-xs font-bold flex items-center gap-2 ${isLight ? "text-slate-800" : "text-white"}`}>
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
                     {isEditingGoogleSheet ? "Modify Google Sheets Sync Settings" : "Configure Google Sheets Sync"}
                   </h3>
                 </div>
 
-                <div className="space-y-4 text-xs">
+                <div className="space-y-3 text-xs">
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-1">Google Apps Script Webhook URL</label>
+                    <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">Google Apps Script Webhook URL</label>
                     <input
                       type="url"
                       value={googleSheetForm.webhookUrl}
                       onChange={(e) => setGoogleSheetForm({ ...googleSheetForm, webhookUrl: e.target.value })}
                       placeholder="https://script.google.com/macros/s/YOUR_SCRIPT_ID/exec"
-                      className={`w-full px-3 py-2 rounded-lg border focus:outline-none focus:border-indigo-500 ${
+                      className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
                         isLight
                           ? "bg-white border-slate-200 text-slate-900"
                           : "bg-[#030712] border-slate-700 text-white"
                       }`}
                     />
-                    <span className="text-[10px] text-slate-500 mt-1 block leading-normal">
+                    <span className="text-[9.5px] text-slate-500 mt-1 block leading-normal">
                       Copy the Web App link deployed from the Google Apps Script in your sheet.
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-1">Target Tab/Sheet Name</label>
+                      <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">Target Tab/Sheet Name</label>
                       <input
                         type="text"
                         value={googleSheetForm.sheetName}
                         onChange={(e) => setGoogleSheetForm({ ...googleSheetForm, sheetName: e.target.value })}
                         placeholder="Leads (optional)"
-                        className={`w-full px-3 py-2 rounded-lg border focus:outline-none focus:border-indigo-500 ${
+                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
                           isLight
                             ? "bg-white border-slate-200 text-slate-900"
                             : "bg-[#030712] border-slate-700 text-white"
@@ -1439,13 +1439,13 @@ function doGet(e) {
                       />
                     </div>
                     <div>
-                      <label className="block text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-1">Sync Label</label>
+                      <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">Sync Label</label>
                       <input
                         type="text"
                         value={googleSheetForm.label}
                         onChange={(e) => setGoogleSheetForm({ ...googleSheetForm, label: e.target.value })}
                         placeholder="Leads Spreadsheet"
-                        className={`w-full px-3 py-2 rounded-lg border focus:outline-none focus:border-indigo-500 ${
+                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
                           isLight
                             ? "bg-white border-slate-200 text-slate-900"
                             : "bg-[#030712] border-slate-700 text-white"
@@ -1454,30 +1454,30 @@ function doGet(e) {
                     </div>
                   </div>
 
-                  <div className="flex gap-2.5 pt-4 border-t border-slate-200/20">
+                  <div className="flex gap-2 pt-3 border-t border-slate-200/20">
                     <button
                       type="button"
                       onClick={testGoogleSheet}
                       disabled={testing || !googleSheetForm.webhookUrl}
-                      className="px-4 py-2 bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-300 text-xs font-bold rounded-lg cursor-pointer flex items-center gap-1.5 transition-all disabled:opacity-50"
+                      className="px-3 py-1.5 bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-300 text-xs font-bold rounded-lg cursor-pointer flex items-center gap-1.5 transition-all disabled:opacity-50"
                     >
-                      {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                      {testing ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
                       Test Webhook Link
                     </button>
                     <button
                       type="button"
                       onClick={saveGoogleSheet}
                       disabled={saving || !googleSheetForm.webhookUrl}
-                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer flex items-center gap-1.5 transition-all disabled:opacity-50"
+                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer flex items-center gap-1.5 transition-all disabled:opacity-50"
                     >
-                      {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                      {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
                       Save Sync Gateway
                     </button>
                     {isEditingGoogleSheet && (
                       <button
                         type="button"
                         onClick={() => setIsEditingGoogleSheet(false)}
-                        className={`ml-auto px-4 py-2 border rounded-lg text-xs font-semibold cursor-pointer transition-all ${
+                        className={`ml-auto px-3 py-1.5 border rounded-lg text-xs font-semibold cursor-pointer transition-all ${
                           isLight ? "border-slate-200 text-slate-600 hover:bg-slate-50" : "border-slate-800 text-slate-400 hover:bg-slate-850"
                         }`}
                       >
@@ -1490,27 +1490,27 @@ function doGet(e) {
             )}
 
             {/* Accordion Guide: How to deploy Apps Script */}
-            <div className={`border rounded-2xl overflow-hidden ${
+            <div className={`border rounded-xl overflow-hidden ${
               isLight ? "bg-slate-50 border-slate-200" : "bg-slate-900/40 border-slate-800"
             }`}>
               <button
                 onClick={() => setShowAppsScript(!showAppsScript)}
-                className="w-full py-4 px-6 flex items-center justify-between text-xs font-bold tracking-tight cursor-pointer hover:bg-slate-800/10"
+                className="w-full py-3 px-4 flex items-center justify-between text-xs font-bold tracking-tight cursor-pointer hover:bg-slate-800/10"
               >
                 <span className="flex items-center gap-2">
-                  <FileCode className="w-4.5 h-4.5 text-indigo-400" />
+                  <FileCode className="w-4 h-4 text-indigo-400" />
                   Google Sheets Apps Script Setup Instructions & Code
                 </span>
-                {showAppsScript ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+                {showAppsScript ? <ChevronUp className="w-3.5 h-3.5 text-slate-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
               </button>
 
               {showAppsScript && (
-                <div className="p-6 border-t border-slate-200/20 space-y-4 font-sans text-xs">
-                  <div className={`p-4 rounded-xl border leading-relaxed space-y-1.5 ${
+                <div className="p-4 border-t border-slate-200/20 space-y-3 font-sans text-xs">
+                  <div className={`p-3 rounded-lg border leading-relaxed space-y-1 ${
                     isLight ? "bg-white border-slate-200 text-slate-700" : "bg-[#030712] border-slate-800 text-slate-400"
                   }`}>
                     <p className="font-semibold text-indigo-400 mb-1">Follow these steps carefully:</p>
-                    <ol className="list-decimal pl-4 space-y-1 text-[11px]">
+                    <ol className="list-decimal pl-4 space-y-0.5 text-[10.5px]">
                       <li>Create a new Google Sheet.</li>
                       <li>Go to <strong className={isLight ? "text-slate-900" : "text-white"}>Extensions &gt; Apps Script</strong>.</li>
                       <li>Delete all text in the script editor and click <strong className={isLight ? "text-slate-900" : "text-white"}>Copy Apps Script Code</strong> button below to copy the required code.</li>
@@ -1518,7 +1518,7 @@ function doGet(e) {
                       <li>Click the blue <strong className={isLight ? "text-slate-900" : "text-white"}>Deploy</strong> button &gt; <strong className={isLight ? "text-slate-900" : "text-white"}>New deployment</strong>.</li>
                       <li>Select configuration type: <strong className={isLight ? "text-slate-900" : "text-white"}>Web app</strong>.</li>
                       <li>Change settings to:
-                        <ul className="list-disc pl-4 mt-0.5 space-y-0.5 font-mono text-[10px]">
+                        <ul className="list-disc pl-4 mt-0.5 space-y-0.5 font-mono text-[9.5px]">
                           <li>"Execute as": "Me" (your email)</li>
                           <li>"Who has access": "Anyone"</li>
                         </ul>
@@ -1527,12 +1527,12 @@ function doGet(e) {
                     </ol>
                   </div>
 
-                  <div className="flex justify-end pt-2">
+                  <div className="flex justify-end pt-1">
                     <button
                       onClick={copyAppsScriptCode}
-                      className="px-4 py-2 bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-200 text-xs font-bold rounded-lg cursor-pointer transition-all flex items-center gap-1.5"
+                      className="px-3 py-1.5 bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-200 text-xs font-bold rounded-lg cursor-pointer transition-all flex items-center gap-1.5"
                     >
-                      <FileCode className="w-4 h-4 text-emerald-400" />
+                      <FileCode className="w-3.5 h-3.5 text-emerald-400" />
                       {copiedScript ? "Script Code Copied!" : "Copy Apps Script Code"}
                     </button>
                   </div>
@@ -1541,20 +1541,20 @@ function doGet(e) {
             </div>
           </div>
 
-          <div className="lg:col-span-4 space-y-6">
-            <div className={`p-5 rounded-2xl border font-sans space-y-3.5 ${
+          <div className="lg:col-span-4 space-y-4">
+            <div className={`p-4 rounded-xl border font-sans space-y-2.5 ${
               isLight 
                 ? "bg-emerald-50/50 border-emerald-200 text-emerald-950" 
                 : "bg-emerald-500/5 border-emerald-500/15 text-emerald-400"
             }`}>
               <div className="flex items-center gap-2">
-                <Sparkles className="w-4.5 h-4.5 text-emerald-500" />
+                <Sparkles className="w-4 h-4 text-emerald-500" />
                 <h4 className="font-bold text-xs">Spreadsheet Benefits</h4>
               </div>
               <p className="text-[11px] leading-relaxed">
                 Synchronizing dispatches logs harvest data directly to your spreadsheets.
               </p>
-              <ul className="text-[10px] space-y-1.5 list-disc pl-4 leading-relaxed text-slate-400">
+              <ul className="text-[10px] space-y-1 list-disc pl-4 leading-relaxed text-slate-400">
                 <li>Instant sync of lead information as they are scraped.</li>
                 <li>Sync outreach campaign statuses (SENT, FAILED) dynamically in real-time.</li>
                 <li>Enable teamwork dispatches inside Google Sheets.</li>
@@ -1566,26 +1566,26 @@ function doGet(e) {
 
       {/* TAB 3: WhatsApp Settings */}
       {activeTab === "whatsapp" && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start animate-fadeIn">
-          <div className="lg:col-span-8 space-y-6">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start animate-fadeIn">
+          <div className="lg:col-span-8 space-y-5">
             {!canWhatsapp ? (
-              <div className={`border rounded-2xl p-8 flex flex-col items-center text-center gap-4 ${
+              <div className={`border rounded-xl p-6 flex flex-col items-center text-center gap-3 ${
                 isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
               }`}>
-                <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 flex items-center justify-center animate-pulse">
-                  <Sparkles className="h-6 w-6 text-indigo-400" />
+                <div className="w-10 h-10 rounded-xl bg-indigo-500/10 flex items-center justify-center animate-pulse">
+                  <Sparkles className="h-5 w-5 text-indigo-400" />
                 </div>
                 <div>
-                  <h4 className={`text-sm font-bold tracking-tight ${isLight ? "text-slate-900" : "text-white"}`}>
+                  <h4 className={`text-xs font-bold tracking-tight ${isLight ? "text-slate-900" : "text-white"}`}>
                     WhatsApp Outreach is a Pro Feature
                   </h4>
-                  <p className="text-xs text-slate-400 mt-2 max-w-sm leading-relaxed">
+                  <p className="text-[11px] text-slate-400 mt-1.5 max-w-sm leading-relaxed">
                     Your current free plan doesn't include WhatsApp outreach gateways. Upgrade to a premium plan to launch headless gateways, link browser sessions, and dispatch outreach campaigns directly.
                   </p>
                 </div>
                 <button 
                   onClick={onRequestPricingModal}
-                  className="mt-2 px-5 py-2.5 rounded-lg text-xs font-bold text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 shadow-lg shadow-indigo-600/20 cursor-pointer transition-all hover:scale-[1.02]"
+                  className="mt-1 px-4 py-2 rounded-lg text-xs font-bold text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 shadow-md shadow-indigo-600/20 cursor-pointer transition-all hover:scale-[1.02]"
                 >
                   Upgrade to Pro
                 </button>
@@ -1593,10 +1593,10 @@ function doGet(e) {
             ) : (
             <>
               {/* Provider selector: which transport actually sends outreach */}
-              <div className={`border rounded-2xl p-5 ${
+              <div className={`border rounded-xl p-4 sm:p-4.5 ${
                 isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
               }`}>
-                <h3 className={`text-sm font-semibold mb-1 ${isLight ? "text-slate-800" : "text-white"}`}>
+                <h3 className={`text-xs font-semibold mb-1 ${isLight ? "text-slate-800" : "text-white"}`}>
                   Sending Method
                 </h3>
                 <p className="text-[11px] text-slate-500 mb-4 leading-relaxed">
@@ -1664,15 +1664,15 @@ function doGet(e) {
               </div>
 
               {waProvider === "web" ? (
-              <div className={`border rounded-2xl p-6 space-y-4 ${
+              <div className={`border rounded-xl p-4 sm:p-4.5 space-y-3.5 ${
                 isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
               }`}>
-                <div className={`flex items-center justify-between pb-3 border-b ${
+                <div className={`flex items-center justify-between pb-2.5 border-b ${
                   isLight ? "border-slate-200" : "border-[#1e293b]/60"
                 }`}>
                   <div className="flex items-center gap-2">
-                    <Smartphone className="h-5 w-5 text-indigo-400" />
-                    <h3 className={`text-sm font-semibold ${isLight ? "text-slate-800" : "text-white"}`}>
+                    <Smartphone className="h-4 w-4 text-indigo-400" />
+                    <h3 className={`text-xs font-bold ${isLight ? "text-slate-800" : "text-white"}`}>
                       WhatsApp Gateway Session
                     </h3>
                   </div>
@@ -1682,14 +1682,14 @@ function doGet(e) {
                       <button 
                         onClick={onSendWhatsAppTest}
                         disabled={isSendingTestMsg}
-                        className="px-3.5 py-1.5 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 border border-indigo-500/25 font-bold text-[10px] rounded-lg cursor-pointer transition-all disabled:opacity-50"
+                        className="px-3 py-1 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 border border-indigo-500/25 font-bold text-[9.5px] rounded-lg cursor-pointer transition-all disabled:opacity-50"
                       >
                         {isSendingTestMsg ? "Sending Test..." : "Send Test Message"}
                       </button>
                       <button 
                         onClick={onDisconnectWhatsApp}
                         disabled={isDisconnectingWa}
-                        className="px-3.5 py-1.5 bg-rose-600/10 hover:bg-rose-600/20 text-rose-400 border border-rose-500/25 font-bold text-[10px] rounded-lg cursor-pointer transition-all disabled:opacity-50"
+                        className="px-3 py-1 bg-rose-600/10 hover:bg-rose-600/20 text-rose-400 border border-rose-500/25 font-bold text-[9.5px] rounded-lg cursor-pointer transition-all disabled:opacity-50"
                       >
                         {isDisconnectingWa ? "Disconnecting..." : "Disconnect WhatsApp"}
                       </button>
@@ -1697,8 +1697,8 @@ function doGet(e) {
                   )}
                 </div>
 
-                <div className="flex flex-col md:flex-row items-center gap-8 py-2">
-                  <div className="flex-1 space-y-4 font-sans">
+                <div className="flex flex-col md:flex-row items-center gap-6 py-1">
+                  <div className="flex-1 space-y-3 font-sans">
                     <p className={`text-xs leading-relaxed ${isLight ? "text-slate-500" : "text-slate-400"}`}>
                       Authenticates a virtual headless browser with WhatsApp Web. Once authenticated, outreach campaigns can dispatch customized messages directly to business lines.
                     </p>
@@ -1706,7 +1706,7 @@ function doGet(e) {
                     <div className="space-y-1">
                       <div className="flex items-center gap-2 text-xs">
                         <span className="text-slate-400">Connection state:</span>
-                        <span className={`font-bold px-2 py-0.5 rounded text-[10px] tracking-wide ${
+                        <span className={`font-bold px-2 py-0.5 rounded text-[9.5px] tracking-wide ${
                           whatsappStatus.status === "CONNECTED" ? "bg-emerald-500/10 text-emerald-400" :
                           whatsappStatus.status === "CONNECTING" ? "bg-indigo-500/10 text-indigo-400 animate-pulse" :
                           whatsappStatus.status === "QR_READY" ? "bg-amber-500/10 text-amber-400" :
@@ -1717,11 +1717,11 @@ function doGet(e) {
                       </div>
                     </div>
 
-                    <div className="pt-2 flex gap-2">
+                    <div className="pt-1 flex gap-2">
                       {whatsappStatus.status === "DISCONNECTED" && (
                         <button
                           onClick={onInitializeWhatsApp}
-                          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer transition-all shadow-md shadow-indigo-600/10"
+                          className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer transition-all shadow-xs shadow-indigo-600/20"
                         >
                           Initialize WhatsApp Gateway
                         </button>
@@ -1730,7 +1730,7 @@ function doGet(e) {
                       {whatsappStatus.status === "QR_READY" && (
                         <button
                           onClick={onInitializeWhatsApp}
-                          className="px-4 py-2 bg-amber-600/10 hover:bg-amber-600/20 text-amber-400 border border-amber-500/20 text-xs font-bold rounded-lg cursor-pointer transition-all"
+                          className="px-3.5 py-1.5 bg-amber-600/10 hover:bg-amber-600/20 text-amber-400 border border-amber-500/20 text-xs font-bold rounded-lg cursor-pointer transition-all"
                         >
                           Regenerate QR Code
                         </button>
@@ -1740,18 +1740,18 @@ function doGet(e) {
 
                   {/* QR view */}
                   {whatsappStatus.status !== "CONNECTED" && (
-                    <div className="shrink-0 flex items-center justify-center p-4 bg-white rounded-xl border border-slate-200 w-48 h-48 shadow-lg relative">
+                    <div className="shrink-0 flex items-center justify-center p-3 bg-white rounded-xl border border-slate-200 w-44 h-44 shadow-md relative">
                       {whatsappStatus.qr ? (
                         <img 
-                          src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(whatsappStatus.qr)}`} 
+                          src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(whatsappStatus.qr)}`} 
                           alt="WhatsApp Scan QR" 
-                          className="w-40 h-40"
+                          className="w-36 h-36"
                         />
                       ) : (
                         <div className="text-slate-400 text-center text-[10px] font-sans">
                           {whatsappStatus.status === "CONNECTING" ? (
                             <div className="space-y-2 flex flex-col items-center">
-                              <Loader2 className="h-6 w-6 text-indigo-600 animate-spin" />
+                              <Loader2 className="h-5 w-5 text-indigo-600 animate-spin" />
                               <span className="leading-normal">{isDisconnectingWa ? "Disconnecting Gateway..." : "Launching headless client..."}</span>
                             </div>
                           ) : (
@@ -1763,40 +1763,40 @@ function doGet(e) {
                   )}
 
                   {whatsappStatus.status === "CONNECTED" && (
-                    <div className={`shrink-0 flex flex-col items-center justify-center p-6 border border-emerald-500/20 rounded-xl w-48 h-48 text-emerald-400 text-xs ${
+                    <div className={`shrink-0 flex flex-col items-center justify-center p-4 border border-emerald-500/20 rounded-xl w-44 h-44 text-emerald-400 text-xs ${
                       isLight ? "bg-emerald-50" : "bg-slate-900/50"
                     }`}>
-                      <CheckCircle2 className="h-12 w-12 text-emerald-400 mb-2 animate-bounce" />
+                      <CheckCircle2 className="h-10 w-10 text-emerald-400 mb-2 animate-bounce" />
                       <span className="font-bold text-center">Session Verified</span>
-                      <span className="text-[10px] text-slate-500 mt-1">Active Gateway</span>
+                      <span className="text-[9.5px] text-slate-500 mt-0.5">Active Gateway</span>
                     </div>
                   )}
                 </div>
               </div>
               ) : (
               /* ── Official Meta WhatsApp Business Cloud API ── */
-              <div className="space-y-6">
+              <div className="space-y-5">
                 {/* Live connection state */}
-                <div className={`border rounded-2xl p-6 ${
+                <div className={`border rounded-xl p-4 sm:p-4.5 ${
                   isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
                 }`}>
-                  <div className="flex items-start justify-between gap-4 flex-wrap">
-                    <div className="flex items-center gap-3.5">
-                      <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
+                  <div className="flex items-start justify-between gap-3 flex-wrap">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${
                         cloudStatus?.connected ? "bg-emerald-500/10" : "bg-slate-500/10"
                       }`}>
-                        <WhatsAppLogo className={`w-6 h-6 ${
+                        <WhatsAppLogo className={`w-4 h-4 ${
                           cloudStatus?.connected ? "fill-emerald-500 text-emerald-500" : "fill-slate-500 text-slate-500"
                         }`} />
                       </div>
                       <div>
                         <div className="flex items-center gap-2">
-                          <h4 className={`text-sm font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                          <h4 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
                             {cloudStatus?.connected ? "Connected" : "Not Connected"}
                           </h4>
                           {cloudStatusLoading && <Loader2 className="w-3 h-3 animate-spin text-slate-500" />}
                           {cloudStatus?.qualityRating && (
-                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                            <span className={`text-[8.5px] font-bold px-1.5 py-0.2 rounded ${
                               cloudStatus.qualityRating === "GREEN"
                                 ? "bg-emerald-500/15 text-emerald-400"
                                 : cloudStatus.qualityRating === "YELLOW"
@@ -1807,7 +1807,7 @@ function doGet(e) {
                             </span>
                           )}
                         </div>
-                        <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+                        <p className="text-[10px] text-slate-500 mt-0.5 leading-relaxed">
                           {cloudStatus?.connected
                             ? `${cloudStatus.verifiedName || "Business account"} · ${cloudStatus.displayPhoneNumber || ""}`
                             : "Configure your Meta API credentials below to connect your WhatsApp Business account."}
@@ -1820,15 +1820,15 @@ function doGet(e) {
                         <button
                           onClick={() => refreshCloudStatus(true)}
                           disabled={cloudStatusLoading}
-                          className={`px-3.5 py-2 text-xs font-semibold rounded-lg border transition-all cursor-pointer disabled:opacity-50 flex items-center gap-1.5 ${
+                          className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all cursor-pointer disabled:opacity-50 flex items-center gap-1.5 ${
                             isLight
                               ? "border-slate-200 text-slate-600 hover:bg-slate-50"
                               : "border-slate-800 text-slate-300 hover:bg-slate-850"
                           }`}
                         >
                           {cloudStatusLoading
-                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            : <Check className="w-3.5 h-3.5 text-emerald-500" />}
+                            ? <Loader2 className="w-3 h-3 animate-spin" />
+                            : <Check className="w-3 h-3 text-emerald-500" />}
                           Refresh Status
                         </button>
                       )}
@@ -1836,25 +1836,25 @@ function doGet(e) {
                   </div>
 
                   {cloudStatus?.error && !cloudStatus.connected && (
-                    <div className="mt-4 p-3 rounded-lg bg-rose-500/5 border border-rose-500/20 flex items-start gap-2">
+                    <div className="mt-3 p-2.5 rounded-lg bg-rose-500/5 border border-rose-500/20 flex items-start gap-2">
                       <AlertTriangle className="w-3.5 h-3.5 text-rose-400 mt-0.5 shrink-0" />
-                      <span className="text-[11px] text-rose-400 leading-relaxed">{cloudStatus.error}</span>
+                      <span className="text-[10px] text-rose-400 leading-relaxed">{cloudStatus.error}</span>
                     </div>
                   )}
                 </div>
 
                 {/* Credentials */}
-                <div className={`border rounded-2xl p-6 space-y-4 ${
+                <div className={`border rounded-xl p-4 sm:p-4.5 space-y-3.5 ${
                   isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
                 }`}>
-                  <div className={`pb-3 border-b ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
+                  <div className={`pb-2.5 border-b ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
                     <div className="flex items-center gap-2">
-                      <Key className="h-4.5 w-4.5 text-indigo-400" />
-                      <h3 className={`text-sm font-semibold ${isLight ? "text-slate-800" : "text-white"}`}>
+                      <Key className="h-3.5 w-3.5 text-indigo-400" />
+                      <h3 className={`text-xs font-bold ${isLight ? "text-slate-800" : "text-white"}`}>
                         API Credentials
                       </h3>
                     </div>
-                    <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                    <p className="text-[10px] text-slate-500 mt-1 leading-relaxed">
                       Enter your Meta WhatsApp Business API credentials. Find these under your app's WhatsApp
                       section in the{" "}
                       <a
@@ -2099,31 +2099,31 @@ function doGet(e) {
                 </div>
 
                 {/* Webhook configuration */}
-                <div className={`border rounded-2xl p-6 space-y-4 ${
+                <div className={`border rounded-xl p-4 sm:p-4.5 space-y-3.5 ${
                   isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
                 }`}>
-                  <div className={`pb-3 border-b ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
+                  <div className={`pb-2.5 border-b ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
                     <div className="flex items-center gap-2">
-                      <FileCode className="h-4.5 w-4.5 text-indigo-400" />
-                      <h3 className={`text-sm font-semibold ${isLight ? "text-slate-800" : "text-white"}`}>
+                      <FileCode className="h-3.5 w-3.5 text-indigo-400" />
+                      <h3 className={`text-xs font-bold ${isLight ? "text-slate-800" : "text-white"}`}>
                         Webhook Configuration
                       </h3>
                     </div>
-                    <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                    <p className="text-[10px] text-slate-500 mt-1 leading-relaxed">
                       Use this URL as your webhook callback in the Meta App Dashboard. It receives lead replies and
                       delivery receipts, which is what powers the Conversations inbox.
                     </p>
                   </div>
 
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-1.5 uppercase tracking-wide">
+                    <label className="block text-[9.5px] font-bold text-slate-500 mb-1 uppercase tracking-wide">
                       Callback URL
                     </label>
                     <div className="flex gap-2">
                       <input
                         readOnly
                         value={webhookUrl}
-                        className={`flex-1 px-3 py-2 text-xs rounded-lg border outline-none font-mono ${
+                        className={`flex-1 px-2.5 py-1.5 text-xs rounded-lg border outline-none font-mono ${
                           isLight
                             ? "bg-slate-50 border-slate-200 text-slate-700"
                             : "bg-slate-900/60 border-slate-800 text-slate-300"
@@ -2131,7 +2131,7 @@ function doGet(e) {
                       />
                       <button
                         onClick={copyWebhookUrl}
-                        className={`px-3.5 py-2 text-xs font-semibold rounded-lg border transition-all cursor-pointer shrink-0 flex items-center gap-1.5 ${
+                        className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all cursor-pointer shrink-0 flex items-center gap-1.5 ${
                           isLight
                             ? "border-slate-200 text-slate-600 hover:bg-slate-50"
                             : "border-slate-800 text-slate-300 hover:bg-slate-850"
@@ -2142,20 +2142,20 @@ function doGet(e) {
                       </button>
                     </div>
                     {webhookUrl.startsWith("http://") && (
-                      <p className="text-[9px] text-amber-400 mt-1.5 flex items-center gap-1">
+                      <p className="text-[9px] text-amber-400 mt-1 flex items-center gap-1">
                         <AlertTriangle className="w-2.5 h-2.5" />
                         Meta requires HTTPS. Set PUBLIC_BASE_URL to your public HTTPS domain.
                       </p>
                     )}
-                    <p className="text-[9px] text-slate-500 mt-1.5">
+                    <p className="text-[9px] text-slate-500 mt-1">
                       Subscribe to the <strong className={isLight ? "text-slate-700" : "text-slate-300"}>messages</strong> field
                       so replies reach your inbox.
                     </p>
                   </div>
 
                   {/* End-to-end delivery test */}
-                  <div className={`border-t pt-4 ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-1.5 uppercase tracking-wide">
+                  <div className={`border-t pt-3 ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
+                    <label className="block text-[9.5px] font-bold text-slate-500 mb-1 uppercase tracking-wide">
                       Send a Test Message
                     </label>
                     <div className="flex gap-2">
@@ -2164,7 +2164,7 @@ function doGet(e) {
                         value={cloudTestPhone}
                         onChange={(e) => setCloudTestPhone(e.target.value)}
                         placeholder="Recipient number with country code"
-                        className={`flex-1 px-3 py-2 text-xs rounded-lg border outline-none transition-all focus:border-indigo-500 ${
+                        className={`flex-1 px-2.5 py-1.5 text-xs rounded-lg border outline-none transition-all focus:border-indigo-500 ${
                           isLight
                             ? "bg-white border-slate-200 text-slate-900 placeholder-slate-400"
                             : "bg-slate-900/60 border-slate-800 text-white placeholder-slate-600"
@@ -2173,13 +2173,13 @@ function doGet(e) {
                       <button
                         onClick={sendCloudTestMessage}
                         disabled={sendingCloudTest || !cloudConfigured}
-                        className="px-4 py-2 bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-400 border border-emerald-500/25 text-xs font-bold rounded-lg cursor-pointer transition-all disabled:opacity-50 shrink-0 flex items-center gap-1.5"
+                        className="px-3 py-1.5 bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-400 border border-emerald-500/25 text-xs font-bold rounded-lg cursor-pointer transition-all disabled:opacity-50 shrink-0 flex items-center gap-1.5"
                       >
-                        {sendingCloudTest ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <MessageCircle className="w-3.5 h-3.5" />}
+                        {sendingCloudTest ? <Loader2 className="w-3 h-3 animate-spin" /> : <MessageCircle className="w-3 h-3" />}
                         {sendingCloudTest ? "Sending..." : "Send Test"}
                       </button>
                     </div>
-                    <p className="text-[9px] text-slate-500 mt-1.5">
+                    <p className="text-[9px] text-slate-500 mt-1">
                       A plain text test only works if that number messaged your business in the last 24 hours.
                       Otherwise WhatsApp requires an approved template.
                     </p>
@@ -2191,8 +2191,8 @@ function doGet(e) {
             )}
           </div>
 
-          <div className="lg:col-span-4 space-y-6">
-            <div className={`p-5 rounded-2xl border font-sans space-y-3.5 ${
+          <div className="lg:col-span-4 space-y-4">
+            <div className={`p-4 rounded-xl border font-sans space-y-2.5 ${
               isLight 
                 ? "bg-indigo-50/50 border-indigo-200 text-indigo-950" 
                 : "bg-indigo-500/5 border-indigo-500/15 text-indigo-400"
@@ -2200,7 +2200,7 @@ function doGet(e) {
               {waProvider === "cloud" ? (
                 <>
                   <div className="flex items-center gap-2">
-                    <Sparkles className="w-4.5 h-4.5 text-indigo-500" />
+                    <Sparkles className="w-4 h-4 text-indigo-500" />
                     <h4 className="font-bold text-xs">Official API Setup Guide</h4>
                   </div>
                   <p className="text-[11px] leading-relaxed">

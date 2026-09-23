@@ -21,15 +21,52 @@
  * changing them is closer to editing brand collateral than to editing a record.
  */
 
-import express, { type Request, type Response } from "express";
+import express, { type Request, type Response, type NextFunction } from "express";
+import multer from "multer";
 import { logger } from "../logger";
 import { resolveTenantContext, requirePermission, ctxOf } from "../tenancy/context";
 import { AiUnavailableError } from "../ai/types";
+import { validateBusinessExtraction } from "../prompts";
 import * as business from "./businessService";
+import {
+  extractTextFromFile,
+  BUSINESS_UPLOAD_MAX_BYTES,
+  UnsupportedFileError,
+} from "./fileIngest";
 
 const router = express.Router();
 
 router.use(resolveTenantContext);
+
+/**
+ * One file per request, capped at the ingest module's own limit and enforced
+ * while streaming so an oversized body is rejected before it is fully buffered.
+ * In-memory storage: the file is parsed and discarded, never written to disk.
+ */
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: BUSINESS_UPLOAD_MAX_BYTES, files: 1 },
+});
+
+/** Runs multer for one field, mapping its errors into our validation envelope. */
+function uploadSingle(field: string) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    upload.single(field)(req, res, (err: any) => {
+      if (!err) return next();
+      if (err instanceof multer.MulterError) {
+        const limitMb = Math.round(BUSINESS_UPLOAD_MAX_BYTES / (1024 * 1024));
+        const message =
+          err.code === "LIMIT_FILE_SIZE"
+            ? `Files must be ${limitMb} MB or smaller.`
+            : err.code === "LIMIT_FILE_COUNT"
+              ? "Upload one file at a time."
+              : `Upload rejected: ${err.message}`;
+        return res.status(400).json({ error: message, code: "validation" });
+      }
+      return next(err);
+    });
+  };
+}
 
 const NOT_FOUND_PRODUCT = { error: "Product not found.", code: "not_found" } as const;
 const NOT_FOUND_SERVICE = { error: "Service not found.", code: "not_found" } as const;
@@ -45,6 +82,9 @@ const MAX_EXTRACTION_CHARS = 60_000;
  * generic 500.
  */
 function fail(res: Response, err: any, context: string) {
+  if (err instanceof UnsupportedFileError) {
+    return res.status(400).json({ error: err.message, code: "validation" });
+  }
   if (err instanceof AiUnavailableError) {
     logger.warn(`${context}: no AI provider available — ${err.message}`);
     return res.status(503).json({
@@ -319,6 +359,109 @@ router.post(
       res.json(result);
     } catch (err) {
       fail(res, err, "Extracting business details");
+    }
+  }
+);
+
+/**
+ * POST /api/business/apply-extraction — apply the exact structured result the
+ * user reviewed, without invoking the model a second time.
+ */
+router.post(
+  "/apply-extraction",
+  requirePermission("MANAGE_BUSINESS_PROFILE"),
+  async (req: Request, res: Response) => {
+    try {
+      const extracted = validateBusinessExtraction(req.body?.extracted);
+      if (!extracted) {
+        return res.status(400).json({
+          error: "The reviewed business extraction is missing or invalid.",
+          code: "validation",
+        });
+      }
+      res.json(await business.applyBusinessExtraction(ctxOf(req), extracted));
+    } catch (err) {
+      fail(res, err, "Applying reviewed business details");
+    }
+  }
+);
+
+/**
+ * POST /api/business/extract-file — extract business details from an uploaded file.
+ *
+ * Accepts a multipart `file` (PDF, Word, PowerPoint, Excel, CSV, text or image)
+ * plus an optional `apply` field. The file is read to text — locally for
+ * documents and spreadsheets, via Gemini vision for images and scanned PDFs —
+ * and then run through the same extraction as the paste-text path, so the
+ * review-then-apply behaviour and the "never overwrite what you filled in"
+ * merge are identical regardless of where the text came from.
+ *
+ * The text actually read is returned as `sourceText` for transparency and for
+ * clients that want to preserve the extracted source alongside the review. The
+ * dashboard applies the validated reviewed structure directly, without running
+ * Gemini a second time.
+ */
+router.post(
+  "/extract-file",
+  requirePermission("MANAGE_BUSINESS_PROFILE"),
+  uploadSingle("file"),
+  async (req: Request, res: Response) => {
+    try {
+      const file = (req as any).file as
+        | { originalname: string; mimetype: string; buffer: Buffer; size: number }
+        | undefined;
+
+      if (!file) {
+        return res.status(400).json({ error: "No file was uploaded.", code: "validation" });
+      }
+
+      const apply = req.body?.apply === "true" || req.body?.apply === true;
+
+      const ingested = await extractTextFromFile({
+        originalName: file.originalname,
+        mimeType: file.mimetype,
+        buffer: file.buffer,
+        size: file.size,
+      });
+
+      // The file was readable but held nothing to work from (a blank scan, an
+      // empty sheet). A 200 with a warning, not an error: the upload did not
+      // break, there was simply nothing there.
+      if (ingested.charCount === 0) {
+        return res.json({
+          extracted: null,
+          applied: false,
+          createdProducts: 0,
+          createdServices: 0,
+          fileName: file.originalname,
+          kind: ingested.kind,
+          charCount: 0,
+          sourceText: "",
+          warning: ingested.warning || "No readable content was found in this file.",
+        });
+      }
+
+      if (ingested.charCount < 40) {
+        return res.status(400).json({
+          error:
+            "This file has very little text — not enough to describe the business. Add more detail or upload a fuller document.",
+          code: "validation",
+        });
+      }
+
+      const sourceText = ingested.text.slice(0, MAX_EXTRACTION_CHARS);
+      const result = await business.extractBusinessKnowledge(ctxOf(req), sourceText, { apply });
+
+      res.json({
+        ...result,
+        fileName: file.originalname,
+        kind: ingested.kind,
+        charCount: ingested.charCount,
+        sourceText,
+        warning: ingested.warning,
+      });
+    } catch (err) {
+      fail(res, err, "Reading the uploaded file");
     }
   }
 );

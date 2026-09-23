@@ -139,6 +139,8 @@ export interface AiCallOptions {
   userId?: string;
   /** Tenant's preferred provider, when they have configured one. */
   preferredProvider?: AiProviderId | null;
+  /** Require one provider and disable fallback for vendor-specific operations. */
+  requiredProvider?: AiProviderId;
   promptName?: string;
   promptVersion?: number;
 }
@@ -173,13 +175,15 @@ export async function generateText(
   request: GenerateRequest,
   options: AiCallOptions
 ): Promise<GenerateResult> {
-  const chain = resolveProviderChain(options.preferredProvider);
+  const chain = options.requiredProvider
+    ? [ALL_PROVIDERS[options.requiredProvider]].filter((provider) => provider.isConfigured())
+    : resolveProviderChain(options.preferredProvider);
 
   if (chain.length === 0) {
-    throw new AiUnavailableError(
-      "No AI provider is configured. Set GEMINI_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY or ANTHROPIC_API_KEY.",
-      []
-    );
+    const message = options.requiredProvider
+      ? `${options.requiredProvider} is required for this operation but is not configured.`
+      : "No AI provider is configured. Set GEMINI_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY or ANTHROPIC_API_KEY.";
+    throw new AiUnavailableError(message, []);
   }
 
   const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;

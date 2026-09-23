@@ -34,7 +34,7 @@ export default function DashboardMockup() {
           ))}
         </div>
         <div className="flex-1 max-w-md bg-white border border-slate-200 rounded-lg h-6 mx-4 flex items-center px-3 justify-between">
-          <span className="text-[10px] text-slate-400 font-mono tracking-tight truncate">https://app.nexaleadai.com/dashboard</span>
+          <span className="text-[10px] text-slate-400 font-mono tracking-tight truncate">https://app.leadgenpilot.com/dashboard</span>
           <span className="text-[9px] text-emerald-600 font-bold flex items-center gap-1 font-mono">
             <span className="w-1 h-1 rounded-full bg-emerald-500 animate-ping" />
             Connected
@@ -50,7 +50,7 @@ export default function DashboardMockup() {
           <div className="space-y-6">
             {/* Logo */}
             <div className="flex items-center px-2">
-              <img src="/logo.png" alt="NexaLeadAi" className="h-5 w-auto object-contain" />
+              <img src="/logo.png" alt="LeadGenPilot" className="h-5 w-auto object-contain" />
             </div>
 
             {/* Navigation links */}

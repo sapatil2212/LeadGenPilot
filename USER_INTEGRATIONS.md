@@ -2,7 +2,7 @@
 
 ## Overview
 
-NexaLeadAi now supports **per-user integrations**, allowing each user to configure their own:
+LeadGenPilot now supports **per-user integrations**, allowing each user to configure their own:
 - **SMTP Email** credentials for outreach campaigns
 - **Google Sheets** webhook URL for lead collection
 - **WhatsApp** API (coming soon)
@@ -289,7 +289,7 @@ The `.env` SMTP and Google Sheet settings remain as fallback/defaults. User-spec
 ```bash
 curl -X POST http://localhost:3000/api/integrations/smtp/test \
   -H "Content-Type: application/json" \
-  -H "Cookie: nexaleadai_session=YOUR_SESSION" \
+  -H "Cookie: leadgenpilot_session=YOUR_SESSION" \
   -d '{
     "host": "smtp.gmail.com",
     "port": 587,
@@ -305,7 +305,7 @@ curl -X POST http://localhost:3000/api/integrations/smtp/test \
 ```bash
 curl -X POST http://localhost:3000/api/integrations/google-sheet/test \
   -H "Content-Type: application/json" \
-  -H "Cookie: nexaleadai_session=YOUR_SESSION" \
+  -H "Cookie: leadgenpilot_session=YOUR_SESSION" \
   -d '{
     "webhookUrl": "https://script.google.com/macros/s/YOUR_SCRIPT/exec"
   }'
@@ -363,4 +363,4 @@ curl -X POST http://localhost:3000/api/integrations/google-sheet/test \
 For issues or questions:
 - Check the logs: `tail -f scraper-log.txt`
 - Review database: `npx prisma studio`
-- Contact support: support@nexaleadai.com
+- Contact support: support@leadgenpilot.com
