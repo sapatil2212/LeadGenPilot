@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>LeadGenPilot · Admin Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;650;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/superadmin-assets/theme.css" />
+  </head>
+  <body>
+    <!--
+      Auth gate. The server already guards every data endpoint, so this overlay
+      is only a spinner until app.js confirms identity via /api/admin/me; the Api
+      layer sends the operator to /superadmin on any 401/403.
+    -->
+    <div id="authGate">
+      <div class="inner">
+        <span class="spinner" style="width: 26px; height: 26px"></span>
+        <div>Verifying your admin session…</div>
+      </div>
+    </div>
+
+    <!-- The shell (sidebar, topbar, page host) is rendered by app.js into #app. -->
+    <div class="app-shell" id="app"></div>
+
+    <div id="toasts"></div>
+
+    <!--
+      Loaded as ordinary same-origin scripts, which the CSP permits without a
+      CDN. Order matters: charts + ui define the primitives, the page modules
+      register themselves on window.Pages, and app.js wires routing last.
+    -->
+    <script src="/superadmin-assets/charts.js"></script>
+    <script src="/superadmin-assets/ui.js"></script>
+    <script src="/superadmin-assets/pages-core.js"></script>
+    <script src="/superadmin-assets/pages-billing.js"></script>
+    <script src="/superadmin-assets/pages-platform.js"></script>
+    <script src="/superadmin-assets/app.js"></script>
+  </body>
+</html>

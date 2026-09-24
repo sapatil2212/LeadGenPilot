@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LeadGenPilot — Superadmin Login</title>
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/favicon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+      position: relative;
+    }
+
+    /* Subtle elegant light backdrop grid */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.05) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(14, 165, 233, 0.04) 0px, transparent 50%),
+        linear-gradient(rgba(148, 163, 184, 0.07) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(148, 163, 184, 0.07) 1px, transparent 1px);
+      background-size: 100% 100%, 100% 100%, 36px 36px, 36px 36px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .card {
+      position: relative;
+      z-index: 1;
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 14px;
+      padding: 24px 22px;
+      width: 100%;
+      max-width: 350px;
+      box-shadow:
+        0 4px 6px -1px rgba(15, 23, 42, 0.03),
+        0 12px 24px -4px rgba(15, 23, 42, 0.06);
+    }
+
+    .page-top-bar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 28px;
+    }
+
+    .back-home-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.72rem;
+      font-weight: 500;
+      color: #64748b;
+      text-decoration: none;
+      transition: color 0.15s ease, transform 0.15s ease;
+      padding: 3px 0;
+    }
+
+    .back-home-link svg {
+      width: 13px;
+      height: 13px;
+      transition: transform 0.15s ease;
+    }
+
+    .back-home-link:hover {
+      color: #0f172a;
+    }
+
+    .back-home-link:hover svg {
+      transform: translateX(-2px);
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: #fef3c7;
+      border: 1px solid #fde68a;
+      color: #92400e;
+      border-radius: 999px;
+      font-size: 0.6rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+    }
+
+    .badge::before {
+      content: '';
+      width: 5px;
+      height: 5px;
+      background: #f59e0b;
+      border-radius: 50%;
+    }
+
+    .brand-wrap {
+      display: flex;
+      align-items: center;
+    }
+
+    .brand-logo {
+      height: 40px;
+      width: auto;
+      max-width: 200px;
+      object-fit: contain;
+      display: block;
+    }
+
+    h1 {
+      font-size: 1.125rem;
+      font-weight: 700;
+      color: #0f172a;
+      margin-bottom: 3px;
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      font-size: 0.75rem;
+      color: #64748b;
+      margin-bottom: 14px;
+      line-height: 1.4;
+    }
+
+    .divider {
+      height: 1px;
+      background: #f1f5f9;
+      margin-bottom: 14px;
+    }
+
+    .form-group {
+      margin-bottom: 11px;
+    }
+
+    label {
+      display: block;
+      font-size: 0.7rem;
+      font-weight: 600;
+      color: #334155;
+      margin-bottom: 4px;
+      letter-spacing: 0.01em;
+    }
+
+    .input-wrap {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    input {
+      width: 100%;
+      height: 34px;
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 7px;
+      padding: 0 10px;
+      font-size: 0.8rem;
+      font-family: inherit;
+      color: #0f172a;
+      transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;
+      outline: none;
+    }
+
+    input::placeholder {
+      color: #94a3b8;
+      font-size: 0.75rem;
+    }
+
+    input:focus {
+      background: #ffffff;
+      border-color: #6366f1;
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+    }
+
+    .input-wrap input {
+      padding-right: 32px;
+    }
+
+    input[type="password"] {
+      letter-spacing: 0.06em;
+    }
+
+    .eye-toggle {
+      position: absolute;
+      right: 3px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 26px;
+      height: 26px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: none;
+      border-radius: 5px;
+      color: #64748b;
+      cursor: pointer;
+      padding: 0;
+      transition: color 0.15s, background-color 0.15s;
+    }
+
+    .eye-toggle:hover {
+      color: #0f172a;
+      background-color: #f1f5f9;
+    }
+
+    .eye-toggle svg {
+      width: 14px;
+      height: 14px;
+      stroke-width: 2;
+    }
+
+    .btn {
+      width: 100%;
+      height: 35px;
+      background: #4f46e5;
+      color: #ffffff;
+      border: none;
+      border-radius: 7px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      margin-top: 14px;
+      box-shadow: 0 1px 2px rgba(79, 70, 229, 0.2);
+      transition: background 0.15s, box-shadow 0.15s, opacity 0.15s, transform 0.05s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .btn:hover {
+      background: #4338ca;
+      box-shadow: 0 2px 4px rgba(79, 70, 229, 0.25);
+    }
+
+    .btn:active {
+      transform: scale(0.99);
+    }
+
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .error-box {
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      color: #b91c1c;
+      border-radius: 7px;
+      padding: 8px 10px;
+      font-size: 0.74rem;
+      margin-top: 11px;
+      display: none;
+      line-height: 1.4;
+    }
+
+    .success-box {
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      color: #15803d;
+      border-radius: 7px;
+      padding: 8px 10px;
+      font-size: 0.74rem;
+      margin-top: 11px;
+      display: none;
+      line-height: 1.4;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 13px;
+      height: 13px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      vertical-align: middle;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="page-top-bar">
+    <div class="brand-wrap">
+      <a href="/" aria-label="LeadGenPilot Home">
+        <img src="/assets/logo/light-logo.png" alt="LeadGenPilot" class="brand-logo" />
+      </a>
+    </div>
+    <a href="/" class="back-home-link" title="Return to Home">
+      <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m12 19-7-7 7-7"/>
+        <path d="M19 12H5"/>
+      </svg>
+      <span>Back to Home</span>
+    </a>
+  </div>
+
+  <div class="card">
+    <span class="badge" style="margin-bottom: 14px;">Superadmin</span>
+
+    <h1>Admin Sign In</h1>
+    <p class="subtitle">Enter your superadmin credentials to access the management portal.</p>
+
+    <div class="divider"></div>
+
+    <form id="loginForm" autocomplete="off">
+      <div class="form-group">
+        <label for="email">Admin Email</label>
+        <input id="email" type="email" placeholder="admin@yourdomain.com" required autocomplete="username" />
+      </div>
+
+      <div class="form-group">
+        <label for="password">Password</label>
+        <div class="input-wrap">
+          <input id="password" type="password" placeholder="••••••••" required autocomplete="current-password" />
+          <button type="button" class="eye-toggle" id="passEyeBtn" onclick="toggleField('password', 'passEyeBtn')" aria-label="Toggle password visibility" title="Show/hide password">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="secret">Superadmin Secret</label>
+        <div class="input-wrap">
+          <input id="secret" type="password" placeholder="SUPERADMIN_SECRET" required autocomplete="off" />
+          <button type="button" class="eye-toggle" id="secretEyeBtn" onclick="toggleField('secret', 'secretEyeBtn')" aria-label="Toggle secret visibility" title="Show/hide secret">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <button type="submit" class="btn" id="submitBtn">Sign in to Admin Panel</button>
+
+      <div class="error-box" id="errorBox"></div>
+      <div class="success-box" id="successBox"></div>
+    </form>
+  </div>
+
+  <script>
+    const form = document.getElementById('loginForm');
+    const submitBtn = document.getElementById('submitBtn');
+    const errorBox = document.getElementById('errorBox');
+    const successBox = document.getElementById('successBox');
+
+    const eyeIconSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
+    const eyeOffIconSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>';
+
+    function toggleField(inputId, btnId) {
+      const input = document.getElementById(inputId);
+      const btn = document.getElementById(btnId);
+      if (!input || !btn) return;
+      if (input.type === 'password') {
+        input.type = 'text';
+        btn.innerHTML = eyeOffIconSvg;
+        btn.setAttribute('aria-label', 'Hide ' + inputId);
+      } else {
+        input.type = 'password';
+        btn.innerHTML = eyeIconSvg;
+        btn.setAttribute('aria-label', 'Show ' + inputId);
+      }
+    }
+
+    // Backward-compatibility alias
+    function toggleSecret() {
+      toggleField('secret', 'secretEyeBtn');
+    }
+
+    function setError(msg) {
+      errorBox.textContent = msg;
+      errorBox.style.display = 'block';
+      successBox.style.display = 'none';
+    }
+
+    function setSuccess(msg) {
+      successBox.textContent = msg;
+      successBox.style.display = 'block';
+      errorBox.style.display = 'none';
+    }
+
+    function clearMessages() {
+      errorBox.style.display = 'none';
+      successBox.style.display = 'none';
+    }
+
+    const loginParams = new URLSearchParams(window.location.search);
+    if (loginParams.get('reason') === 'inactive') {
+      setSuccess('You were signed out after 10 minutes of inactivity.');
+    }
+
+    // Treat the HttpOnly server cookie as the only session authority. If the
+    // operator opens the login URL while their session is still valid, return
+    // them to the console instead of presenting a misleading sign-in form.
+    (async function restoreExistingSession() {
+      // Explicit console logout may intentionally leave an independent ordinary
+      // user session intact; do not immediately bounce back into the console.
+      if (new URLSearchParams(window.location.search).has('signedout')) return;
+      try {
+        const res = await fetch('/api/superadmin/verify', {
+          credentials: 'include',
+          headers: { 'Accept': 'application/json' },
+        });
+        if (res.ok) window.location.replace('/superadmin/dashboard');
+      } catch (_) {
+        // A connectivity failure should leave the form usable for retry.
+      }
+    })();
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      clearMessages();
+
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+      const secret = document.getElementById('secret').value;
+
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = '<span class="spinner"></span><span>Signing in...</span>';
+
+      try {
+        const res = await fetch('/api/superadmin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ email, password, secret }),
+        });
+
+        const data = await res.json();
+
+        if (res.ok && data.success) {
+          setSuccess('Login successful! Redirecting to admin dashboard...');
+          sessionStorage.setItem('superadmin_user', JSON.stringify(data.user));
+          try {
+            localStorage.setItem('leadgenpilot_admin_last_activity', String(Date.now()));
+          } catch (_) {
+            // The dashboard falls back to its in-memory inactivity timer.
+          }
+          setTimeout(() => {
+            window.location.href = '/superadmin/dashboard';
+          }, 400);
+        } else {
+          setError(data.error || 'Login failed. Please check your credentials and secret.');
+        }
+      } catch (err) {
+        setError('Network error. Please check your connection and try again.');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = 'Sign in to Admin Panel';
+      }
+    });
+  </script>
+</body>
+</html>

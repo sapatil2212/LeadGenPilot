@@ -1,0 +1,1556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LeadGenPilot — Automated Google Maps Lead Generation</title>
+  <meta name="description" content="LeadGenPilot automatically scrapes Google Maps to find high-quality local business leads without websites, scores them with AI, and delivers them straight to your Google Sheet in real-time." />
+  <meta name="keywords" content="lead generation, Google Maps scraper, AI leads, local business leads, sales automation, CRM" />
+  <meta property="og:title" content="LeadGenPilot — Automated Lead Generation" />
+  <meta property="og:description" content="Find, score, and reach local business leads automatically with AI-powered Google Maps scraping." />
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/favicon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    /* ── RESET & BASE ─────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --white:      #ffffff;
+      --gray-50:    #f8fafc;
+      --gray-100:   #f1f5f9;
+      --gray-200:   #e2e8f0;
+      --gray-300:   #cbd5e1;
+      --gray-400:   #94a3b8;
+      --gray-500:   #64748b;
+      --gray-600:   #475569;
+      --gray-700:   #334155;
+      --gray-800:   #1e293b;
+      --gray-900:   #0f172a;
+      --blue-50:    #eff6ff;
+      --blue-100:   #dbeafe;
+      --blue-400:   #60a5fa;
+      --blue-500:   #3b82f6;
+      --blue-600:   #2563eb;
+      --blue-700:   #1d4ed8;
+      --indigo-50:  #eef2ff;
+      --indigo-100: #e0e7ff;
+      --indigo-400: #818cf8;
+      --indigo-500: #6366f1;
+      --indigo-600: #4f46e5;
+      --violet-400: #a78bfa;
+      --violet-500: #8b5cf6;
+      --violet-600: #7c3aed;
+      --green-50:   #f0fdf4;
+      --green-400:  #4ade80;
+      --green-500:  #22c55e;
+      --green-600:  #16a34a;
+      --amber-400:  #fbbf24;
+      --amber-500:  #f59e0b;
+      --red-400:    #f87171;
+      --font-sans:  'Plus Jakarta Sans', 'Inter', system-ui, sans-serif;
+      --radius-sm:  6px;
+      --radius-md:  12px;
+      --radius-lg:  20px;
+      --radius-xl:  28px;
+      --shadow-sm:  0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+      --shadow-md:  0 4px 16px rgba(0,0,0,.08), 0 2px 6px rgba(0,0,0,.05);
+      --shadow-lg:  0 12px 40px rgba(0,0,0,.10), 0 4px 16px rgba(0,0,0,.06);
+      --shadow-xl:  0 24px 64px rgba(0,0,0,.12);
+      --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    html { scroll-behavior: smooth; font-size: 16px; }
+    body {
+      font-family: var(--font-sans);
+      background: var(--white);
+      color: var(--gray-800);
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ── UTILITIES ───────────────────────────── */
+    .container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+    .container-sm { max-width: 860px; margin: 0 auto; padding: 0 24px; }
+    .section { padding: 96px 0; }
+    .section-sm { padding: 72px 0; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--indigo-50); color: var(--indigo-600);
+      border: 1px solid var(--indigo-100);
+      font-size: .75rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+      padding: 5px 14px; border-radius: 999px;
+    }
+    .badge svg { width: 14px; height: 14px; }
+    h1,h2,h3,h4,h5,h6 { font-family: var(--font-sans); line-height: 1.2; letter-spacing: -.02em; }
+    h1 { font-size: clamp(2.6rem, 5vw, 4.2rem); font-weight: 800; }
+    h2 { font-size: clamp(2rem, 3.5vw, 3rem); font-weight: 800; }
+    h3 { font-size: 1.25rem; font-weight: 700; }
+    p { line-height: 1.7; }
+    a { color: inherit; text-decoration: none; }
+    img { max-width: 100%; display: block; }
+
+    /* ── BUTTONS ─────────────────────────────── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-family: var(--font-sans); font-size: .9375rem; font-weight: 600;
+      border: none; cursor: pointer; border-radius: var(--radius-md);
+      transition: all var(--transition); text-decoration: none;
+      white-space: nowrap; position: relative; overflow: hidden;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--indigo-600) 0%, var(--violet-600) 100%);
+      color: var(--white); padding: 13px 28px;
+      box-shadow: 0 4px 20px rgba(99,102,241,.35);
+    }
+    .btn-primary::before {
+      content: ''; position: absolute; inset: 0;
+      background: linear-gradient(135deg, rgba(255,255,255,.15) 0%, transparent 60%);
+      opacity: 0; transition: opacity var(--transition);
+    }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 28px rgba(99,102,241,.45); }
+    .btn-primary:hover::before { opacity: 1; }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-secondary {
+      background: var(--white); color: var(--gray-700);
+      border: 1.5px solid var(--gray-200); padding: 12px 26px;
+      box-shadow: var(--shadow-sm);
+    }
+    .btn-secondary:hover { background: var(--gray-50); border-color: var(--gray-300); transform: translateY(-1px); box-shadow: var(--shadow-md); }
+    .btn-outline {
+      background: transparent; color: var(--white);
+      border: 1.5px solid rgba(255,255,255,.35); padding: 12px 26px;
+    }
+    .btn-outline:hover { background: rgba(255,255,255,.1); border-color: rgba(255,255,255,.6); }
+    .btn-lg { padding: 15px 36px; font-size: 1.0625rem; border-radius: var(--radius-lg); }
+    .btn svg { width: 18px; height: 18px; flex-shrink: 0; }
+
+    /* ── NAVBAR ──────────────────────────────── */
+    #navbar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      padding: 0 20px;
+      transition: all .25s cubic-bezier(0.16, 1, 0.3, 1);
+      animation: navEntrance .45s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    @keyframes navEntrance {
+      from { transform: translateY(-20px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    #navbar.scrolled {
+      background: #ffffff;
+      border-bottom: 1px solid rgba(226,232,240,.85);
+      box-shadow: 0 2px 12px rgba(0,0,0,.06);
+    }
+    .nav-inner {
+      max-width: 1200px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      height: 64px;
+    }
+    .nav-logo {
+      display: flex; align-items: center; text-decoration: none;
+      transition: transform .2s ease;
+    }
+    .nav-logo:hover { transform: scale(1.02); }
+    .nav-logo-img {
+      height: 38px; width: auto; object-fit: contain; display: block;
+    }
+
+    .nav-links { display: flex; align-items: center; gap: 2px; }
+    .nav-link {
+      padding: 5px 11px; border-radius: 6px; font-size: 12.5px; font-weight: 500;
+      color: var(--gray-600); text-decoration: none; transition: all .15s ease;
+      position: relative;
+    }
+    .nav-link:hover { background: var(--gray-100); color: var(--gray-900); }
+    .nav-actions { display: flex; align-items: center; gap: 8px; }
+    .btn-nav-secondary {
+      height: 32px; padding: 0 12px; font-size: 12px; font-weight: 500;
+      border-radius: 8px; display: inline-flex; align-items: center; gap: 5px;
+      background: var(--white); border: 1px solid var(--gray-200); color: var(--gray-700);
+      text-decoration: none; transition: all .15s ease;
+    }
+    .btn-nav-secondary:hover { background: var(--gray-50); border-color: var(--gray-300); }
+    .btn-nav-primary {
+      height: 32px; padding: 0 14px; font-size: 12px; font-weight: 600;
+      border-radius: 8px; display: inline-flex; align-items: center; gap: 6px;
+      background: var(--gray-900); color: var(--white); border: none;
+      text-decoration: none; transition: all .15s ease; box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+    }
+    .btn-nav-primary:hover { background: var(--gray-800); transform: translateY(-0.5px); }
+    .btn-nav-primary:active { transform: translateY(0); }
+    .hamburger { display: none; flex-direction: column; gap: 4px; cursor: pointer; padding: 6px; border: 1px solid var(--gray-200); border-radius: 6px; }
+    .hamburger span { display: block; width: 18px; height: 2px; background: var(--gray-700); border-radius: 2px; transition: all .3s; }
+    .mobile-menu {
+      display: none; position: fixed; top: 56px; left: 0; right: 0;
+      background: var(--white); border-bottom: 1px solid var(--gray-100);
+      box-shadow: var(--shadow-lg); z-index: 999; padding: 14px 20px 20px;
+    }
+    .mobile-menu.open { display: flex; flex-direction: column; gap: 4px; }
+    .mobile-nav-link {
+      padding: 12px 16px; border-radius: var(--radius-sm); font-weight: 500;
+      color: var(--gray-700); transition: background var(--transition);
+    }
+    .mobile-nav-link:hover { background: var(--gray-50); }
+
+    /* ── HERO ────────────────────────────────── */
+    #hero {
+      padding: 160px 0 100px;
+      background: linear-gradient(165deg, var(--gray-50) 0%, var(--white) 45%, var(--indigo-50) 100%);
+      position: relative; overflow: hidden;
+    }
+    .hero-bg-blob {
+      position: absolute; border-radius: 50%; filter: blur(80px); pointer-events: none;
+    }
+    .hero-bg-blob-1 {
+      width: 600px; height: 600px;
+      background: radial-gradient(circle, rgba(99,102,241,.12) 0%, transparent 70%);
+      top: -100px; right: -100px;
+    }
+    .hero-bg-blob-2 {
+      width: 500px; height: 500px;
+      background: radial-gradient(circle, rgba(139,92,246,.09) 0%, transparent 70%);
+      bottom: -50px; left: -80px;
+    }
+    .hero-inner { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; align-items: center; position: relative; }
+    .hero-label { margin-bottom: 20px; }
+    .hero-title { color: var(--gray-900); margin-bottom: 24px; }
+    .hero-title .gradient-text {
+      background: linear-gradient(135deg, var(--indigo-600) 0%, var(--violet-500) 50%, var(--blue-500) 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .hero-desc {
+      font-size: 1.125rem; color: var(--gray-500); max-width: 520px; margin-bottom: 36px; line-height: 1.75;
+    }
+    .hero-ctas { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    .hero-trust {
+      margin-top: 44px; display: flex; align-items: center; gap: 16px;
+    }
+    .hero-trust-text { font-size: .85rem; color: var(--gray-400); font-weight: 500; }
+    .hero-trust-stars { display: flex; gap: 2px; }
+    .hero-trust-stars svg { width: 16px; height: 16px; fill: var(--amber-400); color: var(--amber-400); }
+    .hero-visual { position: relative; }
+    .hero-card {
+      background: var(--white);
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-xl);
+      box-shadow: var(--shadow-xl);
+      overflow: hidden;
+      transform: perspective(1200px) rotateY(-6deg) rotateX(3deg);
+      transition: transform .5s ease;
+    }
+    .hero-card:hover { transform: perspective(1200px) rotateY(-2deg) rotateX(1deg); }
+    .hero-card-header {
+      background: linear-gradient(135deg, var(--gray-900), var(--gray-800));
+      padding: 14px 20px; display: flex; align-items: center; gap: 8px;
+    }
+    .traffic-lights { display: flex; gap: 7px; }
+    .tl { width: 12px; height: 12px; border-radius: 50%; }
+    .tl-r { background: #ff5f57; }
+    .tl-y { background: #ffbd2e; }
+    .tl-g { background: #28ca41; }
+    .hero-card-title { font-size: .75rem; font-weight: 600; color: var(--gray-400); margin-left: 6px; letter-spacing: .04em; }
+    .hero-card-body { padding: 20px; }
+    .lead-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px; border-radius: var(--radius-sm);
+      margin-bottom: 8px; gap: 12px;
+      animation: slideInRow .5s ease forwards; opacity: 0;
+      border: 1px solid var(--gray-100);
+    }
+    .lead-row:nth-child(1) { animation-delay: .2s; }
+    .lead-row:nth-child(2) { animation-delay: .4s; background: var(--indigo-50); border-color: var(--indigo-100); }
+    .lead-row:nth-child(3) { animation-delay: .6s; }
+    .lead-row:nth-child(4) { animation-delay: .8s; background: var(--green-50); border-color: #bbf7d0; }
+    .lead-row:nth-child(5) { animation-delay: 1s; }
+    @keyframes slideInRow {
+      from { opacity: 0; transform: translateX(-10px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+    .lead-name { font-size: .8125rem; font-weight: 600; color: var(--gray-800); flex: 1; }
+    .lead-loc { font-size: .75rem; color: var(--gray-400); }
+    .score-pill {
+      font-size: .7rem; font-weight: 700; padding: 3px 10px; border-radius: 999px;
+    }
+    .score-hot { background: linear-gradient(135deg, var(--indigo-500), var(--violet-500)); color: white; }
+    .score-warm { background: var(--amber-400); color: white; }
+    .score-cold { background: var(--gray-200); color: var(--gray-600); }
+    .hero-float-badge {
+      position: absolute; background: var(--white);
+      border: 1px solid var(--gray-200); border-radius: var(--radius-md);
+      padding: 10px 16px; box-shadow: var(--shadow-lg);
+      display: flex; align-items: center; gap: 10px;
+      font-size: .8125rem; font-weight: 600; color: var(--gray-700);
+    }
+    .hero-float-badge svg { width: 20px; height: 20px; }
+    .float-1 { top: -16px; right: -16px; animation: floatBadge 3s ease-in-out infinite; }
+    .float-2 { bottom: 32px; left: -24px; animation: floatBadge 3s ease-in-out infinite .8s; }
+    @keyframes floatBadge {
+      0%, 100% { transform: translateY(0); }
+      50%       { transform: translateY(-6px); }
+    }
+    .float-green { color: var(--green-600); }
+    .float-blue { color: var(--indigo-600); }
+
+    /* ── LOGOS / SOCIAL PROOF BAR ─────────────── */
+    #social-proof {
+      padding: 40px 0;
+      border-top: 1px solid var(--gray-100);
+      border-bottom: 1px solid var(--gray-100);
+      background: var(--white);
+    }
+    .social-proof-label { text-align: center; font-size: .8125rem; color: var(--gray-400); font-weight: 500; margin-bottom: 24px; letter-spacing: .05em; text-transform: uppercase; }
+    .logo-strip { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 40px; }
+    .logo-chip {
+      display: flex; align-items: center; gap: 8px;
+      color: var(--gray-400); font-weight: 700; font-size: .9375rem;
+      letter-spacing: -.02em; transition: color var(--transition);
+    }
+    .logo-chip:hover { color: var(--gray-700); }
+    .logo-chip svg { width: 22px; height: 22px; }
+
+    /* ── STATS ───────────────────────────────── */
+    #stats { background: linear-gradient(135deg, var(--indigo-600) 0%, var(--violet-600) 100%); padding: 72px 0; }
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 40px; }
+    .stat-item { text-align: center; }
+    .stat-number { font-size: clamp(2.2rem, 4vw, 3.2rem); font-weight: 800; color: var(--white); letter-spacing: -.03em; }
+    .stat-label { font-size: .9rem; color: rgba(255,255,255,.65); font-weight: 500; margin-top: 4px; }
+
+    /* ── FEATURES ────────────────────────────── */
+    #features { background: var(--gray-50); }
+    .section-header { text-align: center; max-width: 700px; margin: 0 auto 64px; }
+    .section-header .badge { margin-bottom: 16px; }
+    .section-header h2 { color: var(--gray-900); margin-bottom: 16px; }
+    .section-header p { font-size: 1.0625rem; color: var(--gray-500); }
+    .features-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+    .feature-card {
+      background: var(--white); border: 1px solid var(--gray-200);
+      border-radius: var(--radius-lg); padding: 32px;
+      transition: all .25s ease; position: relative; overflow: hidden;
+    }
+    .feature-card::before {
+      content: ''; position: absolute; inset: 0;
+      background: linear-gradient(135deg, rgba(99,102,241,.04) 0%, transparent 60%);
+      opacity: 0; transition: opacity var(--transition);
+    }
+    .feature-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-lg); border-color: var(--indigo-100); }
+    .feature-card:hover::before { opacity: 1; }
+    .feature-icon {
+      width: 48px; height: 48px; border-radius: var(--radius-md);
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 20px; font-size: 1.25rem;
+    }
+    .feature-card h3 { color: var(--gray-900); margin-bottom: 10px; font-size: 1.0625rem; }
+    .feature-card p { font-size: .9rem; color: var(--gray-500); line-height: 1.65; }
+    .feature-tag {
+      display: inline-block; font-size: .7rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+      padding: 3px 10px; border-radius: 999px; margin-bottom: 12px;
+    }
+    .fi-indigo { background: var(--indigo-50); color: var(--indigo-600); }
+    .fi-violet { background: #ede9fe; color: var(--violet-600); }
+    .fi-blue   { background: var(--blue-50);   color: var(--blue-600); }
+    .fi-green  { background: var(--green-50);  color: var(--green-600); }
+    .fi-amber  { background: #fffbeb; color: #d97706; }
+    .fi-rose   { background: #fff1f2; color: #e11d48; }
+
+    /* ── HOW IT WORKS ────────────────────────── */
+    #how-it-works { background: var(--white); }
+    .steps-container { max-width: 900px; margin: 0 auto; }
+    .step {
+      display: grid; grid-template-columns: 80px 1fr; gap: 32px; align-items: start;
+      padding: 40px 0; position: relative;
+    }
+    .step:not(:last-child)::after {
+      content: ''; position: absolute;
+      left: 39px; top: 88px; width: 2px; bottom: -8px;
+      background: linear-gradient(to bottom, var(--indigo-200), var(--gray-100));
+    }
+    .step-num {
+      width: 80px; height: 80px; border-radius: 50%; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.5rem; font-weight: 800; position: relative;
+    }
+    .step-num-1 { background: linear-gradient(135deg, var(--indigo-500), var(--violet-500)); color: white; box-shadow: 0 8px 24px rgba(99,102,241,.35); }
+    .step-num-2 { background: linear-gradient(135deg, var(--blue-500), var(--indigo-500)); color: white; box-shadow: 0 8px 24px rgba(59,130,246,.30); }
+    .step-num-3 { background: linear-gradient(135deg, var(--violet-500), #c084fc); color: white; box-shadow: 0 8px 24px rgba(139,92,246,.30); }
+    .step-num-4 { background: linear-gradient(135deg, var(--green-500), #34d399); color: white; box-shadow: 0 8px 24px rgba(34,197,94,.30); }
+    .step-content h3 { color: var(--gray-900); margin-bottom: 8px; font-size: 1.125rem; padding-top: 24px; }
+    .step-content p { color: var(--gray-500); font-size: .9375rem; line-height: 1.7; }
+    .step-content .step-detail {
+      margin-top: 14px; padding: 14px 16px;
+      background: var(--gray-50); border: 1px solid var(--gray-200);
+      border-radius: var(--radius-md); font-size: .85rem; color: var(--gray-600);
+    }
+    .step-detail code {
+      background: var(--gray-200); padding: 2px 7px; border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace; font-size: .8rem; color: var(--indigo-600);
+    }
+
+    /* ── SCORING ─────────────────────────────── */
+    #scoring {
+      background: linear-gradient(165deg, var(--gray-900) 0%, var(--indigo-600) 100%);
+      position: relative; overflow: hidden;
+    }
+    #scoring .section-header h2 { color: white; }
+    #scoring .section-header p { color: rgba(255,255,255,.6); }
+    #scoring .badge { background: rgba(255,255,255,.1); color: rgba(255,255,255,.8); border-color: rgba(255,255,255,.2); }
+    .scoring-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; align-items: center; }
+    .score-bars { display: flex; flex-direction: column; gap: 20px; }
+    .score-bar-item { }
+    .score-bar-label { display: flex; justify-content: space-between; margin-bottom: 8px; }
+    .score-bar-label span { font-size: .875rem; font-weight: 600; color: rgba(255,255,255,.85); }
+    .score-bar-label em { font-style: normal; font-size: .875rem; font-weight: 700; color: white; }
+    .score-bar-track {
+      height: 10px; background: rgba(255,255,255,.1); border-radius: 999px; overflow: hidden;
+    }
+    .score-bar-fill {
+      height: 100%; border-radius: 999px;
+      transition: width 1.5s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    .bar-indigo { background: linear-gradient(90deg, var(--indigo-400), var(--violet-400)); }
+    .bar-blue   { background: linear-gradient(90deg, var(--blue-400), var(--indigo-400)); }
+    .bar-violet { background: linear-gradient(90deg, var(--violet-400), #f0abfc); }
+    .bar-green  { background: linear-gradient(90deg, var(--green-400), #34d399); }
+    .score-visual {
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: var(--radius-xl); padding: 32px;
+      display: flex; flex-direction: column; gap: 14px;
+    }
+    .score-visual-title { font-size: .8rem; font-weight: 600; color: rgba(255,255,255,.5); letter-spacing: .05em; text-transform: uppercase; margin-bottom: 4px; }
+    .mock-lead-card {
+      background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.1);
+      border-radius: var(--radius-md); padding: 16px 18px;
+    }
+    .mlc-name { font-size: .9rem; font-weight: 700; color: white; margin-bottom: 4px; }
+    .mlc-meta { font-size: .78rem; color: rgba(255,255,255,.45); margin-bottom: 12px; }
+    .mlc-scores { display: flex; flex-wrap: wrap; gap: 8px; }
+    .mlc-score-tag {
+      font-size: .7rem; font-weight: 600; padding: 3px 10px; border-radius: 999px;
+      border: 1px solid rgba(255,255,255,.15); color: rgba(255,255,255,.75);
+    }
+    .mlc-score-tag.active { background: linear-gradient(135deg, var(--indigo-500), var(--violet-500)); border-color: transparent; color: white; }
+    .mlc-total { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.1); }
+    .mlc-total-label { font-size: .8rem; color: rgba(255,255,255,.5); }
+    .mlc-total-score { font-size: 1.5rem; font-weight: 800; background: linear-gradient(135deg, var(--indigo-300), var(--violet-300)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+
+    /* ── TESTIMONIALS ────────────────────────── */
+    #testimonials { background: var(--gray-50); }
+    .testimonials-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+    .testimonial-card {
+      background: var(--white); border: 1px solid var(--gray-200);
+      border-radius: var(--radius-lg); padding: 32px;
+      transition: all .25s ease;
+    }
+    .testimonial-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-lg); }
+    .testimonial-stars { display: flex; gap: 3px; margin-bottom: 16px; }
+    .testimonial-stars svg { width: 16px; height: 16px; fill: var(--amber-400); color: var(--amber-400); }
+    .testimonial-text { font-size: .9375rem; color: var(--gray-600); line-height: 1.7; margin-bottom: 20px; }
+    .testimonial-author { display: flex; align-items: center; gap: 12px; }
+    .author-avatar {
+      width: 40px; height: 40px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: .875rem; color: white;
+      flex-shrink: 0;
+    }
+    .author-name { font-weight: 700; font-size: .875rem; color: var(--gray-900); }
+    .author-role { font-size: .8rem; color: var(--gray-400); }
+
+    /* ── PRICING ─────────────────────────────── */
+    #pricing { background: var(--white); }
+    .pricing-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; max-width: 1000px; margin: 0 auto; }
+    .pricing-card {
+      border: 1.5px solid var(--gray-200); border-radius: var(--radius-xl);
+      padding: 36px 32px; position: relative; transition: all .25s ease;
+    }
+    .pricing-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-lg); }
+    .pricing-card.featured {
+      border-color: var(--indigo-400);
+      background: linear-gradient(165deg, var(--indigo-50) 0%, white 100%);
+      box-shadow: 0 0 0 4px rgba(99,102,241,.08), var(--shadow-lg);
+    }
+    .pricing-badge {
+      position: absolute; top: -13px; left: 50%; transform: translateX(-50%);
+      background: linear-gradient(135deg, var(--indigo-500), var(--violet-500));
+      color: white; font-size: .75rem; font-weight: 700; padding: 5px 20px; border-radius: 999px;
+      letter-spacing: .04em; text-transform: uppercase; white-space: nowrap;
+    }
+    .pricing-name { font-size: .875rem; font-weight: 700; color: var(--gray-500); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+    .pricing-price { display: flex; align-items: baseline; gap: 6px; margin-bottom: 8px; }
+    .price-amount { font-size: 3rem; font-weight: 800; color: var(--gray-900); letter-spacing: -.04em; }
+    .price-period { font-size: .9rem; color: var(--gray-400); font-weight: 500; }
+    .pricing-desc { font-size: .875rem; color: var(--gray-500); margin-bottom: 28px; line-height: 1.6; }
+    .pricing-divider { border: none; border-top: 1px solid var(--gray-100); margin: 24px 0; }
+    .pricing-features { list-style: none; display: flex; flex-direction: column; gap: 10px; margin-bottom: 28px; }
+    .pricing-features li { display: flex; align-items: center; gap: 10px; font-size: .9rem; color: var(--gray-600); }
+    .pricing-features li svg { width: 16px; height: 16px; color: var(--green-500); flex-shrink: 0; }
+    .pricing-features li.disabled { opacity: .45; }
+    .pricing-features li.disabled svg { color: var(--gray-400); }
+    .pricing-cta { width: 100%; text-align: center; justify-content: center; }
+
+    /* ── FAQ ─────────────────────────────────── */
+    #faq { background: var(--gray-50); }
+    .faq-grid { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+    .faq-item {
+      background: var(--white); border: 1px solid var(--gray-200);
+      border-radius: var(--radius-md); overflow: hidden;
+    }
+    .faq-question {
+      width: 100%; display: flex; justify-content: space-between; align-items: center;
+      padding: 20px 24px; background: none; border: none; cursor: pointer;
+      text-align: left; font-family: var(--font-sans); font-size: .9375rem;
+      font-weight: 600; color: var(--gray-900); transition: background var(--transition);
+    }
+    .faq-question:hover { background: var(--gray-50); }
+    .faq-icon { width: 22px; height: 22px; color: var(--gray-400); flex-shrink: 0; transition: transform .3s ease; }
+    .faq-item.open .faq-icon { transform: rotate(45deg); color: var(--indigo-500); }
+    .faq-answer {
+      max-height: 0; overflow: hidden; transition: max-height .35s ease, padding .35s ease;
+      padding: 0 24px; font-size: .9rem; color: var(--gray-500); line-height: 1.7;
+    }
+    .faq-item.open .faq-answer { max-height: 300px; padding: 0 24px 20px; }
+
+    /* ── CTA BANNER ──────────────────────────── */
+    #cta-banner {
+      background: linear-gradient(135deg, var(--indigo-600) 0%, var(--violet-600) 100%);
+      padding: 100px 0; text-align: center; position: relative; overflow: hidden;
+    }
+    #cta-banner::before {
+      content: ''; position: absolute; inset: 0;
+      background: url("data:image/svg+xml,%3Csvg width='60' height='60' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M0 0h60v60H0z' fill='none'/%3E%3Ccircle cx='30' cy='30' r='1' fill='rgba(255,255,255,.06)'/%3E%3C/svg%3E") repeat;
+    }
+    .cta-banner-inner { position: relative; }
+    #cta-banner h2 { color: white; margin-bottom: 20px; }
+    #cta-banner p { color: rgba(255,255,255,.7); font-size: 1.125rem; margin-bottom: 36px; max-width: 560px; margin-left: auto; margin-right: auto; }
+    .cta-btns { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+
+    /* ── FOOTER ──────────────────────────────── */
+    #footer {
+      background: var(--gray-900); color: var(--gray-300);
+      padding: 72px 0 36px;
+    }
+    .footer-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1.4fr; gap: 36px; margin-bottom: 56px; }
+    .footer-brand { }
+    .footer-logo { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 1.125rem; color: white; letter-spacing: -.03em; margin-bottom: 14px; }
+    .footer-logo-mark { width: 36px; height: 36px; background: linear-gradient(135deg, var(--indigo-500), var(--violet-500)); border-radius: 10px; display: flex; align-items: center; justify-content: center; }
+    .footer-logo-mark svg { width: 20px; height: 20px; color: white; }
+    .footer-desc { font-size: .9rem; color: var(--gray-400); line-height: 1.7; max-width: 260px; margin-bottom: 24px; }
+    .footer-socials { display: flex; gap: 12px; }
+    .social-btn {
+      width: 38px; height: 38px; border-radius: var(--radius-sm);
+      background: var(--gray-800); color: var(--gray-400);
+      display: flex; align-items: center; justify-content: center;
+      transition: all var(--transition); border: 1px solid var(--gray-700);
+    }
+    .social-btn:hover { background: var(--indigo-600); color: white; border-color: transparent; }
+    .social-btn svg { width: 16px; height: 16px; }
+    .footer-col h4 { font-size: .8125rem; font-weight: 700; color: white; text-transform: uppercase; letter-spacing: .07em; margin-bottom: 16px; }
+    .footer-links { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+    .footer-links li a { font-size: .875rem; color: var(--gray-400); transition: color var(--transition); }
+    .footer-links li a:hover { color: var(--indigo-400); }
+    .footer-contact-list { list-style: none; display: flex; flex-direction: column; gap: 12px; }
+    .contact-label { display: block; font-size: 0.6875rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray-500); margin-bottom: 2px; }
+    .contact-item { font-size: 0.8125rem; color: var(--gray-300); display: flex; align-items: flex-start; gap: 8px; line-height: 1.5; }
+    .contact-item a { color: var(--gray-300); text-decoration: none; transition: color var(--transition); word-break: break-all; }
+    .contact-item a:hover { color: var(--indigo-400); }
+    .contact-item svg { width: 14px; height: 14px; color: var(--indigo-400); flex-shrink: 0; margin-top: 3px; }
+    .footer-bottom {
+      border-top: 1px solid var(--gray-800); padding-top: 28px;
+      display: flex; justify-content: space-between; align-items: center; flex-wrap: gap-16px;
+    }
+    .footer-copyright { font-size: .8125rem; color: var(--gray-500); }
+    .footer-bottom-links { display: flex; gap: 24px; }
+    .footer-bottom-links a { font-size: .8125rem; color: var(--gray-500); transition: color var(--transition); }
+    .footer-bottom-links a:hover { color: var(--gray-300); }
+
+    /* ── ANIMATIONS ──────────────────────────── */
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(24px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fade-up {
+      opacity: 0; animation: fadeInUp .7s ease forwards;
+    }
+    .delay-100 { animation-delay: .1s; }
+    .delay-200 { animation-delay: .2s; }
+    .delay-300 { animation-delay: .3s; }
+    .delay-400 { animation-delay: .4s; }
+    .delay-500 { animation-delay: .5s; }
+    .reveal {
+      opacity: 0; transform: translateY(28px); transition: opacity .7s ease, transform .7s ease;
+    }
+    .reveal.visible { opacity: 1; transform: translateY(0); }
+
+    /* ── RESPONSIVE ──────────────────────────── */
+    @media (max-width: 1024px) {
+      .features-grid { grid-template-columns: repeat(2, 1fr); }
+      .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 32px; }
+      .footer-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 768px) {
+      .section { padding: 72px 0; }
+      .nav-links, .nav-actions .btn-secondary { display: none; }
+      .hamburger { display: flex; }
+      .hero-inner { grid-template-columns: 1fr; gap: 48px; }
+      .hero-visual { display: none; }
+      .hero-desc { max-width: 100%; }
+      .features-grid { grid-template-columns: 1fr; }
+      .scoring-grid { grid-template-columns: 1fr; }
+      .testimonials-grid { grid-template-columns: 1fr; }
+      .pricing-grid { grid-template-columns: 1fr; max-width: 400px; margin: 0 auto; }
+      .footer-grid { grid-template-columns: 1fr; gap: 32px; }
+      .footer-bottom { flex-direction: column; gap: 16px; text-align: center; }
+      .steps-container .step { grid-template-columns: 60px 1fr; gap: 20px; }
+      .step-num { width: 60px; height: 60px; font-size: 1.25rem; }
+      .step:not(:last-child)::after { left: 29px; top: 68px; }
+    }
+    @media (max-width: 480px) {
+      h1 { font-size: 2.2rem; }
+      .hero-ctas { flex-direction: column; }
+      .hero-ctas .btn { width: 100%; justify-content: center; }
+      .stats-grid { grid-template-columns: 1fr 1fr; gap: 24px; }
+    }
+
+    /* ── SCROLL PROGRESS BAR ─────────────────── */
+    #progress-bar {
+      position: fixed; top: 0; left: 0; height: 3px; z-index: 9999;
+      background: linear-gradient(90deg, var(--indigo-500), var(--violet-500));
+      width: 0%; transition: width .1s linear;
+    }
+  </style>
+</head>
+
+<body>
+
+<!-- SCROLL PROGRESS -->
+<div id="progress-bar"></div>
+
+<!-- ═══════════════════════════ NAVBAR ═══════════════════════════ -->
+<nav id="navbar">
+  <div class="nav-inner">
+    <!-- Logo -->
+    <a href="#" class="nav-logo" aria-label="LeadGenPilot Home">
+      <img src="/assets/logo/light-logo.png" alt="LeadGenPilot" class="nav-logo-img" id="nav-logo-img" />
+    </a>
+
+    <!-- Desktop Nav Links -->
+    <div class="nav-links" role="navigation" aria-label="Main navigation">
+      <a href="#features" class="nav-link">Features</a>
+      <a href="#how-it-works" class="nav-link">How it works</a>
+      <a href="#scoring" class="nav-link">Scoring</a>
+      <a href="#pricing" class="nav-link">Pricing</a>
+      <a href="#faq" class="nav-link">FAQ</a>
+    </div>
+
+    <!-- Desktop Actions -->
+    <div class="nav-actions">
+      <a href="/app?mode=signin" class="btn-nav-secondary" id="nav-signin">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px;opacity:0.75;"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+        Log In
+      </a>
+      <a href="/app?mode=signup" class="btn-nav-primary nav-cta">
+        <span>Get Started</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="width:13px;height:13px;"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+      </a>
+    </div>
+
+    <!-- Hamburger -->
+    <button class="hamburger" id="hamburger-btn" aria-label="Toggle menu" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+</nav>
+
+<!-- Mobile Menu -->
+<div class="mobile-menu" id="mobile-menu" role="navigation" aria-label="Mobile navigation">
+  <a href="#features"    class="mobile-nav-link">Features</a>
+  <a href="#how-it-works" class="mobile-nav-link">How it works</a>
+  <a href="#scoring"     class="mobile-nav-link">Lead Scoring</a>
+  <a href="#pricing"     class="mobile-nav-link">Pricing</a>
+  <a href="#faq"         class="mobile-nav-link">FAQ</a>
+  <div style="padding: 10px 0 4px; display:grid; grid-template-columns: 1fr 1fr; gap:8px;">
+    <a href="/app?mode=signin" class="btn-nav-secondary" style="justify-content:center;">Log In</a>
+    <a href="/app?mode=signup" class="btn-nav-primary" style="justify-content:center;">Get Started</a>
+  </div>
+</div>
+
+<!-- ═══════════════════════════ HERO ══════════════════════════════ -->
+<section id="hero">
+  <div class="hero-bg-blob hero-bg-blob-1"></div>
+  <div class="hero-bg-blob hero-bg-blob-2"></div>
+  <div class="container">
+    <div class="hero-inner">
+      <!-- Left: Copy -->
+      <div>
+        <div class="hero-label animate-fade-up">
+          <span class="badge" aria-label="Powered by AI">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2Z"/><path d="M8 12h8M12 8v8"/></svg>
+            AI-Powered · Google Maps Automation
+          </span>
+        </div>
+        <h1 class="hero-title animate-fade-up delay-100">
+          Find Hot Leads<br/>
+          <span class="gradient-text">Automatically</span><br/>
+          with AI
+        </h1>
+        <p class="hero-desc animate-fade-up delay-200">
+          LeadGenPilot scans Google Maps to surface high-intent local businesses without a web presence — scores them with AI, and delivers qualified leads straight to your Google Sheet in real-time.
+        </p>
+        <div class="hero-ctas animate-fade-up delay-300">
+          <a href="#cta-banner" class="btn btn-primary btn-lg" id="hero-cta-primary">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            Start for Free
+          </a>
+          <a href="/app" class="btn btn-secondary btn-lg" id="hero-cta-secondary">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+            Open Dashboard
+          </a>
+        </div>
+        <div class="hero-trust animate-fade-up delay-400">
+          <div class="hero-trust-stars" aria-label="5 star rating">
+            <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+            <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+            <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+            <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+            <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          </div>
+          <span class="hero-trust-text">Trusted by 500+ sales teams &amp; agencies</span>
+        </div>
+      </div>
+
+      <!-- Right: Visual Card -->
+      <div class="hero-visual animate-fade-up delay-200">
+        <div class="hero-card">
+          <div class="hero-card-header">
+            <div class="traffic-lights">
+              <div class="tl tl-r"></div>
+              <div class="tl tl-y"></div>
+              <div class="tl tl-g"></div>
+            </div>
+            <span class="hero-card-title">LeadGenPilot — LIVE RESULTS</span>
+          </div>
+          <div class="hero-card-body">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+              <span style="font-size:.75rem;font-weight:700;color:var(--gray-400);text-transform:uppercase;letter-spacing:.05em;">Leads Found</span>
+              <span style="font-size:.75rem;font-weight:600;background:var(--green-50);color:var(--green-600);padding:3px 10px;border-radius:999px;border:1px solid #bbf7d0;">● Live</span>
+            </div>
+            <div class="lead-row">
+              <div>
+                <div class="lead-name">Sunrise Dental Clinic</div>
+                <div class="lead-loc">📍 Baner, Pune · ⭐ 4.8 · 234 reviews</div>
+              </div>
+              <span class="score-pill score-hot">HOT 95</span>
+            </div>
+            <div class="lead-row">
+              <div>
+                <div class="lead-name">Greenleaf Physiotherapy</div>
+                <div class="lead-loc">📍 Kothrud, Pune · ⭐ 4.6 · 128 reviews</div>
+              </div>
+              <span class="score-pill score-hot">HOT 90</span>
+            </div>
+            <div class="lead-row">
+              <div>
+                <div class="lead-name">Apex Eye Care Centre</div>
+                <div class="lead-loc">📍 Shivaji Nagar · ⭐ 4.3 · 89 reviews</div>
+              </div>
+              <span class="score-pill score-warm">WARM 70</span>
+            </div>
+            <div class="lead-row">
+              <div>
+                <div class="lead-name">City Yoga Studio</div>
+                <div class="lead-loc">📍 Viman Nagar · ⭐ 4.9 · 312 reviews</div>
+              </div>
+              <span class="score-pill score-hot">HOT 100</span>
+            </div>
+            <div class="lead-row">
+              <div>
+                <div class="lead-name">Heritage Bakery & Cafe</div>
+                <div class="lead-loc">📍 Kalyani Nagar · ⭐ 4.1 · 56 reviews</div>
+              </div>
+              <span class="score-pill score-cold">COLD 50</span>
+            </div>
+            <div style="margin-top:16px;padding:12px 14px;background:var(--indigo-50);border-radius:var(--radius-md);border:1px solid var(--indigo-100);display:flex;justify-content:space-between;">
+              <span style="font-size:.8rem;color:var(--indigo-600);font-weight:600;">✓ Synced to Google Sheets</span>
+              <span style="font-size:.8rem;color:var(--gray-500);">5 leads · just now</span>
+            </div>
+          </div>
+        </div>
+        <!-- Floating badges -->
+        <div class="hero-float-badge float-1">
+          <svg class="float-green" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+          <span>No Website Detected</span>
+        </div>
+        <div class="hero-float-badge float-2">
+          <svg class="float-blue" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+          <span>AI Score: 95/100</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ SOCIAL PROOF ═════════════════════ -->
+<section id="social-proof">
+  <div class="container">
+    <p class="social-proof-label">Integrates with tools you already use</p>
+    <div class="logo-strip">
+      <!-- Google Sheets -->
+      <div class="logo-chip" aria-label="Google Sheets">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>
+        Google Sheets
+      </div>
+      <!-- WhatsApp -->
+      <div class="logo-chip" aria-label="WhatsApp">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+        WhatsApp
+      </div>
+      <!-- Gmail / SMTP -->
+      <div class="logo-chip" aria-label="Email SMTP">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+        Email / SMTP
+      </div>
+      <!-- Google Maps -->
+      <div class="logo-chip" aria-label="Google Maps">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>
+        Google Maps
+      </div>
+      <!-- Google AI / Gemini -->
+      <div class="logo-chip" aria-label="Google Gemini AI">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M8 12h8M12 8v8"/></svg>
+        Gemini AI
+      </div>
+      <!-- Playwright -->
+      <div class="logo-chip" aria-label="Playwright">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+        Playwright
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════ FEATURES ═════════════════════════ -->
+<section id="features" class="section">
+  <div class="container">
+    <div class="section-header reveal">
+      <span class="badge">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        Everything You Need
+      </span>
+      <h2>Built for Serious Lead Generation</h2>
+      <p>A complete automation stack — from scraping to outreach — with AI intelligence at every step.</p>
+    </div>
+    <div class="features-grid">
+
+      <!-- 1 -->
+      <div class="feature-card reveal">
+        <div class="feature-icon fi-indigo">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--indigo-600)" stroke-width="2.2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        </div>
+        <span class="feature-tag fi-indigo">Scraping</span>
+        <h3>Google Maps Automation</h3>
+        <p>Playwright-powered headless Chromium scans any business type and location, extracting name, phone, address, rating, reviews, and social handles.</p>
+      </div>
+
+      <!-- 2 -->
+      <div class="feature-card reveal">
+        <div class="feature-icon fi-violet">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--violet-600)" stroke-width="2.2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M8 12h8M12 8v8"/></svg>
+        </div>
+        <span class="feature-tag fi-violet">AI</span>
+        <h3>Gemini AI Insights</h3>
+        <p>Each lead receives an AI-generated insight summarizing opportunity gaps, digital presence weaknesses, and recommended outreach angles.</p>
+      </div>
+
+      <!-- 3 -->
+      <div class="feature-card reveal">
+        <div class="feature-icon fi-blue">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--blue-600)" stroke-width="2.2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        </div>
+        <span class="feature-tag fi-blue">Scoring</span>
+        <h3>Smart Lead Scoring</h3>
+        <p>Every lead is scored 0–100 based on website presence, review count, star rating, and phone availability — so you focus on the hottest prospects.</p>
+      </div>
+
+      <!-- 4 -->
+      <div class="feature-card reveal">
+        <div class="feature-icon fi-green">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--green-600)" stroke-width="2.2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>
+        </div>
+        <span class="feature-tag fi-green">Delivery</span>
+        <h3>Real-Time Google Sheets Sync</h3>
+        <p>Leads flow directly to your Google Sheet via Apps Script webhooks the moment they're scored — no manual exports, no CSV uploads.</p>
+      </div>
+
+      <!-- 5 -->
+      <div class="feature-card reveal">
+        <div class="feature-icon fi-amber">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2.2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+        </div>
+        <span class="feature-tag fi-amber">Outreach</span>
+        <h3>Email & WhatsApp Outreach</h3>
+        <p>Send AI-crafted personalized email and WhatsApp messages directly from the dashboard. Track delivery status and follow-up history in your sheet.</p>
+      </div>
+
+      <!-- 6 -->
+      <div class="feature-card reveal">
+        <div class="feature-icon fi-rose">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#e11d48" stroke-width="2.2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        </div>
+        <span class="feature-tag fi-rose">Reliability</span>
+        <h3>Deduplication & Failure Safety</h3>
+        <p>Built-in hash-based deduplication prevents billing duplicates. 3-retry webhook delivery with offline fallback storage ensures zero lead loss.</p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ HOW IT WORKS ════════════════════ -->
+<section id="how-it-works" class="section" style="background:var(--white);">
+  <div class="container">
+    <div class="section-header reveal">
+      <span class="badge">Simple Setup</span>
+      <h2>3 Steps to Leads</h2>
+      <p>Connect Google Sheets once and extract verified B2B leads.</p>
+    </div>
+    <div class="steps-container">
+
+      <div class="step reveal">
+        <div class="step-num step-num-1">1</div>
+        <div class="step-content">
+          <h3>Target Setup</h3>
+          <p>Set business type and location.</p>
+        </div>
+      </div>
+
+      <div class="step reveal">
+        <div class="step-num step-num-2">2</div>
+        <div class="step-content">
+          <h3>Connect Sheets</h3>
+          <p>Paste Webhook URL once.</p>
+        </div>
+      </div>
+
+      <div class="step reveal">
+        <div class="step-num step-num-3">3</div>
+        <div class="step-content">
+          <h3>Launch Scraper</h3>
+          <p>Start scan to collect leads.</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ SCORING ═════════════════════════ -->
+<section id="scoring" class="section">
+  <div class="container">
+    <div class="scoring-grid">
+      <div>
+        <div class="section-header reveal" style="text-align:left;max-width:none;margin-bottom:40px;">
+          <span class="badge">Algorithm</span>
+          <h2 style="margin-top:12px;">AI Lead Scoring<br/>Out of 100</h2>
+          <p style="margin-top:12px;">Every lead is automatically evaluated across four key dimensions so your team spends time only on the highest-value prospects.</p>
+        </div>
+        <div class="score-bars reveal">
+          <div class="score-bar-item">
+            <div class="score-bar-label">
+              <span>No Website Detected</span>
+              <em>+50 pts</em>
+            </div>
+            <div class="score-bar-track">
+              <div class="score-bar-fill bar-indigo" style="width:0%" data-width="50%"></div>
+            </div>
+          </div>
+          <div class="score-bar-item">
+            <div class="score-bar-label">
+              <span>Reviews &gt; 100</span>
+              <em>+20 pts</em>
+            </div>
+            <div class="score-bar-track">
+              <div class="score-bar-fill bar-blue" style="width:0%" data-width="20%"></div>
+            </div>
+          </div>
+          <div class="score-bar-item">
+            <div class="score-bar-label">
+              <span>Rating &gt; 4.5 Stars</span>
+              <em>+20 pts</em>
+            </div>
+            <div class="score-bar-track">
+              <div class="score-bar-fill bar-violet" style="width:0%" data-width="20%"></div>
+            </div>
+          </div>
+          <div class="score-bar-item">
+            <div class="score-bar-label">
+              <span>Working Phone Line</span>
+              <em>+10 pts</em>
+            </div>
+            <div class="score-bar-track">
+              <div class="score-bar-fill bar-green" style="width:0%" data-width="10%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="score-visual reveal">
+        <div class="score-visual-title">Sample Lead Score Breakdown</div>
+        <div class="mock-lead-card">
+          <div class="mlc-name">Sunrise Dental Clinic</div>
+          <div class="mlc-meta">📍 Baner, Pune &nbsp;·&nbsp; ⭐ 4.8 (234 reviews)</div>
+          <div class="mlc-scores">
+            <span class="mlc-score-tag active">✓ No Website +50</span>
+            <span class="mlc-score-tag active">✓ Reviews &gt;100 +20</span>
+            <span class="mlc-score-tag active">✓ Stars &gt;4.5 +20</span>
+            <span class="mlc-score-tag active">✓ Phone +10</span>
+          </div>
+          <div class="mlc-total">
+            <span class="mlc-total-label">Total Lead Score</span>
+            <span class="mlc-total-score">100 / 100</span>
+          </div>
+        </div>
+        <div class="mock-lead-card" style="opacity:.7;">
+          <div class="mlc-name">Apex Eye Care Centre</div>
+          <div class="mlc-meta">📍 Shivaji Nagar &nbsp;·&nbsp; ⭐ 4.3 (89 reviews)</div>
+          <div class="mlc-scores">
+            <span class="mlc-score-tag active">✓ No Website +50</span>
+            <span class="mlc-score-tag">✗ Reviews &lt;100</span>
+            <span class="mlc-score-tag">✗ Stars &lt;4.5</span>
+            <span class="mlc-score-tag active">✓ Phone +10</span>
+          </div>
+          <div class="mlc-total">
+            <span class="mlc-total-label">Total Lead Score</span>
+            <span class="mlc-total-score">60 / 100</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ TESTIMONIALS ════════════════════ -->
+<section id="testimonials" class="section">
+  <div class="container">
+    <div class="section-header reveal">
+      <span class="badge">Customer Stories</span>
+      <h2>Loved by Sales Teams &amp; Agencies</h2>
+      <p>Real results from real users who've transformed their lead generation with LeadGenPilot.</p>
+    </div>
+    <div class="testimonials-grid">
+
+      <div class="testimonial-card reveal">
+        <div class="testimonial-stars" aria-label="5 stars">
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+        </div>
+        <p class="testimonial-text">"We went from spending 4 hours manually sourcing leads per day to having 200+ qualified HOT leads in our sheet every morning. The AI scoring is incredibly accurate — every 90+ scored lead we contacted converted."</p>
+        <div class="testimonial-author">
+          <div class="author-avatar" style="background:linear-gradient(135deg,var(--indigo-500),var(--violet-500));">RK</div>
+          <div>
+            <div class="author-name">Rahul Kapoor</div>
+            <div class="author-role">Sales Director, WebPitch Agency</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="testimonial-card reveal">
+        <div class="testimonial-stars" aria-label="5 stars">
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+        </div>
+        <p class="testimonial-text">"The WhatsApp outreach feature is a game-changer. Personalized messages go out automatically and I can track who replied directly in my sheet. Closed 11 website clients in my first month!"</p>
+        <div class="testimonial-author">
+          <div class="author-avatar" style="background:linear-gradient(135deg,var(--blue-500),var(--indigo-500));">PS</div>
+          <div>
+            <div class="author-name">Priya Sharma</div>
+            <div class="author-role">Freelance Web Designer, Pune</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="testimonial-card reveal">
+        <div class="testimonial-stars" aria-label="5 stars">
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          <svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+        </div>
+        <p class="testimonial-text">"Setup took 10 minutes. The deduplication is excellent — we've scraped the same city multiple times and never got a single duplicate in our sheet. The reliability is unmatched."</p>
+        <div class="testimonial-author">
+          <div class="author-avatar" style="background:linear-gradient(135deg,var(--green-500),#34d399);">AM</div>
+          <div>
+            <div class="author-name">Arjun Mehta</div>
+            <div class="author-role">Growth Lead, DigitalBoost Co.</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ PRICING ═════════════════════════ -->
+<section id="pricing" class="section" style="background:var(--gray-50);">
+  <div class="container">
+    <div class="section-header reveal">
+      <span class="badge">Pricing</span>
+      <h2>Simple, Transparent Pricing</h2>
+      <p>Start free and scale as your lead generation grows. No hidden fees, no surprises.</p>
+    </div>
+    <div class="pricing-grid">
+
+      <!-- Starter -->
+      <div class="pricing-card reveal">
+        <div class="pricing-name">Starter</div>
+        <div class="pricing-price">
+          <span class="price-amount">Free</span>
+        </div>
+        <p class="pricing-desc">Perfect for solo freelancers testing the waters. No credit card required.</p>
+        <hr class="pricing-divider" />
+        <ul class="pricing-features">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Up to 50 leads/month
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            AI Lead Scoring
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Google Sheets Sync
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Basic Deduplication
+          </li>
+          <li class="disabled">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Email Outreach
+          </li>
+          <li class="disabled">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            WhatsApp Outreach
+          </li>
+          <li class="disabled">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Gemini AI Insights
+          </li>
+        </ul>
+        <a href="#cta-banner" class="btn btn-secondary pricing-cta" id="pricing-starter">Get Started Free</a>
+      </div>
+
+      <!-- Pro (Featured) -->
+      <div class="pricing-card featured reveal">
+        <div class="pricing-badge">Most Popular</div>
+        <div class="pricing-name">Pro</div>
+        <div class="pricing-price">
+          <span class="price-amount">$49</span>
+          <span class="price-period">/ month</span>
+        </div>
+        <p class="pricing-desc">For growing agencies and serious sales teams ready to scale outreach.</p>
+        <hr class="pricing-divider" />
+        <ul class="pricing-features">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Unlimited leads/month
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            AI Lead Scoring
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Google Sheets Sync
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Smart Deduplication
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Email Outreach (SMTP)
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            WhatsApp Outreach
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Gemini AI Insights
+          </li>
+        </ul>
+        <a href="#cta-banner" class="btn btn-primary pricing-cta" id="pricing-pro">Start Pro Trial</a>
+      </div>
+
+      <!-- Enterprise -->
+      <div class="pricing-card reveal">
+        <div class="pricing-name">Enterprise</div>
+        <div class="pricing-price">
+          <span class="price-amount">Custom</span>
+        </div>
+        <p class="pricing-desc">For large agencies and teams with custom volume, SLA, and integration needs.</p>
+        <hr class="pricing-divider" />
+        <ul class="pricing-features">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Everything in Pro
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Multi-city campaigns
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Dedicated support
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Custom integrations
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            White-label option
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            SLA guarantee
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            Onboarding call
+          </li>
+        </ul>
+        <a href="#cta-banner" class="btn btn-secondary pricing-cta" id="pricing-enterprise">Contact Sales</a>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ FAQ ══════════════════════════════ -->
+<section id="faq" class="section" style="background:var(--white);">
+  <div class="container">
+    <div class="section-header reveal">
+      <span class="badge">FAQ</span>
+      <h2>Frequently Asked Questions</h2>
+      <p>Everything you need to know before getting started.</p>
+    </div>
+    <div class="faq-grid" id="faq-grid">
+
+      <div class="faq-item">
+        <button class="faq-question" aria-expanded="false" id="faq-q1">
+          Does LeadGenPilot work for any business type or location?
+          <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+        <div class="faq-answer" id="faq-a1">
+          Yes! LeadGenPilot works with any business type that appears on Google Maps — dental clinics, gyms, restaurants, salons, law firms, and more. You can target any city or region worldwide.
+        </div>
+      </div>
+
+      <div class="faq-item">
+        <button class="faq-question" aria-expanded="false" id="faq-q2">
+          Do I need coding experience to use it?
+          <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+        <div class="faq-answer" id="faq-a2">
+          Not at all. The web dashboard lets you configure everything visually. The one-time Google Sheets setup takes under 3 minutes using our copy-paste Apps Script. No coding needed.
+        </div>
+      </div>
+
+      <div class="faq-item">
+        <button class="faq-question" aria-expanded="false" id="faq-q3">
+          How does deduplication work?
+          <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+        <div class="faq-answer" id="faq-a3">
+          Every lead gets a unique hash based on business name + address. This hash is stored in a local JSON cache. Before submitting any lead, the system checks for duplicates — so you'll never get the same business twice, even across multiple runs.
+        </div>
+      </div>
+
+      <div class="faq-item">
+        <button class="faq-question" aria-expanded="false" id="faq-q4">
+          What happens if the webhook delivery fails?
+          <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+        <div class="faq-answer" id="faq-a4">
+          The system automatically retries delivery 3 times with backoff delays. If all retries fail, the lead is archived in <code>failed-leads.json</code> and you can trigger a bulk retry from the dashboard at any time.
+        </div>
+      </div>
+
+      <div class="faq-item">
+        <button class="faq-question" aria-expanded="false" id="faq-q5">
+          Is WhatsApp outreach automated and compliant?
+          <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+        <div class="faq-answer" id="faq-a5">
+          WhatsApp messaging uses the whatsapp-web.js library, which connects through your personal WhatsApp account via QR code. You're in full control of message content and volume. We recommend sending thoughtful, personalized messages — as generated by our Gemini AI copy feature.
+        </div>
+      </div>
+
+      <div class="faq-item">
+        <button class="faq-question" aria-expanded="false" id="faq-q6">
+          Can I run LeadGenPilot on a server or cloud?
+          <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+        <div class="faq-answer" id="faq-a6">
+          Absolutely. LeadGenPilot ships with a Dockerfile and Render deployment config. It automatically falls back to High-Fidelity Simulation Mode in sandboxed environments where Playwright can't launch a real browser.
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ CTA BANNER ══════════════════════ -->
+<section id="cta-banner">
+  <div class="container">
+    <div class="cta-banner-inner reveal">
+      <h2>Start Finding Leads Today</h2>
+      <p>Join 500+ sales teams and agencies using LeadGenPilot to land more clients — on autopilot.</p>
+      <div class="cta-btns">
+        <a href="/app" class="btn btn-secondary btn-lg" id="cta-demo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          Open Dashboard
+        </a>
+        <a href="/app" class="btn btn-outline btn-lg" id="cta-start">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+          Launch App Free
+        </a>
+      </div>
+      <p style="margin-top:20px; font-size:.8rem; color:rgba(255,255,255,.45);">No credit card required &nbsp;·&nbsp; Free forever plan available &nbsp;·&nbsp; Setup in under 10 minutes</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ FOOTER ══════════════════════════ -->
+<footer id="footer" role="contentinfo">
+  <div class="container">
+    <div class="footer-grid">
+      <!-- Brand -->
+      <div class="footer-brand">
+        <div class="footer-logo" style="margin-bottom: 14px;">
+          <img src="/assets/logo/logo-dark.png" alt="LeadGenPilot" style="height: 48px; width: auto; object-fit: contain;" />
+        </div>
+        <p class="footer-desc">AI-powered Google Maps scraping and lead automation. Find, score, and reach local businesses — automatically.</p>
+      </div>
+
+      <!-- Features -->
+      <div class="footer-col">
+        <h4>Features</h4>
+        <ul class="footer-links">
+          <li><a href="#features">Google Maps Scraper</a></li>
+          <li><a href="#features">AI Opportunity Analysis</a></li>
+          <li><a href="#scoring">Smart 0–100 Lead Scoring</a></li>
+          <li><a href="#features">Real-Time Google Sheets Sync</a></li>
+          <li><a href="#outreach">Email & WhatsApp Outreach</a></li>
+          <li><a href="#features">Deduplication & CRM</a></li>
+        </ul>
+      </div>
+
+      <!-- Navigation -->
+      <div class="footer-col">
+        <h4>Navigation</h4>
+        <ul class="footer-links">
+          <li><a href="#how-it-works">How It Works</a></li>
+          <li><a href="#scoring">Scoring Methodology</a></li>
+          <li><a href="#outreach">Outreach Engine</a></li>
+          <li><a href="#pricing">Pricing & Plans</a></li>
+          <li><a href="#faq">FAQ</a></li>
+          <li><a href="/app">Launch Dashboard</a></li>
+        </ul>
+      </div>
+
+      <!-- Company -->
+      <div class="footer-col">
+        <h4>Company</h4>
+        <ul class="footer-links">
+          <li><a href="/about">About</a></li>
+          <li><a href="/privacy">Privacy Policy</a></li>
+          <li><a href="/terms">Terms of Service</a></li>
+          <li><a href="/cookies">Cookie Policy</a></li>
+        </ul>
+      </div>
+
+      <!-- Contact Us -->
+      <div class="footer-col">
+        <h4>Contact Us</h4>
+        <ul class="footer-contact-list">
+          <li>
+            <span class="contact-label">Email</span>
+            <div class="contact-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+              <a href="mailto:bookmytime1355@gmail.com">bookmytime1355@gmail.com</a>
+            </div>
+          </li>
+          <li>
+            <span class="contact-label">Phone</span>
+            <div class="contact-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+              <a href="tel:+919168081355">+91 9168 08 1355</a>
+            </div>
+          </li>
+          <li>
+            <span class="contact-label">Address</span>
+            <div class="contact-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></svg>
+              <span>Pune, Maharashtra, India</span>
+            </div>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Footer Bottom -->
+    <div class="footer-bottom">
+      <p class="footer-copyright">Copyright © 2026 BookMyTime All rights reserved. | A product of Brightwave Digital Products LLP.</p>
+      <div class="footer-bottom-links">
+        <a href="/privacy">Privacy</a>
+        <a href="/terms">Terms</a>
+        <a href="/cookies">Cookies</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<!-- ═══════════════════════════ SCRIPTS ══════════════════════════ -->
+<script>
+  // ── SCROLL PROGRESS BAR ──
+  const progressBar = document.getElementById('progress-bar');
+  function updateProgress() {
+    const scrolled = window.scrollY;
+    const total = document.body.scrollHeight - window.innerHeight;
+    progressBar.style.width = (total > 0 ? (scrolled / total) * 100 : 0) + '%';
+  }
+
+  // ── NAVBAR SCROLL EFFECT ──
+  const navbar = document.getElementById('navbar');
+  function updateNavbar() {
+    navbar.classList.toggle('scrolled', window.scrollY > 20);
+  }
+
+  window.addEventListener('scroll', () => { updateProgress(); updateNavbar(); }, { passive: true });
+  updateNavbar();
+
+  // ── HAMBURGER MENU ──
+  const hamburger = document.getElementById('hamburger-btn');
+  const mobileMenu = document.getElementById('mobile-menu');
+  hamburger.addEventListener('click', () => {
+    const isOpen = mobileMenu.classList.toggle('open');
+    hamburger.setAttribute('aria-expanded', String(isOpen));
+    // Animate spans
+    const spans = hamburger.querySelectorAll('span');
+    if (isOpen) {
+      spans[0].style.transform = 'translateY(7px) rotate(45deg)';
+      spans[1].style.opacity = '0';
+      spans[2].style.transform = 'translateY(-7px) rotate(-45deg)';
+    } else {
+      spans.forEach(s => { s.style.transform = ''; s.style.opacity = ''; });
+    }
+  });
+  // Close mobile menu when a link is clicked
+  mobileMenu.querySelectorAll('a').forEach(link => {
+    link.addEventListener('click', () => {
+      mobileMenu.classList.remove('open');
+      hamburger.setAttribute('aria-expanded', 'false');
+      const spans = hamburger.querySelectorAll('span');
+      spans.forEach(s => { s.style.transform = ''; s.style.opacity = ''; });
+    });
+  });
+
+  // ── REVEAL ON SCROLL (Intersection Observer) ──
+  const revealObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry, i) => {
+      if (entry.isIntersecting) {
+        setTimeout(() => entry.target.classList.add('visible'), i * 80);
+        revealObserver.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.12, rootMargin: '0px 0px -60px 0px' });
+
+  document.querySelectorAll('.reveal').forEach(el => revealObserver.observe(el));
+
+  // ── SCORE BAR ANIMATION ──
+  const barObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.querySelectorAll('.score-bar-fill').forEach(bar => {
+          const target = bar.getAttribute('data-width');
+          setTimeout(() => { bar.style.width = target; }, 300);
+        });
+        barObserver.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.3 });
+
+  const scoringSection = document.getElementById('scoring');
+  if (scoringSection) barObserver.observe(scoringSection);
+
+  // ── FAQ ACCORDION ──
+  document.querySelectorAll('.faq-question').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const item = btn.closest('.faq-item');
+      const isOpen = item.classList.contains('open');
+      // Close all
+      document.querySelectorAll('.faq-item').forEach(i => i.classList.remove('open'));
+      document.querySelectorAll('.faq-question').forEach(b => b.setAttribute('aria-expanded', 'false'));
+      // Open clicked (if it wasn't already open)
+      if (!isOpen) {
+        item.classList.add('open');
+        btn.setAttribute('aria-expanded', 'true');
+      }
+    });
+  });
+
+  // ── SMOOTH ACTIVE NAV LINK ──
+  const sections = document.querySelectorAll('section[id]');
+  const navLinks = document.querySelectorAll('.nav-link');
+  const activeLinkObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        navLinks.forEach(link => {
+          link.style.fontWeight = link.getAttribute('href') === '#' + entry.target.id ? '700' : '500';
+          link.style.color = link.getAttribute('href') === '#' + entry.target.id ? 'var(--indigo-600)' : '';
+        });
+      }
+    });
+  }, { threshold: 0.5 });
+  sections.forEach(s => activeLinkObserver.observe(s));
+
+  // ── COUNTER ANIMATION ──
+  function animateCounter(el, target, suffix, duration = 1600) {
+    const start = performance.now();
+    const isString = isNaN(parseFloat(target));
+    if (isString) return; // skip if not a plain number
+    const num = parseFloat(target.replace(/[^\d.]/g, ''));
+    const step = ts => {
+      const progress = Math.min((ts - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      el.textContent = Math.floor(eased * num).toLocaleString() + suffix;
+      if (progress < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  const statObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        animateCounter(document.getElementById('stat-leads'), '50000', 'K+');
+        statObserver.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.4 });
+  const statsSection = document.getElementById('stats');
+  if (statsSection) statObserver.observe(statsSection);
+</script>
+
+</body>
+</html>

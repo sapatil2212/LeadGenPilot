@@ -1,0 +1,76 @@
+# ─────────────────────────────────────────────────────────────
+# Dependencies & build output
+# ─────────────────────────────────────────────────────────────
+node_modules/
+build/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Next.js landing app build output
+leadfinder-landing/.next/
+leadfinder-landing/out/
+
+# ─────────────────────────────────────────────────────────────
+# Secrets — NEVER commit
+# ─────────────────────────────────────────────────────────────
+# Matches .env, .env.local, .env.example, utils/.env, and any other
+# variant at any directory depth.
+.env*
+
+# Only the sanitized, placeholder-only template is tracked.
+# NOTE: .env.example is intentionally NOT whitelisted — the copy currently on
+# disk contains real credential values (see docs/PHASE0-SECURITY.md). Use
+# .env.template as the documented config contract instead.
+!.env.template
+
+# WhatsApp Web session credentials (a scanned session is a live credential)
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Backups may contain database dumps, lead PII and partially-masked env files
+backups/
+
+# ─────────────────────────────────────────────────────────────
+# Runtime / operational data (lead PII, message bodies, recipients)
+# ─────────────────────────────────────────────────────────────
+processed-leads.json
+failed-leads.json
+campaign-history.json
+conversations.json
+email-poll-state.json
+leadfinder-config.json
+scan-history.json
+
+# Atomic-write temp files produced by src/storage.ts writeJsonAtomic()
+.*.tmp
+
+# ─────────────────────────────────────────────────────────────
+# Test artefacts
+# ─────────────────────────────────────────────────────────────
+# Playwright writes traces, screenshots and HTML reports for failed runs. They
+# can contain seeded data and are regenerated on every run.
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
+# ─────────────────────────────────────────────────────────────
+# Logs
+# ─────────────────────────────────────────────────────────────
+*.log
+scraper-log.txt
+scraper-log.txt.1
+
+# ─────────────────────────────────────────────────────────────
+# Prisma / local databases
+# ─────────────────────────────────────────────────────────────
+*.db
+*.db-journal
+prisma/*.db
+
+# ─────────────────────────────────────────────────────────────
+# OS / editor
+# ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

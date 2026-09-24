@@ -1,0 +1,1678 @@
+// Prisma schema for LeadGenPilot authentication + CRM
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String  @id @default(cuid())
+  email         String  @unique
+  name          String?
+  passwordHash  String  @map("password_hash")
+  emailVerified Boolean @default(false) @map("email_verified")
+  role          String  @default("user")
+
+  // Phone number with verification status
+  phone         String? @unique
+  phoneVerified Boolean @default(false) @map("phone_verified")
+
+  // Subscription plan: "free" | "pro" | "custom"
+  plan String @default("free")
+
+  /// Account lifecycle, set by the platform operator from the superadmin
+  /// console: "active" | "suspended".
+  ///
+  /// Distinct from `lockedUntil`, which is an automatic, self-healing
+  /// brute-force lockout. Suspension is a deliberate administrative act with no
+  /// expiry: the account keeps its data but cannot sign in until an operator
+  /// reactivates it. Enforced in login() so the refusal cannot be bypassed by
+  /// any client.
+  status String @default("active")
+
+  // Monthly lead-usage tracking. usagePeriod is "YYYY-MM"; leadsUsed resets
+  // when a new period begins.
+  leadsUsed   Int     @default(0) @map("leads_used")
+  usagePeriod String? @map("usage_period")
+
+  // Brute-force protection.
+  failedLoginAttempts Int       @default(0) @map("failed_login_attempts")
+  lockedUntil         DateTime? @map("locked_until")
+
+  lastLoginAt DateTime? @map("last_login_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  otps         EmailOtp[]
+  auditLogs    AuditLog[]
+  integrations UserIntegration[]
+  leadLists    LeadList[]
+
+  memberships TenantMember[]
+  jobs        Job[]
+
+  uploadedDocuments KnowledgeDocument[]
+  aiConversations   AiConversation[]
+
+  icpProfiles     IcpProfile[]
+  scoringRuleSets ScoringRuleSet[]
+
+  campaigns Campaign[]
+  assignedLeads Lead[] @relation("LeadAssignee")
+
+  subscriptions Subscription[]
+  invoices      Invoice[]
+  payments      Payment[]
+
+  @@index([status])
+  @@index([plan])
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TENANCY
+//
+// A Tenant is the unit of data ownership and billing. Users are people; a
+// Tenant is the workspace whose data they act on. One user can belong to
+// several tenants (an agency operator managing two businesses), and a tenant
+// can have several users (a team) — so membership is a join table rather than a
+// column on either side.
+//
+// Every tenant-owned table carries `tenantId`. The pre-existing `userId`
+// columns are deliberately kept and still written: they remain the fallback
+// scope for any code path not yet migrated, so the two schemes can coexist
+// while the application moves over table by table. `tenantId` is nullable for
+// exactly the same reason — it is backfilled by
+// scripts/backfill-tenants.mjs, and only becomes required once every row has
+// one and every read path uses it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A workspace. Owns leads, campaigns, integrations and (later) billing.
+model Tenant {
+  id   String @id @default(cuid())
+  name String
+
+  /// URL-safe unique handle, derived from the name at creation.
+  slug String @unique
+
+  /// "active" | "suspended". Suspended tenants are refused at the context guard.
+  status String @default("active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  members      TenantMember[]
+  leadLists    LeadList[]
+  leads        Lead[]
+  integrations UserIntegration[]
+  auditLogs    AuditLog[]
+  jobs         Job[]
+
+  businessProfile    BusinessProfile?
+  products           BusinessProduct[]
+  services           BusinessService[]
+  knowledgeDocuments KnowledgeDocument[]
+  knowledgeChunks    KnowledgeChunk[]
+  knowledgeItems     KnowledgeItem[]
+  outreachTemplates  OutreachTemplate[]
+  aiConversations    AiConversation[]
+  aiMessages         AiMessage[]
+
+  icpProfiles          IcpProfile[]
+  scoringRuleSets      ScoringRuleSet[]
+  discoveredBusinesses DiscoveredBusiness[]
+  campaigns            Campaign[]
+  campaignMessages     CampaignMessage[]
+  conversationThreads  ConversationThread[]
+  conversationMessages ConversationMessage[]
+  campaignDispatches   CampaignDispatch[]
+  suppressions         SuppressionEntry[]
+
+  subscriptions Subscription[]
+  invoices      Invoice[]
+
+  @@index([status])
+  @@map("tenants")
+}
+
+/// Membership of a user in a tenant, carrying that user's role there.
+model TenantMember {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+  userId   String @map("user_id")
+
+  /// "owner" | "admin" | "member". Default permission sets live in src/tenancy/permissions.ts.
+  role String @default("member")
+
+  /// Optional JSON array of permission strings that REPLACES the role defaults
+  /// for this member. Null means "use the role defaults", which is the norm.
+  permissions String? @db.Text
+
+  /// "active" | "invited" | "suspended".
+  status String @default("active")
+
+  invitedById String?  @map("invited_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // One membership row per user per tenant.
+  @@unique([tenantId, userId])
+  @@index([userId])
+  @@index([tenantId, role])
+  @@index([tenantId, status])
+  @@map("tenant_members")
+}
+
+/// Durable state for long-running work (lead discovery, campaigns).
+///
+/// Replaces the process-global booleans that used to track whether a scrape or
+/// campaign was running (`isScrapingRunning`, `isCampaignRunning`,
+/// `campaignProgress`, `stopRequested`, …). Those were single-slot and
+/// process-wide: the second tenant to start anything was refused, could observe
+/// the first tenant's progress, and could cancel it. Holding this per tenant in
+/// the database also means a run survives a restart being observable, and that
+/// cancellation is an owned, auditable act rather than a flipped global.
+model Job {
+  id       String  @id @default(cuid())
+  tenantId String  @map("tenant_id")
+  /// The member who started the job. Kept for attribution and audit.
+  userId   String? @map("user_id")
+
+  /// "lead_discovery" | "campaign". Open-ended so later phases can add kinds
+  /// (document ingestion, embeddings, follow-ups) without a migration.
+  kind String
+
+  /// "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled".
+  status String @default("queued")
+
+  /// Input parameters as JSON. For lead discovery this is the search criteria
+  /// that used to live in the shared mutable CONFIG singleton.
+  params String? @db.Text
+
+  /// Progress counters and stage label as JSON.
+  progress String? @db.Text
+
+  /// Terminal result summary as JSON.
+  result String? @db.Text
+
+  /// User-facing failure reason. Never a raw stack trace.
+  error String? @db.Text
+
+  /// Set when cancellation is requested. Workers poll it; only the owning
+  /// tenant can set it.
+  cancelRequestedAt DateTime? @map("cancel_requested_at")
+
+  /// Worker ownership lease. Only the matching worker/token can mutate a
+  /// running job, preventing stale workers from writing after recovery.
+  workerId       String?   @map("worker_id")
+  leaseToken     String?   @map("lease_token")
+  leaseExpiresAt DateTime? @map("lease_expires_at")
+  heartbeatAt    DateTime? @map("heartbeat_at")
+  attempt        Int       @default(0)
+
+  startedAt  DateTime? @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // The hot query is "does this tenant already have an active job of this kind?"
+  @@index([tenantId, kind, status])
+  @@index([tenantId, createdAt])
+  @@index([status])
+  @@index([status, leaseExpiresAt, createdAt])
+  // MySQL requires an index behind every foreign key and creates one silently
+  // if the schema does not declare it, which then shows up as drift. Every
+  // other FK column in this schema is already covered by an explicit index
+  // whose leading column matches; user_id was not, so it is declared here with
+  // the name MySQL chose. See docs/DATABASE.md.
+  @@index([userId], map: "jobs_user_id_fkey")
+  @@map("jobs")
+}
+
+/// User-specific integration settings (SMTP, Google Sheets, WhatsApp, etc.)
+model UserIntegration {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Integration type: "smtp" | "google_sheet" | "whatsapp"
+  type String
+
+  // Integration configuration (encrypted JSON)
+  config String @db.Text
+
+  // Is this integration active/enabled?
+  enabled Boolean @default(true)
+
+  // Metadata for tracking
+  label      String? // User-friendly name like "Gmail SMTP" or "Leads Sheet"
+  lastUsedAt DateTime? @map("last_used_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  // Integrations belong to the workspace, not the individual: a teammate must
+  // be able to use the tenant's SMTP account. Nullable until backfilled.
+  tenantId String? @map("tenant_id")
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([type])
+  @@index([tenantId, type])
+  @@map("user_integrations")
+}
+
+/// Security & activity audit trail.
+model AuditLog {
+  id        String   @id @default(cuid())
+  action    String
+  ip        String?
+  userAgent String?  @map("user_agent")
+  metadata  String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  userId String? @map("user_id")
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Null for platform-level events that belong to no workspace (superadmin
+  // sign-in, boot-time configuration problems).
+  tenantId String? @map("tenant_id")
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@index([tenantId, createdAt])
+  @@map("audit_logs")
+}
+
+/// One-time passwords sent to an email or phone for verification / login.
+/// The code itself is stored hashed; only the hash is persisted.
+model EmailOtp {
+  id        String   @id @default(cuid())
+  email     String?
+  phone     String?
+  codeHash  String   @map("code_hash")
+  purpose   String   @default("verify") // "verify" | "login" | "reset" | "phone_verify"
+  attempts  Int      @default(0)
+  consumed  Boolean  @default(false)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  userId String? @map("user_id")
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([email])
+  @@index([phone])
+  @@index([expiresAt])
+  // MySQL auto-created this index to back the user_id foreign key when the
+  // schema was applied with `db push`. Declared here with its existing name so
+  // schema.prisma matches the live database exactly and `prisma migrate`
+  // reports no drift. This creates nothing new — the index already exists.
+  @@index([userId], map: "email_otps_user_id_fkey")
+  @@map("email_otps")
+}
+
+/// A named collection of leads from one scrape session (e.g. "Dental Clinic - Nashik - 10:00 17 Jul 2026")
+model LeadList {
+  id           String   @id @default(cuid())
+  name         String
+  businessType String   @map("business_type")
+  location     String
+  scrapedAt    DateTime @default(now()) @map("scraped_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  userId String? @map("user_id")
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  tenantId String? @map("tenant_id")
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// The ICP this list was discovered for, when it came from a targeted run.
+  /// SetNull rather than Cascade: deleting a profile must not delete the leads
+  /// found with it.
+  icpProfileId String?     @map("icp_profile_id")
+  icpProfile   IcpProfile? @relation(fields: [icpProfileId], references: [id], onDelete: SetNull)
+
+  leads Lead[]
+
+  @@index([userId])
+  @@index([scrapedAt])
+  @@index([tenantId])
+  @@index([tenantId, scrapedAt])
+  @@index([icpProfileId])
+  @@map("lead_lists")
+}
+
+/// A scraped business lead stored in the CRM database
+model Lead {
+  id String @id @default(cuid())
+
+  // Universal CRM metadata. Legacy digital-presence fields below remain as
+  // optional intelligence signals, not as the lead's business classification.
+  contactName    String? @map("contact_name")
+  source         String  @default("GOOGLE_MAPS")
+  status         String  @default("NEW")
+  assignedUserId String? @map("assigned_user_id")
+  tags           String? @db.Text // JSON string array
+  customFields   String? @map("custom_fields") @db.Text // JSON object
+  productFit     String? @map("product_fit") @db.Text // tenant-product fit JSON
+  serviceFit     String? @map("service_fit") @db.Text // tenant-service fit JSON
+
+  businessName   String  @map("business_name")
+  phone          String  @default("")
+  address        String  @db.Text
+  rating         Float   @default(0)
+  reviews        Int     @default(0)
+  website        String  @db.Text
+  mapsUrl        String  @map("maps_url") @db.Text
+  category       String  @default("")
+  websiteMissing Boolean @default(false) @map("website_missing")
+  leadScore      Int     @default(0) @map("lead_score")
+  dateAdded      String  @map("date_added")
+
+  // Digital presence
+  websiteStatus     String  @default("MISSING") @map("website_status")
+  instagramUrl      String  @map("instagram_url") @db.Text
+  instagramStatus   String  @default("NOT_FOUND") @map("instagram_status")
+  instagramLastPost String  @default("") @map("instagram_last_post")
+  facebookUrl       String  @map("facebook_url") @db.Text
+  facebookStatus    String  @default("NOT_FOUND") @map("facebook_status")
+  facebookLastPost  String  @default("") @map("facebook_last_post")
+  whatsappPresent   Boolean @default(false) @map("whatsapp_present")
+  appointmentSystem Boolean @default(false) @map("appointment_system")
+  leadPriority      String  @default("COLD") @map("lead_priority")
+  aiInsight         String  @map("ai_insight") @db.Text
+
+  // Extended audit
+  emails                 String  @db.Text // JSON array stored as string
+  linkedinUrl            String  @map("linkedin_url") @db.Text
+  linkedinStatus         String  @default("NOT_FOUND") @map("linkedin_status")
+  googleAnalyticsPresent Boolean @default(false) @map("google_analytics_present")
+  metaPixelPresent       Boolean @default(false) @map("meta_pixel_present")
+
+  // Outreach tracking
+  emailStatus      String? @map("email_status")
+  emailSentDate    String? @map("email_sent_date")
+  whatsappStatus   String? @map("whatsapp_status")
+  whatsappSentDate String? @map("whatsapp_sent_date")
+
+  // Conversation lifecycle: REPLIED once the lead responds to outreach.
+  conversationStatus String? @map("conversation_status")
+
+  // ── Score provenance (Phase 4) ──
+  //
+  // `leadScore` alone is not interpretable. The pre-Phase-4 scorer had a
+  // reachable maximum of 170 that appeared nowhere, so a stored 95 could not be
+  // read as a proportion, could not be compared against a lead scored under
+  // different weights, and could not be explained to the user. These columns
+  // make a score self-describing: what it was out of, which rules fired, and
+  // which version of which rule set produced it.
+  scoreMax         Int?    @map("score_max")
+  /// JSON array of { signal, label, points } for the rules that fired.
+  scoreBreakdown   String? @map("score_breakdown") @db.Text
+  scoringRuleSetId String? @map("scoring_rule_set_id")
+  scoringVersion   Int?    @map("scoring_version")
+
+  /// Fit against the workspace's ICP, 0-100, with the reason given.
+  /// Separate from `leadScore`: that measures opportunity signals on the
+  /// business, this measures whether it is even the right kind of customer. A
+  /// dentist with no website scores high on the first and zero on the second
+  /// for a seller of hospital equipment.
+  icpProfileId String? @map("icp_profile_id")
+  icpFitScore  Int?    @map("icp_fit_score")
+  icpFitReason String? @map("icp_fit_reason") @db.Text
+
+  scoredAt DateTime? @map("scored_at")
+
+  // Geo coords
+  lat Float?
+  lng Float?
+
+  // CRM notes (editable by user)
+  notes String? @db.Text
+
+  // Relations
+  listId String   @map("list_id")
+  list   LeadList @relation(fields: [listId], references: [id], onDelete: Cascade)
+
+  userId String? @map("user_id")
+
+  tenantId String? @map("tenant_id")
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  assignedUser User? @relation("LeadAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+
+  campaignMessages    CampaignMessage[]
+  conversationThreads ConversationThread[]
+  campaignDispatches  CampaignDispatch[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([listId])
+  @@index([userId])
+  @@index([leadPriority])
+  @@index([leadScore])
+  @@index([dateAdded])
+  // The lead table is the one that grows without bound, so its tenant-scoped
+  // access patterns get dedicated composite indexes: the CRM table sorts by
+  // score, filters by priority, and pages by recency, always within a tenant.
+  @@index([tenantId])
+  @@index([tenantId, leadScore])
+  @@index([tenantId, leadPriority])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, source])
+  @@index([tenantId, status])
+  @@index([tenantId, assignedUserId])
+  // "Which leads still need scoring under the current rule set?" and
+  // "re-score everything scored by version N" are both tenant-scoped scans.
+  @@index([tenantId, scoringRuleSetId])
+  @@index([tenantId, icpFitScore])
+  @@map("leads")
+}
+
+/// Tracks individual page views for website visitor analytics.
+model PageView {
+  id        String   @id @default(cuid())
+  path      String // e.g. "/", "/app", "/superadmin"
+  ip        String? // visitor IP (for unique visitor counting)
+  userAgent String?  @map("user_agent") @db.Text
+  referrer  String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([path])
+  @@index([createdAt])
+  @@index([ip])
+  @@map("page_views")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUSINESS KNOWLEDGE
+//
+// What the tenant sells, to whom, and what makes it different. This is the
+// factual basis every later phase reads from: the ICP builder, lead scoring,
+// campaign generation and the assistant all assemble their context from these
+// rows.
+//
+// Structured fields rather than one free-text blob, deliberately. A single
+// "about the business" paragraph cannot be queried, cannot be partially
+// updated, and forces every prompt to carry the whole thing — campaign
+// generation needs the products and the differentiators, lead scoring needs the
+// target customer profile, and neither should spend its context budget on the
+// other's text.
+//
+// Every table carries tenantId and cascades from Tenant: deleting a workspace
+// must not leave its business data behind.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One per workspace. The company-level facts.
+model BusinessProfile {
+  id       String @id @default(cuid())
+  tenantId String @unique @map("tenant_id")
+
+  businessName String? @map("business_name")
+  /// Free-form rather than an enum: the platform must work for any category,
+  /// so "Medical Equipment Manufacturer" and "Dental Clinic" are equally valid.
+  industry     String?
+  businessType String? @map("business_type")
+  website      String?
+  description  String? @db.Text
+
+  /// Headquarters / primary contact location.
+  country String?
+  state   String?
+  city    String?
+
+  contactEmail String? @map("contact_email")
+  contactPhone String? @map("contact_phone")
+
+  /// JSON string arrays. Kept as arrays on one row rather than child tables
+  /// because they are always read together with the profile and never queried
+  /// individually. KnowledgeItem exists for anything that needs to be.
+  locationsServed     String? @map("locations_served") @db.Text
+  targetCustomerTypes String? @map("target_customer_types") @db.Text
+  targetIndustries    String? @map("target_industries") @db.Text
+  uniqueSellingPoints String? @map("unique_selling_points") @db.Text
+  certifications      String? @db.Text
+  decisionMakerRoles  String? @map("decision_maker_roles") @db.Text
+
+  /// Tone guidance applied to generated copy, e.g. "formal, technical".
+  brandVoice      String? @map("brand_voice") @db.Text
+  salesObjectives String? @map("sales_objectives") @db.Text
+
+  /// 0-1 completeness estimate from the last AI extraction, and the questions
+  /// it could not answer — so the UI can ask instead of the model guessing.
+  aiConfidence       Float?  @map("ai_confidence")
+  missingInformation String? @map("missing_information") @db.Text
+
+  /// Provenance of the last AI-assisted update. Lets a surprising value be
+  /// traced back to the exact prompt wording that produced it.
+  lastExtractedAt   DateTime? @map("last_extracted_at")
+  lastPromptName    String?   @map("last_prompt_name")
+  lastPromptVersion Int?      @map("last_prompt_version")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("business_profiles")
+}
+
+/// A product the tenant sells. Drives product-to-lead fit analysis in Phase 4.
+model BusinessProduct {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  name        String
+  category    String?
+  description String? @db.Text
+
+  /// JSON string arrays.
+  keyFeatures String? @map("key_features") @db.Text
+  /// Customer types this product suits, e.g. ["Hospital","Diagnostic Centre"].
+  idealFor    String? @map("ideal_for") @db.Text
+
+  /// Free text, not a number: real price positioning is "from ₹8L" or "on
+  /// application" as often as it is a figure, and the AI must never invent one.
+  priceRange String? @map("price_range")
+
+  status String @default("active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@map("business_products")
+}
+
+/// A service the tenant offers.
+model BusinessService {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  name        String
+  category    String?
+  description String? @db.Text
+  idealFor    String? @map("ideal_for") @db.Text
+  priceRange  String? @map("price_range")
+  status      String  @default("active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@map("business_services")
+}
+
+/// An uploaded document, with its processing lifecycle.
+model KnowledgeDocument {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  title        String
+  originalName String @map("original_name")
+  mimeType     String @map("mime_type")
+  /// "pdf" | "docx" | "pptx" | "txt" | "md"
+  fileType     String @map("file_type")
+  sizeBytes    Int    @map("size_bytes")
+  /// SHA-256 of the file, so re-uploading the same document is detectable.
+  checksum     String
+
+  /// Where the bytes live. Local path today; an object-store key later.
+  storagePath String? @map("storage_path") @db.Text
+
+  /// "pending" | "extracting" | "chunking" | "embedding" | "ready" | "failed"
+  ///
+  /// A status column rather than a boolean: extraction, chunking and embedding
+  /// are separate failure points, and "which step failed" is the first thing
+  /// anyone asks. The matching error is kept alongside.
+  status String  @default("pending")
+  error  String? @db.Text
+
+  /// Extracted plain text. Kept so re-chunking never requires re-parsing the
+  /// original file, which for a large PDF is the expensive part.
+  extractedText String? @map("extracted_text") @db.LongText
+  charCount     Int?    @map("char_count")
+  chunkCount    Int?    @map("chunk_count")
+
+  /// Optional knowledge category, e.g. "product_catalogue", "company_profile".
+  category String?
+
+  uploadedById String?   @map("uploaded_by_id")
+  processedAt  DateTime? @map("processed_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  tenant     Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  uploadedBy User?  @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  chunks       KnowledgeChunk[]
+  derivedItems KnowledgeItem[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+  // Explicit so MySQL reuses it for the foreign key instead of creating its own,
+  // which would then report as schema drift. See docs/DATABASE.md.
+  @@index([uploadedById])
+  // Detects a duplicate upload of the same bytes within one workspace.
+  @@index([tenantId, checksum])
+  @@map("knowledge_documents")
+}
+
+/// A retrievable slice of a document, with its embedding.
+model KnowledgeChunk {
+  id         String @id @default(cuid())
+  tenantId   String @map("tenant_id")
+  documentId String @map("document_id")
+
+  /// Position within the document, so neighbouring context can be recovered.
+  chunkIndex Int    @map("chunk_index")
+  content    String @db.Text
+  /// Rough token estimate, for assembling a prompt within a budget.
+  tokenCount Int?   @map("token_count")
+
+  /// The embedding as a JSON number array.
+  ///
+  /// MySQL has no vector type and no ANN index, so similarity is computed in
+  /// the application. At the scale this serves — hundreds of chunks per
+  /// workspace — a scan is fine, and it avoids adding a vector database to the
+  /// deployment for no benefit yet.
+  embedding String? @db.Text
+
+  /// Which model produced the embedding, and its dimensionality.
+  ///
+  /// Not decoration: vectors from different models are not comparable, so
+  /// retrieval MUST embed the query with the same model that embedded the
+  /// chunk. Storing it per chunk means changing the embedding model is a
+  /// re-embed of old rows rather than silently broken search.
+  embeddingModel String? @map("embedding_model")
+  embeddingDims  Int?    @map("embedding_dims")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  document KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([documentId, chunkIndex])
+  @@index([tenantId, embeddingModel])
+  @@map("knowledge_chunks")
+}
+
+/// A single structured fact extracted from a document or a conversation.
+///
+/// Complements BusinessProfile: the profile holds the fields the product knows
+/// it needs, while this holds arbitrary labelled facts worth remembering —
+/// warranty terms, lead times, a certification number — without a schema change
+/// for each one.
+model KnowledgeItem {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  /// "company" | "product" | "service" | "target_customer" | "location" |
+  /// "usp" | "certification" | "pricing" | "faq" | "brand_voice" | "other"
+  category String
+  label    String
+  value    String @db.Text
+
+  /// 0-1. Extraction confidence, or 1 when a human entered it.
+  confidence Float  @default(1)
+  /// "user" | "document" | "conversation"
+  source     String @default("user")
+
+  sourceDocumentId String? @map("source_document_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant         Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sourceDocument KnowledgeDocument? @relation(fields: [sourceDocumentId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, category])
+  @@index([sourceDocumentId])
+  @@map("knowledge_items")
+}
+
+/// A reviewed outreach template owned by one workspace.
+///
+/// `payload` is the validated builder schema as JSON. Keeping one versioned
+/// document avoids a migration for every presentation-field addition while the
+/// indexed columns retain ownership, channel filtering and lifecycle semantics.
+model OutreachTemplate {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  name    String
+  channel String
+  payload String @db.LongText
+  status  String @default("active")
+  version Int    @default(1)
+
+  createdById String @map("created_by_id")
+  updatedById String @map("updated_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, channel, status])
+  @@index([tenantId, updatedAt])
+  @@index([createdById])
+  @@map("outreach_templates")
+}
+
+/// An assistant chat thread.
+model AiConversation {
+  id       String  @id @default(cuid())
+  tenantId String  @map("tenant_id")
+  userId   String? @map("user_id")
+
+  title String?
+  /// "assistant" | "onboarding" — onboarding threads drive the guided
+  /// "teach the AI about your business" flow.
+  kind  String  @default("assistant")
+
+  /// Rolling count, so history can be trimmed without a COUNT(*).
+  messageCount Int @default(0) @map("message_count")
+
+  archivedAt DateTime? @map("archived_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  tenant   Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user     User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  messages AiMessage[]
+
+  @@index([tenantId, updatedAt])
+  @@index([userId])
+  @@map("ai_conversations")
+}
+
+/// One turn in an assistant conversation.
+model AiMessage {
+  id             String @id @default(cuid())
+  tenantId       String @map("tenant_id")
+  conversationId String @map("conversation_id")
+
+  /// "user" | "assistant" | "system"
+  role    String
+  content String @db.Text
+
+  /// Which provider, model and prompt version produced an assistant turn, and
+  /// what it cost. Answers "why did it say that" and feeds Phase 9 metering.
+  provider      String?
+  model         String?
+  promptName    String? @map("prompt_name")
+  promptVersion Int?    @map("prompt_version")
+  totalTokens   Int?    @map("total_tokens")
+  latencyMs     Int?    @map("latency_ms")
+
+  /// Ids of the knowledge chunks used, as JSON. Makes an answer auditable
+  /// against the documents it was drawn from.
+  citedChunkIds String? @map("cited_chunk_ids") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@index([tenantId])
+  @@map("ai_messages")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TARGETING AND SCORING
+//
+// Who this workspace wants to reach, and how a discovered business is judged
+// against that.
+//
+// Both were previously hardcoded, and in opposite ways. Targeting lived in a
+// mutable module-level `CONFIG` object holding one vertical and one city, shared
+// by the whole deployment — any tenant saving a search changed what every other
+// tenant's next run looked for. Scoring lived in a fixed function whose rules
+// only make sense for one kind of seller: it awards 50 points for "has no
+// website", which identifies a prospect for a web agency and is meaningless to a
+// medical equipment manufacturer selling to hospitals.
+//
+// Making both tenant-owned rows is what lets the product serve any business
+// rather than the one it was written for.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A workspace's ideal customer profile: who to look for, and where.
+///
+/// Also carries the discovery defaults that used to live in `CONFIG`, so
+/// "run discovery for my ICP" needs no other input.
+model IcpProfile {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  name        String
+  description String? @db.Text
+
+  /// JSON string arrays. Free-form values, never enums: the categories a
+  /// medical equipment manufacturer targets ("Multispecialty Hospital",
+  /// "Diagnostic Centre") have nothing in common with a gym's, and any fixed
+  /// vocabulary would exclude somebody's actual market.
+  targetCategories   String? @map("target_categories") @db.Text
+  targetIndustries   String? @map("target_industries") @db.Text
+  /// Places to search, e.g. ["Pune", "Nashik"]. One run fans out across them.
+  targetLocations    String? @map("target_locations") @db.Text
+  /// Roles worth reaching inside a target, e.g. ["Hospital Administrator"].
+  decisionMakerRoles String? @map("decision_maker_roles") @db.Text
+
+  /// Categories or name fragments to drop from results, e.g. ["pharmacy"].
+  /// Exclusions matter as much as inclusions: a search for "clinic" returns
+  /// competitors as readily as prospects.
+  excludeCategories String? @map("exclude_categories") @db.Text
+  excludeKeywords   String? @map("exclude_keywords") @db.Text
+
+  /// Signals a lead MUST have to be worth keeping, and ones that merely help.
+  /// Stored as JSON arrays of signal ids known to src/scoring/signals.ts.
+  requiredSignals  String? @map("required_signals") @db.Text
+  preferredSignals String? @map("preferred_signals") @db.Text
+
+  /// Size and reputation hints used by fit scoring.
+  minRating  Float? @map("min_rating")
+  minReviews Int?   @map("min_reviews")
+
+  // ── Discovery defaults (formerly the global CONFIG) ──
+  maxResults   Int     @default(50) @map("max_results")
+  /// Search radius in km from the resolved centre of each target location.
+  radiusKm     Float?  @map("radius_km")
+  /// Opt-in deep analysis. Costs time and quota, so it is off by default.
+  deepAnalysis Boolean @default(false) @map("deep_analysis")
+
+  /// Exactly one profile per workspace is the default. Enforced in the service,
+  /// not by a partial unique index, which MySQL does not support.
+  isDefault Boolean @default(false) @map("is_default")
+  status    String  @default("active")
+
+  /// Provenance when a profile was proposed by the AI rather than typed.
+  /// Lets a surprising target category be traced to the prompt that suggested it.
+  aiConfidence      Float?    @map("ai_confidence")
+  lastSuggestedAt   DateTime? @map("last_suggested_at")
+  lastPromptName    String?   @map("last_prompt_name")
+  lastPromptVersion Int?      @map("last_prompt_version")
+
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdBy User?  @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  leadLists LeadList[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, isDefault])
+  @@index([createdById])
+  @@map("icp_profiles")
+}
+
+/// A workspace's lead scoring configuration.
+///
+/// Rules are JSON rather than a child table because they are always read and
+/// evaluated as a complete set — a partial rule set scores nothing meaningful —
+/// and a set is around a dozen entries. Each rule names a `signal` from the
+/// registry in src/scoring/signals.ts, so a rule set is data selecting among
+/// known extractors, never anything executable.
+///
+/// `version` is bumped on every edit and stamped onto each lead scored with it.
+/// Without that, changing a weight silently makes yesterday's scores
+/// incomparable with today's while both sit in the same table.
+model ScoringRuleSet {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  name        String
+  description String? @db.Text
+  version     Int     @default(1)
+
+  /// JSON array of { id, signal, label, points, when?, enabled }.
+  rules String @db.Text
+
+  /// Priority bands as FRACTIONS of the achievable maximum, not absolute
+  /// points. The old scorer compared an absolute 100 and 60 against a maximum of
+  /// 170, so its "HOT" band silently meant 59% and editing any weight moved the
+  /// bands without anyone touching them.
+  hotThreshold  Float @default(0.58) @map("hot_threshold")
+  warmThreshold Float @default(0.35) @map("warm_threshold")
+
+  isDefault Boolean @default(false) @map("is_default")
+  /// True for the seeded rule set that reproduces the pre-Phase-4 scorer.
+  isBuiltIn Boolean @default(false) @map("is_built_in")
+  status    String  @default("active")
+
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdBy User?  @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, status])
+  @@index([tenantId, isDefault])
+  @@index([createdById])
+  @@map("scoring_rule_sets")
+}
+
+/// Businesses this workspace has already discovered, for deduplication.
+///
+/// Replaces `processed-leads.json`: one file in the process working directory,
+/// with no tenant dimension, re-parsed and linearly scanned for every candidate
+/// lead. Two consequences beyond the obvious performance one — one workspace's
+/// harvest suppressed the same business for every other workspace, and
+/// `GET /api/processed` served the whole file to any authenticated caller,
+/// which disclosed every tenant's prospect list.
+///
+/// The key is a normalised name+address digest rather than the raw strings, so
+/// "Dr. Patil's Clinic, 12 Main St." and "dr patils clinic 12 main st" collide
+/// as they should. Unique per workspace, so the check is an index lookup.
+model DiscoveredBusiness {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  /// SHA-256 of the normalised name + address.
+  fingerprint String
+
+  businessName String  @map("business_name")
+  address      String? @db.Text
+  phone        String?
+  category     String?
+
+  /// Where it ended up, when it was kept. Null for a business that was seen and
+  /// filtered out — still worth remembering so it is not re-analysed.
+  leadId String? @map("lead_id")
+
+  /// How many discovery runs have encountered it.
+  timesSeen  Int      @default(1) @map("times_seen")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, fingerprint])
+  @@index([tenantId, lastSeenAt])
+  @@map("discovered_businesses")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CAMPAIGN GENERATION WITH APPROVAL GATE
+//
+// Replaces the in-memory campaign loop with a durable two-phase model:
+//   1. Generate a batch of outreach messages, each with AI-generated copy.
+//   2. Store them as "pending_review", show them in the approval UI.
+//   3. The user approves/rejects/edits each one.
+//   4. Only approved messages are sent.
+//
+// This is what turns the product from "spray and pray" into "reviewed outreach",
+// which is the only mode that works for a business where the operator is
+// accountable for every claim made to a prospect.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A batch of outreach messages generated together, awaiting review.
+///
+/// One Campaign maps to what the user thinks of as "one campaign run": they
+/// clicked Generate, the system produced 50 messages, and now they're deciding
+/// which to send. The status field tracks where in the workflow it is.
+model Campaign {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  /// Human-facing name, shown in the campaign list. Generated if not provided.
+  name String
+
+  /// "draft" | "pending_review" | "partially_approved" | "approved" | "sending" | "sent" | "cancelled"
+  ///
+  /// - draft: created but not yet submitted for review (unused today)
+  /// - pending_review: generation completed, awaiting the user's approval decisions
+  /// - partially_approved: some messages approved, others pending or rejected
+  /// - approved: every message approved, ready to send
+  /// - sending: execution in progress
+  /// - sent: all approved messages delivered
+  /// - cancelled: discarded by the user
+  status String @default("pending_review")
+
+  /// The ICP profile used to select leads for this campaign.
+  icpProfileId String? @map("icp_profile_id")
+
+  /// How leads were selected: "icp" | "list" | "manual"
+  sourceType String @map("source_type")
+
+  /// The lead list ID if sourceType is "list".
+  sourceListId String? @map("source_list_id")
+
+  /// Filters applied on top of the source, stored as JSON.
+  filters String? @db.Text
+
+  /// Which channels were requested: { email: boolean, whatsapp: boolean }
+  channels String @db.Text
+
+  /// Template IDs selected at generation time, stored as JSON: { email?: string, whatsapp?: string }
+  templates String? @db.Text
+
+  /// Model and prompt version used to generate the copy, for reproducibility.
+  aiProvider    String? @map("ai_provider")
+  aiModel       String? @map("ai_model")
+  promptName    String? @map("prompt_name")
+  promptVersion Int?    @map("prompt_version")
+
+  /// Summary counts, recomputed whenever messages change state.
+  totalMessages Int @default(0) @map("total_messages")
+  pendingCount  Int @default(0) @map("pending_count")
+  approvedCount Int @default(0) @map("approved_count")
+  rejectedCount Int @default(0) @map("rejected_count")
+  sentCount     Int @default(0) @map("sent_count")
+  failedCount   Int @default(0) @map("failed_count")
+
+  /// Messages that were never attempted because the contact was suppressed.
+  /// Counted apart from `failedCount` so a compliance skip is never reported as
+  /// a delivery failure.
+  skippedCount  Int @default(0) @map("skipped_count")
+
+  createdById String   @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  /// Timestamp of the first send attempt. Null until execution starts.
+  startedAt DateTime? @map("started_at")
+
+  /// Timestamp when every approved message finished (success or failure).
+  completedAt DateTime? @map("completed_at")
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  messages   CampaignMessage[]
+  dispatches CampaignDispatch[]
+  user       User?             @relation(fields: [userId], references: [id])
+  userId   String?
+
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+  @@index([createdById])
+  @@index([userId], map: "campaigns_userId_fkey")
+  @@map("campaigns")
+}
+
+/// One outreach message, generated for one lead on one channel.
+///
+/// The user can approve, reject or edit it before it's sent. Once approved and
+/// sent, the result (success/failure, timestamp, tracking data) is recorded here.
+model CampaignMessage {
+  id         String @id @default(cuid())
+  campaignId String @map("campaign_id")
+  tenantId   String @map("tenant_id")
+
+  /// The lead this message targets. Nullable so a deleted lead doesn't cascade-delete sent campaign history.
+  leadId String? @map("lead_id")
+
+  /// Denormalised from the lead at generation time, so we still know who this
+  /// was sent to even if the lead is later deleted or edited.
+  businessName String @map("business_name")
+  recipient    String /// email address or phone number
+  channel      String /// "email" | "whatsapp"
+
+  /// AI-generated copy, editable before approval.
+  subject String? @db.Text /// email only
+  body    String  @db.Text
+
+  /// "pending_review" | "approved" | "rejected" | "sending" | "retry_wait" | "sent" | "failed" | "suppressed"
+  ///
+  /// - pending_review: awaiting the user's decision
+  /// - approved: user said yes, queued for send
+  /// - rejected: user said no, will not be sent
+  /// - sending: leased by one worker, delivery in flight
+  /// - retry_wait: a retryable error occurred; waits until nextAttemptAt
+  /// - sent: delivered successfully
+  /// - failed: send attempt returned an error
+  /// - suppressed: never attempted, the contact had opted out
+  status String @default("pending_review")
+
+  /// Why this message was rejected or failed, if applicable.
+  rejectionReason String? @map("rejection_reason") @db.Text
+  errorMessage    String? @map("error_message") @db.Text
+
+  /// Metadata for the AI generation that produced this copy.
+  aiProvider    String? @map("ai_provider")
+  aiModel       String? @map("ai_model")
+  promptName    String? @map("prompt_name")
+  promptVersion Int?    @map("prompt_version")
+  tokensUsed    Int?    @map("tokens_used")
+  latencyMs     Int?    @map("latency_ms")
+
+  /// Worker-attempt state. `sending` rows are leased by one worker and are
+  /// recovered only after lease expiry; retry_wait rows wait until nextAttemptAt.
+  attemptCount   Int       @default(0) @map("attempt_count")
+  nextAttemptAt  DateTime? @map("next_attempt_at")
+  lastAttemptAt  DateTime? @map("last_attempt_at")
+  leaseOwner     String?   @map("lease_owner")
+  leaseToken     String?   @map("lease_token")
+  leaseExpiresAt DateTime? @map("lease_expires_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// Timestamp when the user approved this message.
+  approvedAt DateTime? @map("approved_at")
+
+  /// Timestamp when the send attempt started.
+  sentAt DateTime? @map("sent_at")
+
+  /// Provider message ID when a delivery gateway returns one (for example the
+  /// Meta Cloud API or SMTP Message-ID). Null for transports that do not expose
+  /// a durable external ID.
+  externalMessageId String? @map("external_message_id")
+
+  /// Stable delivery identity, derived once and reused by every attempt.
+  ///
+  /// A crash between "the provider accepted this" and "the database recorded it"
+  /// cannot be closed by leases alone, so recovery re-attempts and delivery is
+  /// at-least-once. Carrying one unchanging key across attempts is what makes a
+  /// duplicate collapsible by the transport (as the SMTP Message-ID) and
+  /// detectable afterwards, because the same key appears on the delivery report.
+  idempotencyKey String? @map("idempotency_key")
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  lead     Lead?    @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  dispatches CampaignDispatch[]
+
+  @@index([campaignId, status])
+  @@index([tenantId, status])
+  @@index([leadId])
+  @@index([campaignId, status, nextAttemptAt, leaseExpiresAt, createdAt], map: "camp_msg_worker_claim_idx")
+  @@index([tenantId, idempotencyKey], map: "camp_msg_idempotency_idx")
+  @@map("campaign_messages")
+}
+
+/// A tenant-owned two-way conversation with one outreach contact.
+model ConversationThread {
+  id         String @id @default(cuid())
+  tenantId   String @map("tenant_id")
+  /// "email" | "whatsapp"
+  channel    String
+  /// Canonical lowercased email or normalized phone digits, unique per tenant/channel.
+  contactKey String @map("contact_key")
+
+  leadId       String? @map("lead_id")
+  businessName String  @map("business_name")
+  phone        String?
+  email        String?
+  /// "AWAITING_REPLY" | "REPLIED" | "CLOSED"
+  status       String  @default("AWAITING_REPLY")
+  unreadCount  Int     @default(0) @map("unread_count")
+  lastMessageAt DateTime @map("last_message_at")
+  lastMessagePreview String @map("last_message_preview") @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  lead     Lead?                 @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  messages ConversationMessage[]
+
+  @@unique([tenantId, channel, contactKey])
+  @@index([tenantId, lastMessageAt])
+  @@index([tenantId, status, lastMessageAt])
+  @@index([leadId])
+  @@map("conversation_threads")
+}
+
+/// An immutable inbound or outbound entry in a tenant-owned conversation.
+model ConversationMessage {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+  threadId String @map("thread_id")
+  /// "in" | "out"
+  direction String
+  /// "email" | "whatsapp"
+  channel   String
+  text      String @db.Text
+  source    String? // "cloud" | "imap" | "manual" | "campaign"
+  provider  String?
+  providerMessageId String? @map("provider_message_id")
+  occurredAt DateTime @map("occurred_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  thread ConversationThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, providerMessageId])
+  @@index([threadId, occurredAt])
+  @@index([tenantId, occurredAt])
+  @@map("conversation_messages")
+}
+
+/// Immutable delivery-attempt record used by tenant campaign reports.
+model CampaignDispatch {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+  campaignId String? @map("campaign_id")
+  campaignMessageId String? @map("campaign_message_id")
+  leadId String? @map("lead_id")
+
+  businessName String @map("business_name")
+  recipient    String
+  /// "email" | "whatsapp"
+  channel      String
+  /// "SENT" | "FAILED"
+  status       String
+  sourceType   String @map("source_type")
+  sourceLabel  String @map("source_label")
+  dryRun       Boolean @default(false) @map("dry_run")
+  subject      String? @db.Text
+  messageSnippet String? @map("message_snippet") @db.Text
+  errorMessage String? @map("error_message") @db.Text
+  externalMessageId String? @map("external_message_id")
+  /// The delivery idempotency key the attempt carried, so two receipts for the
+  /// same logical send can be recognised as one.
+  idempotencyKey String? @map("idempotency_key")
+  occurredAt DateTime @map("occurred_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  campaignMessage CampaignMessage? @relation(fields: [campaignMessageId], references: [id], onDelete: SetNull)
+  lead Lead? @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, occurredAt])
+  @@index([tenantId, channel, status, occurredAt])
+  @@index([campaignId, occurredAt])
+  @@index([leadId])
+  // A final campaign-message report is idempotent across retries/recovery. MySQL
+  // permits many NULLs here, so manual dispatches remain append-only.
+  @@unique([campaignMessageId])
+  @@index([tenantId, externalMessageId])
+  @@index([tenantId, idempotencyKey], map: "campaign_dispatches_idempotency_idx")
+  @@map("campaign_dispatches")
+}
+
+/// A contact this workspace must not contact again on a given channel.
+///
+/// Compliance is per tenant and per channel: an email unsubscribe does not
+/// silence WhatsApp, and one workspace's opt-out must never leak into another
+/// workspace's audience. The unique key makes repeated opt-outs idempotent, so
+/// replying "STOP" twice does not create two records.
+model SuppressionEntry {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  /// "email" | "whatsapp"
+  channel String
+
+  /// Canonical lowercased email or normalized phone digits.
+  contactKey String @map("contact_key")
+
+  /// "unsubscribe" | "opt_out_reply" | "manual" | "bounce" | "complaint"
+  reason String @default("manual")
+
+  /// Where the opt-out came from, e.g. "inbound_whatsapp", "inbound_email", "api".
+  source String?
+
+  /// The inbound text or operator note that produced the record.
+  notes String? @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, channel, contactKey])
+  @@index([tenantId, createdAt])
+  @@map("suppression_entries")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BILLING
+//
+// Until now the entire commercial model was one string column, `User.plan`,
+// and a hard-coded entitlement table in src/plans.ts. That is enough to gate a
+// feature and nothing else: it cannot say what a customer pays, when they
+// started paying, whether the last charge cleared, what was invoiced, or what
+// the platform earns in a month. Every one of those questions is one the
+// operator console has to answer, so they get real rows.
+//
+// Money is stored as an INTEGER count of minor units (paise for INR, cents for
+// USD) and never as a float. A price of ₹999.00 is 99900. Floating point
+// arithmetic on currency silently loses fractions, and a billing system that is
+// off by a paisa per invoice is a billing system nobody trusts.
+//
+// `User.plan` is deliberately kept as the enforcement field read by
+// src/entitlements.ts. Subscription is the commercial record; the plan column is
+// the cached grant derived from it. The admin API writes both together so they
+// cannot drift.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A sellable plan. Editable by the operator, which is the point: pricing,
+/// limits and packaging change far more often than code deploys, and until now
+/// changing the lead quota on the Free tier meant editing src/plans.ts and
+/// shipping a release.
+///
+/// Rows are seeded from src/plans.ts on first use so the console never opens on
+/// an empty pricing table, but after that this table is authoritative for
+/// everything except the compiled fallbacks.
+model PlanDefinition {
+  id String @id @default(cuid())
+
+  /// Stable machine key matching User.plan ("free", "pro", "custom", …).
+  /// Immutable after creation: changing it would orphan every subscriber.
+  key String @unique
+
+  name        String
+  description String? @db.Text
+
+  /// Recurring price in minor units, per cycle. 0 means free.
+  priceMonthly Int    @default(0) @map("price_monthly")
+  priceYearly  Int    @default(0) @map("price_yearly")
+  currency     String @default("INR")
+
+  /// New leads permitted per calendar month. -1 means unlimited — a sentinel
+  /// rather than null so the column stays NOT NULL and comparisons in SQL keep
+  /// working.
+  monthlyLeadLimit Int @default(100) @map("monthly_lead_limit")
+
+  /// Included seats (tenant members). -1 means unlimited.
+  seats     Int @default(1)
+  trialDays Int @default(0) @map("trial_days")
+
+  /// JSON array of feature keys granted by this plan, e.g.
+  /// ["whatsappOutreach","aiInsights"]. Kept as JSON on the row because it is
+  /// always read whole with the plan and never queried on its own.
+  features String? @db.Text
+
+  /// Marketing flags. `isPublic` false keeps a plan usable for existing
+  /// subscribers while hiding it from new sign-ups (a grandfathered tier).
+  highlight Boolean @default(false)
+  isActive  Boolean @default(true) @map("is_active")
+  isPublic  Boolean @default(true) @map("is_public")
+  sortOrder Int     @default(0) @map("sort_order")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([isActive])
+  @@index([sortOrder])
+  @@map("plan_definitions")
+}
+
+/// One customer's commercial agreement. At most one is "current" per user in
+/// practice, but history is kept as separate rows rather than by mutating one:
+/// an upgrade, a downgrade and a churn-then-return are all facts the operator
+/// needs to see later, and overwriting them destroys the only record of what
+/// the customer was paying and when.
+///
+/// `planKey` is a plain string, not a foreign key into PlanDefinition. A plan
+/// that is retired must not cascade-delete or block the subscriptions that
+/// reference it, and the price actually agreed is captured on `amount` here
+/// anyway, so the row survives the catalogue changing underneath it.
+model Subscription {
+  id       String  @id @default(cuid())
+  userId   String  @map("user_id")
+  tenantId String? @map("tenant_id")
+
+  planKey String @map("plan_key")
+
+  /// "trialing" | "active" | "past_due" | "paused" | "canceled" | "expired".
+  status String @default("active")
+
+  /// "monthly" | "yearly" | "lifetime".
+  billingCycle String @default("monthly") @map("billing_cycle")
+
+  /// Amount charged per cycle in minor units, AFTER any negotiated discount.
+  /// Recorded here rather than read from the plan so historical rows stay true
+  /// after a price change.
+  amount   Int    @default(0)
+  currency String @default("INR")
+
+  seats           Int @default(1)
+  discountPercent Int @default(0) @map("discount_percent")
+
+  startedAt          DateTime  @default(now()) @map("started_at")
+  currentPeriodStart DateTime  @map("current_period_start")
+  currentPeriodEnd   DateTime  @map("current_period_end")
+  trialEndsAt        DateTime? @map("trial_ends_at")
+
+  /// Set when the customer has asked to stop but has paid through the period.
+  /// Kept separate from status so a subscription can be simultaneously active
+  /// (entitlements still granted) and ending (no renewal invoice).
+  cancelAtPeriodEnd Boolean   @default(false) @map("cancel_at_period_end")
+  canceledAt        DateTime? @map("canceled_at")
+  cancelReason      String?   @map("cancel_reason") @db.Text
+
+  /// Identifier at the payment processor, once one is wired up. Nullable
+  /// because subscriptions are operator-created today.
+  externalRef String? @map("external_ref")
+  notes       String? @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant   Tenant?   @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  invoices Invoice[]
+
+  @@index([userId])
+  @@index([tenantId])
+  @@index([status])
+  @@index([planKey])
+  @@index([currentPeriodEnd])
+  @@index([status, currentPeriodEnd])
+  @@map("subscriptions")
+}
+
+/// A bill issued to a customer. Immutable in spirit: once issued, an invoice is
+/// voided and replaced rather than rewritten, which is why `status` carries
+/// "void" instead of the row being deleted.
+///
+/// `userId` is nullable and SetNull on delete so financial history outlives the
+/// account it belonged to. Deleting a user must not erase the record that money
+/// changed hands — `billingName` / `billingEmail` snapshot who was billed so the
+/// invoice still reads correctly after the relation is gone.
+model Invoice {
+  id String @id @default(cuid())
+
+  /// Human-facing sequential reference, e.g. "INV-2026-0001". Unique so a
+  /// double-submit cannot mint two invoices with the same number.
+  number String @unique
+
+  userId         String? @map("user_id")
+  tenantId       String? @map("tenant_id")
+  subscriptionId String? @map("subscription_id")
+
+  /// "draft" | "open" | "paid" | "partially_paid" | "void" | "uncollectible" | "refunded".
+  status   String @default("open")
+  currency String @default("INR")
+
+  /// All amounts in minor units. total = subtotal - discount + tax.
+  subtotal Int @default(0)
+  discount Int @default(0)
+
+  /// Tax rate in HUNDREDTHS of a percent, so 18% GST is 1800. Integer basis
+  /// points avoid storing 18.5 as a float and re-deriving a different rounding
+  /// than the one that produced `tax`.
+  taxPercent Int @default(0) @map("tax_percent")
+  tax        Int @default(0)
+  total      Int @default(0)
+  amountPaid Int @default(0) @map("amount_paid")
+
+  /// JSON array of { description, quantity, unitAmount, amount }.
+  lineItems String? @map("line_items") @db.Text
+
+  issuedAt DateTime  @default(now()) @map("issued_at")
+  dueAt    DateTime? @map("due_at")
+  paidAt   DateTime? @map("paid_at")
+
+  periodStart DateTime? @map("period_start")
+  periodEnd   DateTime? @map("period_end")
+
+  billingName  String? @map("billing_name")
+  billingEmail String? @map("billing_email")
+  notes        String? @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  tenant       Tenant?       @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  payments     Payment[]
+
+  @@index([userId])
+  @@index([tenantId])
+  @@index([subscriptionId])
+  @@index([status])
+  @@index([issuedAt])
+  @@index([dueAt])
+  @@index([status, dueAt])
+  @@map("invoices")
+}
+
+/// A movement of money against an invoice. Separate from Invoice because one
+/// bill can be settled by several attempts — a failed card, a retry, a partial
+/// transfer — and because a refund is a payment event, not an invoice edit.
+model Payment {
+  id String @id @default(cuid())
+
+  invoiceId String? @map("invoice_id")
+  userId    String? @map("user_id")
+
+  /// Minor units. Positive for a charge; refunds are tracked on
+  /// `refundedAmount` rather than as a negative amount, so summing `amount`
+  /// over succeeded rows always gives gross collected.
+  amount   Int    @default(0)
+  currency String @default("INR")
+
+  /// "succeeded" | "pending" | "failed" | "refunded" | "partially_refunded".
+  status String @default("succeeded")
+
+  /// "card" | "upi" | "netbanking" | "bank_transfer" | "paypal" | "wallet" | "manual" | "cheque".
+  method String @default("manual")
+
+  /// Processor name and its transaction id, for reconciliation.
+  gateway   String?
+  reference String?
+
+  failureReason  String? @map("failure_reason") @db.Text
+  refundedAmount Int     @default(0) @map("refunded_amount")
+
+  paidAt DateTime @default(now()) @map("paid_at")
+  notes  String?  @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  invoice Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([invoiceId])
+  @@index([userId])
+  @@index([status])
+  @@index([method])
+  @@index([paidAt])
+  @@map("payments")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLATFORM OPERATIONS
+//
+// Controls that belong to the operator rather than to any tenant: what is
+// switched on, what is being announced, and what the platform's own knobs are
+// set to. All three used to be code constants or environment variables, which
+// meant changing any of them required a deploy and left no record of who
+// changed what.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A runtime feature switch. Lets a risky capability be turned off for
+/// everyone, or rolled out to a fraction of accounts, without shipping code.
+model FeatureFlag {
+  id          String  @id @default(cuid())
+  key         String  @unique
+  name        String
+  description String? @db.Text
+
+  enabled Boolean @default(false)
+
+  /// 0-100. Applied by hashing the subject id, so a given account stays on the
+  /// same side of the split between requests.
+  rolloutPercent Int @default(100) @map("rollout_percent")
+
+  /// "all" | "plan:free" | "plan:pro" | "plan:custom" | "role:admin".
+  audience String @default("all")
+
+  updatedBy String?  @map("updated_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([enabled])
+  @@map("feature_flags")
+}
+
+/// An operator message shown in the product — maintenance windows, incidents,
+/// release notes.
+model Announcement {
+  id    String @id @default(cuid())
+  title String
+  body  String @db.Text
+
+  /// "info" | "success" | "warning" | "critical".
+  level String @default("info")
+
+  /// Same grammar as FeatureFlag.audience.
+  audience String @default("all")
+
+  isActive    Boolean   @default(true) @map("is_active")
+  publishedAt DateTime? @map("published_at")
+  expiresAt   DateTime? @map("expires_at")
+
+  createdBy String?  @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([isActive])
+  @@index([publishedAt])
+  @@map("announcements")
+}
+
+/// A single operator-editable platform setting. A key/value table rather than a
+/// wide row so a new setting needs no migration, which is the whole reason these
+/// are not environment variables: secrets belong in the environment, policy
+/// belongs somewhere it can be changed and audited.
+model PlatformSetting {
+  id  String @id @default(cuid())
+  key String @unique
+
+  /// JSON-encoded, so a setting can be a string, number, boolean or object
+  /// without the column caring.
+  value String @db.Text
+
+  /// Grouping for the settings UI: "general" | "limits" | "billing" | "security" | "notifications".
+  category    String  @default("general")
+  label       String?
+  description String? @db.Text
+
+  updatedBy String?  @map("updated_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([category])
+  @@map("platform_settings")
+}
