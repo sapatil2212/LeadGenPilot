@@ -38,6 +38,7 @@ import {
   optBool,
   optDate,
   optEnum,
+  optEnumCanonical,
   optInt,
   optMoney,
   optStr,
@@ -298,7 +299,7 @@ router.post(
         description: nullableStr(body.description, "Description", 1000) ?? null,
         priceMonthly: optMoney(body.priceMonthly, "Monthly price") ?? 0,
         priceYearly: optMoney(body.priceYearly, "Yearly price") ?? 0,
-        currency: optEnum(body.currency, "Currency", CURRENCIES)?.toUpperCase() ?? "INR",
+        currency: optEnumCanonical(body.currency, "Currency", CURRENCIES) ?? "INR",
         monthlyLeadLimit: optInt(body.monthlyLeadLimit, "Monthly lead limit", -1, 10_000_000) ?? 100,
         seats: optInt(body.seats, "Seats", -1, 10_000) ?? 1,
         trialDays: optInt(body.trialDays, "Trial days", 0, 365) ?? 0,
@@ -351,7 +352,7 @@ router.patch(
     if (body.description !== undefined) data.description = nullableStr(body.description, "Description", 1000);
     if (body.priceMonthly !== undefined) data.priceMonthly = optMoney(body.priceMonthly, "Monthly price");
     if (body.priceYearly !== undefined) data.priceYearly = optMoney(body.priceYearly, "Yearly price");
-    if (body.currency !== undefined) data.currency = optEnum(body.currency, "Currency", CURRENCIES)?.toUpperCase();
+    if (body.currency !== undefined) data.currency = optEnumCanonical(body.currency, "Currency", CURRENCIES);
     if (body.monthlyLeadLimit !== undefined) data.monthlyLeadLimit = optInt(body.monthlyLeadLimit, "Monthly lead limit", -1, 10_000_000);
     if (body.seats !== undefined) data.seats = optInt(body.seats, "Seats", -1, 10_000);
     if (body.trialDays !== undefined) data.trialDays = optInt(body.trialDays, "Trial days", 0, 365);
@@ -587,7 +588,7 @@ router.post(
         status,
         billingCycle,
         amount: discountPercent ? Math.round(amount * (1 - discountPercent / 100)) : amount,
-        currency: optEnum(body.currency, "Currency", CURRENCIES)?.toUpperCase() ?? plan?.currency ?? "INR",
+        currency: optEnumCanonical(body.currency, "Currency", CURRENCIES) ?? plan?.currency ?? "INR",
         seats: optInt(body.seats, "Seats", 1, 10_000) ?? 1,
         discountPercent,
         startedAt: (optDate(body.startedAt, "Started at") as Date | null) ?? periodStart,
@@ -633,7 +634,7 @@ router.patch(
     }
     if (body.billingCycle !== undefined) data.billingCycle = optEnum(body.billingCycle, "Billing cycle", BILLING_CYCLES);
     if (body.amount !== undefined) data.amount = optMoney(body.amount, "Amount");
-    if (body.currency !== undefined) data.currency = optEnum(body.currency, "Currency", CURRENCIES)?.toUpperCase();
+    if (body.currency !== undefined) data.currency = optEnumCanonical(body.currency, "Currency", CURRENCIES);
     if (body.seats !== undefined) data.seats = optInt(body.seats, "Seats", 1, 10_000);
     if (body.discountPercent !== undefined) data.discountPercent = optInt(body.discountPercent, "Discount percent", 0, 100);
     if (body.startedAt !== undefined) data.startedAt = optDate(body.startedAt, "Started at");
@@ -1129,7 +1130,7 @@ router.post(
       tenantId: optStr(body.tenantId) ?? null,
       subscriptionId,
       status: optEnum(body.status, "Status", INVOICE_STATUSES) ?? "open",
-      currency: optEnum(body.currency, "Currency", CURRENCIES)?.toUpperCase() ?? "INR",
+      currency: optEnumCanonical(body.currency, "Currency", CURRENCIES) ?? "INR",
       lineItems,
       explicitSubtotal,
       discount: optMoney(body.discount, "Discount") ?? 0,
@@ -1195,7 +1196,7 @@ router.patch(
     }
 
     if (body.status !== undefined) data.status = optEnum(body.status, "Status", INVOICE_STATUSES);
-    if (body.currency !== undefined) data.currency = optEnum(body.currency, "Currency", CURRENCIES)?.toUpperCase();
+    if (body.currency !== undefined) data.currency = optEnumCanonical(body.currency, "Currency", CURRENCIES);
     if (body.issuedAt !== undefined) data.issuedAt = optDate(body.issuedAt, "Issue date");
     if (body.dueAt !== undefined) data.dueAt = optDate(body.dueAt, "Due date");
     if (body.periodStart !== undefined) data.periodStart = optDate(body.periodStart, "Period start");
@@ -1536,7 +1537,7 @@ router.post(
         invoiceId,
         userId,
         amount,
-        currency: optEnum(body.currency, "Currency", CURRENCIES)?.toUpperCase() ?? invoice?.currency ?? "INR",
+        currency: optEnumCanonical(body.currency, "Currency", CURRENCIES) ?? invoice?.currency ?? "INR",
         status,
         method: optEnum(body.method, "Method", PAYMENT_METHODS) ?? "manual",
         gateway: nullableStr(body.gateway, "Gateway", 100) ?? null,
@@ -1578,7 +1579,7 @@ router.patch(
     }
     if (body.status !== undefined) data.status = optEnum(body.status, "Status", PAYMENT_STATUSES);
     if (body.method !== undefined) data.method = optEnum(body.method, "Method", PAYMENT_METHODS);
-    if (body.currency !== undefined) data.currency = optEnum(body.currency, "Currency", CURRENCIES)?.toUpperCase();
+    if (body.currency !== undefined) data.currency = optEnumCanonical(body.currency, "Currency", CURRENCIES);
     if (body.gateway !== undefined) data.gateway = nullableStr(body.gateway, "Gateway", 100);
     if (body.reference !== undefined) data.reference = nullableStr(body.reference, "Reference", 190);
     if (body.failureReason !== undefined) data.failureReason = nullableStr(body.failureReason, "Failure reason", 1000);

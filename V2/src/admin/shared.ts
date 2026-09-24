@@ -295,6 +295,30 @@ export function optEnum<T extends string>(
   return s;
 }
 
+/**
+ * Like `optEnum`, but matches case-insensitively and returns the value in the
+ * canonical casing declared by `allowed`.
+ *
+ * `optEnum` lowercases before comparing, which silently rejects every member of
+ * an uppercase whitelist: `"INR"` became `"inr"`, matched nothing in
+ * `CURRENCIES`, and produced "Currency must be one of: INR, …" naming the exact
+ * value the caller had just sent. Any admin write that carried a currency —
+ * every plan create and edit among them — failed with that contradiction.
+ *
+ * Use this for whitelists whose casing is meaningful, such as currency codes.
+ */
+export function optEnumCanonical<T extends string>(
+  value: unknown,
+  field: string,
+  allowed: readonly T[]
+): T | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const needle = String(value).trim().toLowerCase();
+  const match = allowed.find((option) => option.toLowerCase() === needle);
+  if (!match) throw badRequest(`${field} must be one of: ${allowed.join(", ")}.`);
+  return match;
+}
+
 export function reqEnum<T extends string>(value: unknown, field: string, allowed: readonly T[]): T {
   const v = optEnum(value, field, allowed);
   if (!v) throw badRequest(`${field} is required and must be one of: ${allowed.join(", ")}.`);
