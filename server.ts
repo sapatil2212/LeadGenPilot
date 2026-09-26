@@ -40,6 +40,7 @@ import {
 } from "./src/conversations/conversationService";
 import { generateOutreachCopy } from "./src/outreachCopy";
 import { generateAICopy } from "./src/aiCopyGenerator";
+import { configuredProviderIds } from "./src/ai/aiService";
 import { env, validateEnv } from "./src/env";
 import { readJson, writeJsonAtomic, withLock } from "./src/storage";
 import cookieParser from "cookie-parser";
@@ -1238,8 +1239,8 @@ async function updateLeadOutreachStatus(businessName: string, channel: "email" |
       return found;
     });
 
-    // Sync back to Google Sheet
-    const webhookUrl = customWebhookUrl || process.env.GOOGLE_SHEET_WEBHOOK_URL;
+    // Sync back to Google Sheet if user integration is connected
+    const webhookUrl = customWebhookUrl;
     if (webhookUrl && webhookUrl.trim() !== "" && webhookUrl !== "YOUR_WEBHOOK_URL") {
       try {
         const payload = {
@@ -1905,7 +1906,7 @@ async function resolveCampaignLeads(
     }
     leads = dbLeads.map((l: any) => dbLeadToAppLead(l));
   } else {
-    if (!webhookUrl) return { leads: [], error: "Google Sheet is not configured." };
+    if (!webhookUrl) return { leads: [], error: "Google Sheet integration is not connected. Please connect your Google Sheet under Settings > Integrations." };
     const sheetLeads = await fetchLeadsFromGoogleSheet(source.sheetName, webhookUrl);
     if (!sheetLeads || sheetLeads.length === 0) {
       return { leads: [], error: "Failed to fetch leads from Google Sheet, or the sheet is empty." };
@@ -1969,15 +1970,15 @@ async function runCampaignLoop(
   // tenant campaigns. Durable reporting resumes when history has tenant-owned
   // database storage; status remains available through this workspace's job UI.
   const logDispatch = (..._args: unknown[]) => {};
-  let webhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
+  let webhookUrl: string | undefined = undefined;
   let userSmtpConfig: any = undefined;
   if (campaignUserId) {
     const sheetConfig = await getUserIntegration(campaignUserId, "google_sheet", ctx.tenantId) as any;
     if (sheetConfig && sheetConfig.webhookUrl) {
       webhookUrl = sheetConfig.webhookUrl;
     } else if (source.type === "sheet") {
-      logger.error("Outreach campaign aborted: Custom Google Sheet integration is not configured for the user.");
-      campaignProgress.status = "Aborted: Google Sheet not configured";
+      logger.error("Outreach campaign aborted: Google Sheet integration is not configured for the user under Integrations.");
+      campaignProgress.status = "Aborted: Google Sheet not connected in Integrations";
       isCampaignRunning = false;
       return;
     }
@@ -2280,11 +2281,14 @@ app.post(
   const enableEmail = req.body.enableEmail !== undefined ? Boolean(req.body.enableEmail) : true;
   const enableWhatsapp = req.body.enableWhatsapp !== undefined ? Boolean(req.body.enableWhatsapp) : true;
 
-  let webhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
+  let webhookUrl: string | undefined = undefined;
   const userId = ctx.userId;
   if (userId) {
     const sheetConfig = await getUserIntegration(userId, "google_sheet", ctx.tenantId) as any;
     if (sheetConfig && sheetConfig.webhookUrl) webhookUrl = sheetConfig.webhookUrl;
+  }
+  if (source.type === "sheet" && !webhookUrl) {
+    return res.status(400).json({ error: "Google Sheet integration is not connected. Please connect your Google Sheet under Settings > Integrations." });
   }
 
   const { leads, error } = await resolveCampaignLeads(ctx, source, filters, enableEmail, enableWhatsapp, webhookUrl);
@@ -2701,6 +2705,22 @@ async function startServer() {
         process.exit(1);
       }
     }
+
+    // ── AI provider diagnostic ───────────────────────────────────────────────
+    // Surface which providers are ready at boot, so a bad key or missing config
+    // is visible immediately rather than only when extraction is triggered.
+    try {
+      const ids = configuredProviderIds();
+      if (ids.length > 0) {
+        logger.info(`AI providers configured: ${ids.join(", ")}`);
+      } else {
+        logger.warn(
+          "No AI provider is configured. Business extraction, outreach copy, and ICP " +
+          "suggestions will be unavailable. Set GEMINI_API_KEY (AIza…) in .env — " +
+          "get one at https://aistudio.google.com/apikey"
+        );
+      }
+    } catch { /* non-fatal */ }
 
     // Establish the database connection (non-blocking; auth routes guard on config).
     void connectDatabase().then((connected) => {

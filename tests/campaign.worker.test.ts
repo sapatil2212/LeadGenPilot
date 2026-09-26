@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ prisma: null as any, sendEmail: vi.fn(), integration: vi.fn(), recordOutbound: vi.fn() }));
+const mocks = vi.hoisted(() => ({ prisma: null as any, sendEmail: vi.fn(), integration: vi.fn(), recordOutbound: vi.fn(), syncSheet: vi.fn() }));
 vi.mock("../src/prisma", () => ({ prisma: new Proxy({}, { get: (_t, key) => mocks.prisma[key as any] }) }));
 vi.mock("../src/outreachService", () => ({ sendEmailOutreach: mocks.sendEmail }));
 vi.mock("../src/whatsappGateway", () => ({ sendWhatsAppUnified: vi.fn() }));
 vi.mock("../src/userIntegrationService", () => ({ getUserIntegration: mocks.integration }));
+vi.mock("../src/googleSheetsWebhook", () => ({ syncCampaignOutreachToGoogleSheet: mocks.syncSheet }));
 vi.mock("../src/conversations/conversationService", () => ({ recordOutbound: mocks.recordOutbound }));
 const { runClaimedCampaignJob } = await import("../src/campaign/campaignExecutor");
 
@@ -12,7 +13,12 @@ function job(overrides: any = {}) { return { id: "job-a", tenantId: "tenant-a", 
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.integration.mockResolvedValue({ host: "smtp.test", port: 587, user: "user", password: "pass", fromEmail: "from@test" });
+  mocks.integration.mockImplementation(async (_userId: string, type: string) =>
+    type === "google_sheet"
+      ? { webhookUrl: "https://sheet.test/webhook" }
+      : { host: "smtp.test", port: 587, user: "user", password: "pass", fromEmail: "from@test" }
+  );
+  mocks.syncSheet.mockResolvedValue(true);
   mocks.prisma = {
     campaign: { findFirst: vi.fn().mockResolvedValue({ id: "campaign-a", name: "Campaign" }), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     job: { updateMany: vi.fn().mockResolvedValue({ count: 1 }), findFirst: vi.fn().mockResolvedValue({ status: "running", cancelRequestedAt: null }) },

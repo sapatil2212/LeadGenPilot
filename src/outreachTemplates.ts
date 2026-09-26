@@ -28,6 +28,7 @@ export interface OutreachTemplate {
   useLogo: boolean;
   logoType: "text" | "image";
   logoValue: string;
+  textAlign?: "left" | "center" | "right";
   introText: string;
   useAiBody: boolean;
   customBodyText: string;

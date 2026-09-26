@@ -82,9 +82,7 @@ export function normalizeTemplate(input: unknown): Omit<OutreachTemplate, "id" |
   const name = cleanText(raw.name, 120);
   if (!name) throw new TemplateValidationError("Template name is required.");
 
-  // Saved templates are immutable reviewed copy. Dynamic per-lead AI belongs
-  // before the campaign approval gate, never behind a template toggle.
-  const useAiBody = false;
+  const useAiBody = raw.useAiBody === true;
   const useCta = raw.useCta === true;
   const useContact = raw.useContact === true;
   const useFooter = raw.useFooter === true;
@@ -105,19 +103,41 @@ export function normalizeTemplate(input: unknown): Omit<OutreachTemplate, "id" |
     ? Math.max(1, 120 - fixedWhatsappWords)
     : 220;
   const customBodyText = trimWords(cleanText(raw.customBodyText, 5_000), bodyWordLimit);
-  if (!customBodyText) {
-    throw new TemplateValidationError("Add template body text before saving.");
+  
+  // If AI dynamic body is not selected, require either customBodyText or introText
+  if (!useAiBody && !customBodyText && !introText) {
+    throw new TemplateValidationError("Add template body text or intro message before saving.");
   }
+
+  const useLogo = raw.useLogo === true;
+  const logoType = raw.logoType === "image" ? "image" : "text";
+  let logoValue = "";
+  if (useLogo) {
+    if (logoType === "image" && typeof raw.logoValue === "string") {
+      const trimmed = raw.logoValue.trim();
+      if (trimmed.startsWith("data:image/")) {
+        // Base64 data URL for local machine uploads (allow up to 3MB)
+        logoValue = trimmed.slice(0, 3_000_000);
+      } else {
+        logoValue = cleanText(trimmed, 2000);
+      }
+    } else {
+      logoValue = cleanText(raw.logoValue, 200);
+    }
+  }
+
+  const textAlign = raw.textAlign === "center" ? "center" : raw.textAlign === "right" ? "right" : "left";
 
   return {
     name,
     templateType,
-    subject: templateType === "email" ? cleanText(raw.subject, 80) : "",
+    subject: templateType === "email" ? cleanText(raw.subject, 120) : "",
     designMode: "builder",
     htmlCode: "",
-    useLogo: raw.useLogo === true,
-    logoType: "text",
-    logoValue: cleanText(raw.logoValue, 200),
+    useLogo,
+    logoType,
+    logoValue,
+    textAlign,
     introText,
     useAiBody,
     customBodyText,

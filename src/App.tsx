@@ -110,6 +110,7 @@ const CampaignReport = lazy(() => import("./CampaignReport"));
 const Conversations = lazy(() => import("./Conversations"));
 const BusinessPanel = lazy(() => import("./features/BusinessPanel"));
 const AssistantPanel = lazy(() => import("./features/AssistantPanel"));
+import AiAssistantWidget from "./features/AiAssistantWidget";
 const TargetingPanel = lazy(() => import("./features/TargetingPanel"));
 const CampaignPanel = lazy(() => import("./features/CampaignPanel"));
 const SuppressionPanel = lazy(() => import("./features/SuppressionPanel"));
@@ -130,6 +131,34 @@ const DASHBOARD_ROUTE_ICONS: Record<DashboardTab, LucideIcon> = {
   settings: Settings,
   outreach: Send,
 };
+
+/**
+ * Keyless basemap rendered inside Leaflet through MapLibre.
+ *
+ * OpenStreetMap supplies the geographic data, but its volunteer-run raster tile
+ * server blocks applications that do not meet its public-server policy. The
+ * OpenFreeMap public instance is built for application traffic, requires no
+ * account or API key, and keeps the existing Leaflet marker/circle API intact.
+ */
+const OPEN_FREE_MAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
+const OPEN_FREE_MAP_ATTRIBUTION =
+  '<a href="https://openfreemap.org" target="_blank" rel="noopener noreferrer">OpenFreeMap</a> ' +
+  '<a href="https://www.openmaptiles.org/" target="_blank" rel="noopener noreferrer">&copy; OpenMapTiles</a> ' +
+  'Data from <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>';
+
+function addOpenFreeMapLayer(L: any, map: any): void {
+  if (typeof L.maplibreGL !== "function") {
+    throw new Error("The OpenFreeMap renderer did not load.");
+  }
+
+  L.maplibreGL({
+    style: OPEN_FREE_MAP_STYLE,
+    maxZoom: 19,
+    attributionControl: { customAttribution: OPEN_FREE_MAP_ATTRIBUTION },
+  }).addTo(map);
+  map.setMaxZoom(19);
+}
+
 // The spreadsheet, PDF and Word writers are only reachable from the export
 // buttons, so they are fetched at the moment a user clicks one rather than
 // shipped to every user who never exports anything.
@@ -960,11 +989,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     const map = L.map("finder-map").setView([initialLat, initialLng], 12);
     finderMapInstance.current = map;
 
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-      subdomains: 'abcd',
-      maxZoom: 20
-    }).addTo(map);
+    addOpenFreeMapLayer(L, map);
 
     const marker = L.marker([initialLat, initialLng], { draggable: true }).addTo(map);
     finderMarker.current = marker;
@@ -1043,11 +1068,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
       const map = L.map("overview-map").setView([centerLat, centerLng], 12);
       overviewMapInstance.current = map;
 
-      L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-        subdomains: 'abcd',
-        maxZoom: 20
-      }).addTo(map);
+      addOpenFreeMapLayer(L, map);
     }
 
     const leadsToShow = overviewMapFilter === "ALL"
@@ -4816,7 +4837,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
           {/* TAB 4: INTEGRATIONS & OUTREACH SETTINGS */}
           {activeTab === "settings" && (
-            <div className="space-y-6">
+            <div className="space-y-6 w-full">
               <IntegrationSettings 
                 isLight={isLight} 
                 canWhatsapp={canWhatsapp}
@@ -5606,12 +5627,6 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
             </div>
           )}
 
-          {activeTab === "assistant" && (
-            <div className="animate-fadeIn">
-              <AssistantPanel isLight={isLight} />
-            </div>
-          )}
-
           {activeTab === "targeting" && (
             <div className="animate-fadeIn">
               <TargetingPanel isLight={isLight} />
@@ -6282,6 +6297,9 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
           </div>
         </ModalPortal>
       )}
+
+      {/* Freely Movable Floating AI Assistant Widget */}
+      <AiAssistantWidget isLight={isLight} />
 
     </div>
   );

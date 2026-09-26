@@ -42,11 +42,17 @@ const ALL_PROVIDERS: Record<AiProviderId, AiProvider> = {
 /**
  * Default preference order.
  *
- * OpenRouter first because it fronts many models behind one key, then Gemini
- * (the key this deployment actually has), then the two direct vendors. Override
- * with AI_PROVIDER_ORDER="gemini,openai".
+ * Gemini first: it is the account this deployment pays for directly, it has no
+ * per-request credit reservation to trip over, and it is the only configured
+ * provider that can also produce embeddings. OpenRouter sits behind it as the
+ * free safety net, then the two direct vendors.
+ *
+ * This used to be OpenRouter-first, which made every call depend on an
+ * OpenRouter credit balance even when a working Gemini key was present — a
+ * low balance failed the request before the primary provider was ever tried.
+ * Override with AI_PROVIDER_ORDER="openrouter,gemini".
  */
-const DEFAULT_ORDER: AiProviderId[] = ["openrouter", "gemini", "openai", "anthropic"];
+const DEFAULT_ORDER: AiProviderId[] = ["gemini", "openrouter", "openai", "anthropic"];
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_ATTEMPTS_PER_PROVIDER = 2;

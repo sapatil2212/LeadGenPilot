@@ -98,20 +98,30 @@ const REQ = { messages: [{ role: "user" as const, content: "hi" }] };
 const OPTS = { operation: "test.op" };
 
 describe("provider chain", () => {
+  /**
+   * Gemini leads because it is the directly-paid account, it applies no
+   * per-request credit reservation, and it is the only configured provider that
+   * also embeds. OpenRouter follows as the free safety net.
+   *
+   * The order was the reverse of this, which made every call contingent on an
+   * OpenRouter balance even with a working Gemini key present: a balance a few
+   * tokens short of the reserved output window failed the request outright,
+   * before the primary provider was ever consulted.
+   */
   it("uses the documented default order", () => {
-    expect(configuredProviderIds()).toEqual(["openrouter", "gemini", "openai", "anthropic"]);
+    expect(configuredProviderIds()).toEqual(["gemini", "openrouter", "openai", "anthropic"]);
   });
 
   it("honours AI_PROVIDER_ORDER", () => {
-    process.env.AI_PROVIDER_ORDER = "gemini,openai";
+    process.env.AI_PROVIDER_ORDER = "openrouter,openai";
     // Providers not named are appended, never dropped, so a typo in this
     // variable cannot silently disable fallback altogether.
-    expect(configuredProviderIds()).toEqual(["gemini", "openai", "openrouter", "anthropic"]);
+    expect(configuredProviderIds()).toEqual(["openrouter", "openai", "gemini", "anthropic"]);
   });
 
   it("ignores unknown names in AI_PROVIDER_ORDER", () => {
-    process.env.AI_PROVIDER_ORDER = "nonsense,gemini";
-    expect(configuredProviderIds()[0]).toBe("gemini");
+    process.env.AI_PROVIDER_ORDER = "nonsense,openai";
+    expect(configuredProviderIds()[0]).toBe("openai");
   });
 
   it("excludes providers with no credentials", () => {
@@ -137,9 +147,9 @@ describe("provider chain", () => {
 describe("generateText", () => {
   it("returns the first configured provider's answer", async () => {
     const result = await generateText(REQ, OPTS);
-    expect(result.provider).toBe("openrouter");
-    expect(result.text).toBe("hello from openrouter");
-    expect(all.gemini.generate).not.toHaveBeenCalled();
+    expect(result.provider).toBe("gemini");
+    expect(result.text).toBe("hello from gemini");
+    expect(all.openrouter.generate).not.toHaveBeenCalled();
   });
 
   it("always sends an output ceiling, even when the caller names none", async () => {
@@ -152,46 +162,46 @@ describe("generateText", () => {
      * one. Observed against a real account during Phase 4 verification.
      */
     await generateText(REQ, OPTS);
-    expect(all.openrouter.generate.mock.calls[0][0].maxTokens).toBe(4_096);
+    expect(all.gemini.generate.mock.calls[0][0].maxTokens).toBe(4_096);
   });
 
   it("lets the caller override the ceiling", async () => {
     await generateText({ ...REQ, maxTokens: 512 }, OPTS);
-    expect(all.openrouter.generate.mock.calls[0][0].maxTokens).toBe(512);
+    expect(all.gemini.generate.mock.calls[0][0].maxTokens).toBe(512);
   });
 
   it("falls back to the next provider on a non-retryable failure", async () => {
-    all.openrouter.generate = vi.fn(async () => {
-      throw new AiProviderError("openrouter", "bad api key", { status: 401, retryable: false });
+    all.gemini.generate = vi.fn(async () => {
+      throw new AiProviderError("gemini", "bad api key", { status: 401, retryable: false });
     }) as any;
 
     const result = await generateText(REQ, OPTS);
-    expect(result.provider).toBe("gemini");
+    expect(result.provider).toBe("openrouter");
     // Not worth a second attempt with the same bad credentials.
-    expect(all.openrouter.generate).toHaveBeenCalledTimes(1);
+    expect(all.gemini.generate).toHaveBeenCalledTimes(1);
   });
 
   it("retries a retryable failure once before moving on", async () => {
-    all.openrouter.generate = vi.fn(async () => {
-      throw new AiProviderError("openrouter", "rate limited", { status: 429, retryable: true });
+    all.gemini.generate = vi.fn(async () => {
+      throw new AiProviderError("gemini", "rate limited", { status: 429, retryable: true });
     }) as any;
 
     const result = await generateText(REQ, OPTS);
-    expect(all.openrouter.generate).toHaveBeenCalledTimes(2);
-    expect(result.provider).toBe("gemini");
+    expect(all.gemini.generate).toHaveBeenCalledTimes(2);
+    expect(result.provider).toBe("openrouter");
   });
 
   it("recovers when the retry succeeds", async () => {
     let calls = 0;
-    all.openrouter.generate = vi.fn(async () => {
+    all.gemini.generate = vi.fn(async () => {
       calls++;
-      if (calls === 1) throw new AiProviderError("openrouter", "blip", { retryable: true });
-      return { text: "second time", provider: "openrouter", model: "or-model", latencyMs: 1 };
+      if (calls === 1) throw new AiProviderError("gemini", "blip", { retryable: true });
+      return { text: "second time", provider: "gemini", model: "gem-model", latencyMs: 1 };
     }) as any;
 
     const result = await generateText(REQ, OPTS);
     expect(result.text).toBe("second time");
-    expect(all.gemini.generate).not.toHaveBeenCalled();
+    expect(all.openrouter.generate).not.toHaveBeenCalled();
   });
 
   it("throws AiUnavailableError listing every provider when all fail", async () => {
@@ -205,7 +215,7 @@ describe("generateText", () => {
     const error = await generateText(REQ, OPTS).catch((e) => e);
     expect(error).toBeInstanceOf(AiUnavailableError);
     expect(error.attempts.map((a: any) => a.provider)).toEqual([
-      "openrouter", "gemini", "openai", "anthropic",
+      "gemini", "openrouter", "openai", "anthropic",
     ]);
   });
 
@@ -222,34 +232,34 @@ describe("generateText", () => {
    * caller indefinitely — once per lead, inside a sequential scrape.
    */
   it("abandons a provider that never responds", async () => {
-    all.openrouter.generate = vi.fn(
+    all.gemini.generate = vi.fn(
       () => new Promise(() => { /* never settles */ })
     ) as any;
 
     const result = await generateText({ ...REQ, timeoutMs: 50 }, OPTS);
-    expect(result.provider).toBe("gemini");
+    expect(result.provider).toBe("openrouter");
   }, 10_000);
 
   it("emits a usage event per attempt, successful or not", async () => {
     const events: any[] = [];
     setUsageSink((e) => events.push(e));
 
-    all.openrouter.generate = vi.fn(async () => {
-      throw new AiProviderError("openrouter", "nope", { retryable: false });
+    all.gemini.generate = vi.fn(async () => {
+      throw new AiProviderError("gemini", "nope", { retryable: false });
     }) as any;
 
     await generateText(REQ, { operation: "test.usage", tenantId: "ws_1" });
 
     expect(events).toHaveLength(2);
-    expect(events[0]).toMatchObject({ provider: "openrouter", ok: false, tenantId: "ws_1" });
-    expect(events[1]).toMatchObject({ provider: "gemini", ok: true, operation: "test.usage" });
+    expect(events[0]).toMatchObject({ provider: "gemini", ok: false, tenantId: "ws_1" });
+    expect(events[1]).toMatchObject({ provider: "openrouter", ok: true, operation: "test.usage" });
   });
 
   it("never lets a broken usage sink break the call", async () => {
     setUsageSink(() => {
       throw new Error("accounting exploded");
     });
-    await expect(generateText(REQ, OPTS)).resolves.toMatchObject({ provider: "openrouter" });
+    await expect(generateText(REQ, OPTS)).resolves.toMatchObject({ provider: "gemini" });
   });
 });
 
@@ -273,8 +283,8 @@ describe("generateStructuredOutput", () => {
   };
 
   it("parses and validates a good response", async () => {
-    all.openrouter.generate = vi.fn(async () => ({
-      text: '{"name":"Acme"}', provider: "openrouter", model: "or-model", latencyMs: 1,
+    all.gemini.generate = vi.fn(async () => ({
+      text: '{"name":"Acme"}', provider: "gemini", model: "gem-model", latencyMs: 1,
     })) as any;
 
     const { value } = await generateStructuredOutput(REQ, { ...OPTS, validate });
@@ -283,9 +293,9 @@ describe("generateStructuredOutput", () => {
 
   it("requests JSON mode from the provider", async () => {
     const spy = vi.fn(async (_req: unknown) => ({
-      text: '{"name":"Acme"}', provider: "openrouter", model: "or-model", latencyMs: 1,
+      text: '{"name":"Acme"}', provider: "gemini", model: "gem-model", latencyMs: 1,
     }));
-    all.openrouter.generate = spy as any;
+    all.gemini.generate = spy as any;
 
     await generateStructuredOutput(REQ, { ...OPTS, validate });
     expect(spy.mock.calls[0][0]).toMatchObject({ json: true });
@@ -296,9 +306,9 @@ describe("generateStructuredOutput", () => {
     // used for text completions is appropriate. The earlier value of 8,192 was
     // refused on the OpenRouter free tier before the model ever ran.
     const spy = vi.fn(async (_req: unknown) => ({
-      text: '{"name":"Acme"}', provider: "openrouter", model: "or-model", latencyMs: 1,
+      text: '{"name":"Acme"}', provider: "gemini", model: "gem-model", latencyMs: 1,
     }));
-    all.openrouter.generate = spy as any;
+    all.gemini.generate = spy as any;
 
     await generateStructuredOutput(REQ, { ...OPTS, validate });
     expect((spy.mock.calls[0][0] as any).maxTokens).toBe(4_096);
@@ -306,11 +316,11 @@ describe("generateStructuredOutput", () => {
 
   it("asks the model to correct unparseable output, then succeeds", async () => {
     let calls = 0;
-    all.openrouter.generate = vi.fn(async () => {
+    all.gemini.generate = vi.fn(async () => {
       calls++;
       return {
         text: calls === 1 ? "I think the name is Acme." : '{"name":"Acme"}',
-        provider: "openrouter", model: "or-model", latencyMs: 1,
+        provider: "gemini", model: "gem-model", latencyMs: 1,
       };
     }) as any;
 
@@ -319,18 +329,18 @@ describe("generateStructuredOutput", () => {
     expect(calls).toBe(2);
 
     // The repair turn must describe the failure, or the model repeats it.
-    const secondCall = (all.openrouter.generate as any).mock.calls[1][0];
+    const secondCall = (all.gemini.generate as any).mock.calls[1][0];
     const lastMessage = secondCall.messages[secondCall.messages.length - 1];
     expect(lastMessage.content).toMatch(/previous reply could not be used/i);
   });
 
   it("repairs a response that parses but fails the schema", async () => {
     let calls = 0;
-    all.openrouter.generate = vi.fn(async () => {
+    all.gemini.generate = vi.fn(async () => {
       calls++;
       return {
         text: calls === 1 ? '{"wrongField":true}' : '{"name":"Acme"}',
-        provider: "openrouter", model: "or-model", latencyMs: 1,
+        provider: "gemini", model: "gem-model", latencyMs: 1,
       };
     }) as any;
 
@@ -340,7 +350,7 @@ describe("generateStructuredOutput", () => {
 
   it("gives up after one repair attempt rather than looping", async () => {
     const spy = vi.fn(async () => ({
-      text: "still not json", provider: "openrouter", model: "or-model", latencyMs: 1,
+      text: "still not json", provider: "gemini", model: "gem-model", latencyMs: 1,
     }));
     for (const key of Object.keys(all)) all[key].generate = spy as any;
 

@@ -59,14 +59,6 @@ export const DASHBOARD_ROUTES: readonly DashboardRoute[] = [
     group: "foundation",
   },
   {
-    id: "assistant",
-    path: "/app/assistant",
-    label: "Assistant",
-    title: "AI Assistant",
-    description: "Ask questions using your workspace's trusted business context.",
-    group: "foundation",
-  },
-  {
     id: "targeting",
     path: "/app/targeting",
     label: "Targeting",
@@ -152,6 +144,7 @@ const routeByPath = new Map<string, DashboardRoute>(
 const PATH_ALIASES: Readonly<Record<string, DashboardRoute["id"]>> = {
   "/app/dashboard": "dashboard",
   "/app/knowledge": "business",
+  "/app/assistant": "business",
   "/app/finder": "finder",
   "/app/conversations": "conversations",
   "/app/suppressions": "suppressions",

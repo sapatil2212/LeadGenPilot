@@ -81,10 +81,10 @@ export function corsMiddleware(): RequestHandler {
  * Content Security Policy.
  *
  * Enumerates exactly the third-party origins this application actually loads:
- *   unpkg.com                  Leaflet script + stylesheet (index.html)
+ *   unpkg.com                  Leaflet, MapLibre and bridge assets (index.html)
+ *   tiles.openfreemap.org      Keyless vector-map style, tiles, fonts + sprites
  *   fonts.googleapis.com       Google Fonts stylesheets
  *   fonts.gstatic.com          Google Fonts font files
- *   *.basemaps.cartocdn.com    Leaflet map tiles
  *
  * `'unsafe-inline'` is still required for styles (Tailwind and the inline
  * <style> blocks in the superadmin and landing pages) and for scripts (inline
@@ -98,7 +98,7 @@ export function corsMiddleware(): RequestHandler {
  * an origin outside the list above, and the app can no longer be framed.
  */
 export function buildContentSecurityPolicy(): Record<string, string[]> {
-  const connectSources = ["'self'", "https://unpkg.com"];
+  const connectSources = ["'self'", "https://unpkg.com", "https://tiles.openfreemap.org"];
   if (!env.isProduction) {
     // Vite's development client uses a websocket, sometimes on a dedicated
     // client port. Keep this development-only; production remains restricted.
@@ -111,7 +111,9 @@ export function buildContentSecurityPolicy(): Record<string, string[]> {
     "style-src": ["'self'", "'unsafe-inline'", "https://unpkg.com", "https://fonts.googleapis.com"],
     "font-src": ["'self'", "data:", "https://fonts.gstatic.com"],
     // blob: and data: cover the QR image, logo blob fetch and PDF generation.
-    "img-src": ["'self'", "data:", "blob:", "https://*.basemaps.cartocdn.com", "https://unpkg.com"],
+    // OpenFreeMap resources are normally fetched under connect-src; img-src is
+    // included too for style sprites and browser-specific image decoding paths.
+    "img-src": ["'self'", "data:", "blob:", "https://tiles.openfreemap.org", "https://unpkg.com"],
     "connect-src": connectSources,
     "worker-src": ["'self'", "blob:"],
     "object-src": ["'none'"],

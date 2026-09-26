@@ -24,6 +24,7 @@ import {
   type GenerateCampaignRequest,
 } from "./campaignService";
 import { enqueueCampaignExecution, cancelCampaignExecution } from "./campaignExecutor";
+import { assertCampaignReadiness } from "./campaignReadiness";
 
 const router = Router();
 
@@ -50,6 +51,10 @@ router.post(
       assertCampaignFeatures(req);
       const request = req.body as GenerateCampaignRequest;
 
+      // Tenant-owned integrations are prerequisites, not optional UI hints.
+      // This also guarantees the active reviewed workflow never falls back to
+      // deployment-wide Sheet or SMTP environment variables.
+      await assertCampaignReadiness(ctx, request.channels);
       const result = await generateCampaign(ctx, request);
       res.status(201).json(result);
     } catch (error: any) {

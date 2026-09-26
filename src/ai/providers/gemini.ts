@@ -13,9 +13,26 @@ import {
   type GenerateResult,
 } from "../types";
 
+/**
+ * Returns the raw env value if it passes basic sanity checks.
+ *
+ * We validate the shape here rather than at call time so that
+ * `isConfigured()` returns false for keys that will always be rejected,
+ * and the provider chain skips Gemini entirely instead of burning a
+ * round-trip on every request.
+ */
+let _shapeWarningLogged = false;
+
+function isValidKeyShape(key: string): boolean {
+  // Google AI Studio keys always begin with "AIza".
+  if (key.startsWith("AIza")) return true;
+  return false;
+}
+
 function readApiKey(): string {
   const key = (process.env.GEMINI_API_KEY || "").trim();
-  return key && key !== "MY_GEMINI_API_KEY" ? key : "";
+  if (!key || key === "MY_GEMINI_API_KEY") return "";
+  return key;
 }
 
 /**
@@ -88,7 +105,28 @@ export const geminiProvider: AiProvider = {
   defaultEmbeddingModel: "text-embedding-004",
 
   isConfigured() {
-    return readApiKey() !== "";
+    const key = readApiKey();
+    if (!key) return false;
+    if (!isValidKeyShape(key)) {
+      if (!_shapeWarningLogged) {
+        _shapeWarningLogged = true;
+        try {
+          const { logger } = require("../../logger");
+          logger.warn(
+            `GEMINI_API_KEY is set but does not look like a Google AI Studio key (expected "AIza…"). ` +
+            `The current value starts with "${key.slice(0, 3)}…". ` +
+            `Gemini provider will be skipped — create a key at https://aistudio.google.com/apikey`
+          );
+        } catch {
+          console.warn(
+            `[WARN] GEMINI_API_KEY does not look like a Google AI Studio key (expected "AIza…"). ` +
+            `Gemini provider will be skipped.`
+          );
+        }
+      }
+      return false;
+    }
+    return true;
   },
 
   async generate(request: GenerateRequest): Promise<GenerateResult> {

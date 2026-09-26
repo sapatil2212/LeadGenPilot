@@ -900,7 +900,7 @@ function doGet(e) {
   }
 
   return (
-    <div className="space-y-6 max-w-5xl animate-fadeIn">
+    <div className="space-y-6 w-full animate-fadeIn">
       {/* Header Info Panel */}
       <div className={`border rounded-xl p-4 sm:p-5 relative overflow-hidden ${
         isLight 
@@ -913,7 +913,7 @@ function doGet(e) {
             <h2 className={`text-base font-bold tracking-tight mb-1 ${isLight ? "text-slate-900" : "text-white"}`}>
               Integration Hub
             </h2>
-            <p className={`text-xs leading-relaxed max-w-2xl ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+            <p className={`text-xs leading-relaxed ${isLight ? "text-slate-500" : "text-slate-400"}`}>
               Configure your personal connection gateways. Use custom SMTP configurations for email dispatches, Google Sheets sync for lead capture, or the virtual WhatsApp Web gateway for outreach dispatches.
             </p>
           </div>
@@ -929,17 +929,41 @@ function doGet(e) {
       </div>
 
       {/* Tab Switcher Segmented Control */}
-      <div className="flex p-0.5 gap-1 rounded-xl border border-slate-200/40 bg-slate-100/10 max-w-md">
+      <div className="flex p-0.5 gap-1 rounded-xl border border-slate-200/40 bg-slate-100/10 w-full sm:w-auto sm:inline-flex max-w-lg">
         <button
-          onClick={() => setActiveTab("smtp")}
+          onClick={() => {
+            setActiveTab("smtp");
+            if (!smtpInt) {
+              showMessage("error", "SMTP is not connected. Please enter and save your SMTP server credentials below.");
+            }
+          }}
           className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
             activeTab === "smtp"
-              ? "bg-indigo-600 text-white shadow-xs shadow-indigo-600/20"
-              : `${isLight ? "text-slate-600 hover:bg-white hover:text-slate-950" : "text-slate-400 hover:bg-slate-800/40 hover:text-slate-200"}`
+              ? !smtpInt
+                ? isLight
+                  ? "bg-rose-100 text-rose-800 border border-rose-300 shadow-xs"
+                  : "bg-rose-500/20 text-rose-300 border border-rose-500/35 shadow-xs"
+                : "bg-indigo-600 text-white shadow-xs shadow-indigo-600/20"
+              : !smtpInt
+                ? isLight
+                  ? "text-rose-700 hover:bg-rose-50 hover:text-rose-900 border border-rose-200"
+                  : "text-rose-400/90 hover:bg-rose-500/10 hover:text-rose-300 border border-rose-500/20"
+                : isLight
+                  ? "text-slate-600 hover:bg-white hover:text-slate-950"
+                  : "text-slate-400 hover:bg-slate-800/40 hover:text-slate-200"
           }`}
         >
-          <Mail className="w-3.5 h-3.5" />
-          SMTP Email
+          <Mail className={`w-3.5 h-3.5 ${!smtpInt ? (isLight ? "text-rose-700" : "text-rose-400") : ""}`} />
+          <span>Configure SMTP</span>
+          {!smtpInt && (
+            <span className={`text-[9.5px] px-1.5 py-0.2 rounded font-semibold ${
+              isLight
+                ? "bg-rose-200/90 border border-rose-300 text-rose-800"
+                : "bg-rose-500/20 border border-rose-500/30 text-rose-300"
+            }`}>
+              Not Connected
+            </span>
+          )}
         </button>
         <button
           onClick={() => setActiveTab("google_sheet")}
@@ -970,14 +994,18 @@ function doGet(e) {
         <div
           className={`p-3 rounded-xl border flex items-center gap-2 transition-all text-xs font-medium ${
             message.type === "success"
-              ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-500"
-              : "bg-rose-500/5 border-rose-500/20 text-rose-500"
+              ? isLight
+                ? "bg-emerald-50 border-emerald-300 text-emerald-800"
+                : "bg-emerald-500/5 border-emerald-500/20 text-emerald-500"
+              : isLight
+                ? "bg-rose-50 border-rose-300 text-rose-800 font-semibold"
+                : "bg-rose-500/15 border-rose-500/30 text-rose-300"
           }`}
         >
           {message.type === "success" ? (
-            <CheckCircle2 className="w-4 h-4" />
+            <CheckCircle2 className={`w-4 h-4 ${isLight ? "text-emerald-700" : "text-emerald-500"}`} />
           ) : (
-            <AlertTriangle className="w-4 h-4" />
+            <AlertTriangle className={`w-4 h-4 ${isLight ? "text-rose-700" : "text-rose-400"}`} />
           )}
           <span>{message.text}</span>
         </div>
@@ -987,6 +1015,43 @@ function doGet(e) {
       {activeTab === "smtp" && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
           <div className="lg:col-span-8 space-y-5">
+            {!smtpInt && (
+              <div
+                className={`p-4 rounded-xl border flex items-start gap-3 transition-all ${
+                  isLight
+                    ? "bg-rose-50 border-rose-300 text-rose-900 shadow-xs"
+                    : "bg-rose-500/10 border-rose-500/20 text-rose-300"
+                }`}
+              >
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${
+                  isLight
+                    ? "bg-rose-200/80 border border-rose-300 text-rose-700"
+                    : "bg-rose-500/15 border border-rose-500/25 text-rose-400"
+                }`}>
+                  <AlertTriangle className="w-4 h-4" />
+                </div>
+                <div className="flex-1 space-y-1">
+                  <div className="flex items-center gap-2">
+                    <h4 className={`font-bold text-xs ${isLight ? "text-rose-900" : "text-rose-300"}`}>
+                      SMTP Not Connected
+                    </h4>
+                    <span className={`text-[9.5px] px-1.5 py-0.2 rounded font-bold uppercase tracking-wider ${
+                      isLight
+                        ? "bg-rose-200/90 border border-rose-300 text-rose-800"
+                        : "bg-rose-500/20 border border-rose-500/30 text-rose-300"
+                    }`}>
+                      Action Required
+                    </span>
+                  </div>
+                  <p className={`text-[11.5px] leading-relaxed ${
+                    isLight ? "text-rose-800" : "text-rose-300/90"
+                  }`}>
+                    You haven't connected an SMTP email gateway yet. Email outreach campaigns will not be able to dispatch until you enter and save your SMTP server credentials below.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {smtpInt && !isEditingSmtp ? (
               /* Active SMTP connection detail card */
               <div className={`border rounded-xl p-4 sm:p-4.5 ${
@@ -1090,13 +1155,33 @@ function doGet(e) {
             ) : (
               /* SMTP Edit/Add form */
               <div className={`border rounded-xl p-4 sm:p-4.5 space-y-3.5 ${
-                isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
+                isLight 
+                  ? !smtpInt ? "bg-white border-rose-300 shadow-xs" : "bg-white border-slate-200" 
+                  : !smtpInt ? "bg-[#090d16] border-rose-500/25" : "bg-[#090d16] border-[#1e293b]"
               }`}>
-                <div className="pb-2.5 border-b border-slate-200/20">
-                  <h3 className={`text-xs font-bold flex items-center gap-2 ${isLight ? "text-slate-800" : "text-white"}`}>
-                    <Key className="w-3.5 h-3.5 text-indigo-400" />
-                    {isEditingSmtp ? "Modify SMTP Settings" : "Configure Custom SMTP"}
+                <div className={`pb-2.5 border-b flex items-center justify-between ${
+                  isLight ? (!smtpInt ? "border-rose-100" : "border-slate-200/60") : "border-slate-200/20"
+                }`}>
+                  <h3 className={`text-xs font-bold flex items-center gap-2 ${
+                    !smtpInt 
+                      ? isLight ? "text-rose-800" : "text-rose-300"
+                      : isLight ? "text-slate-800" : "text-white"
+                  }`}>
+                    <Key className={`w-3.5 h-3.5 ${
+                      !smtpInt ? (isLight ? "text-rose-600" : "text-rose-400") : "text-indigo-400"
+                    }`} />
+                    {isEditingSmtp ? "Modify SMTP Settings" : "Configure SMTP Gateway"}
                   </h3>
+                  {!smtpInt && (
+                    <span className={`text-[10px] px-2 py-0.5 rounded font-semibold flex items-center gap-1.5 ${
+                      isLight
+                        ? "bg-rose-100 border border-rose-300 text-rose-800"
+                        : "bg-rose-500/10 border border-rose-500/20 text-rose-300"
+                    }`}>
+                      <span className={`w-1.5 h-1.5 rounded-full ${isLight ? "bg-rose-600" : "bg-rose-500"} animate-pulse`} />
+                      Not Connected
+                    </span>
+                  )}
                 </div>
 
                 <div className="space-y-3 text-xs">

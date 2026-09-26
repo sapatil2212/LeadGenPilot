@@ -49,11 +49,10 @@ export function addFailedLead(lead: Lead): void {
  * Sends a qualified lead to Google Sheets webhook with retry logic
  */
 export async function sendLeadToWebhook(lead: Lead, customWebhookUrl?: string): Promise<boolean> {
-  const webhookUrl = customWebhookUrl || process.env.GOOGLE_SHEET_WEBHOOK_URL;
+  const webhookUrl = customWebhookUrl;
   
   if (!webhookUrl || webhookUrl.trim() === "" || webhookUrl === "YOUR_WEBHOOK_URL") {
-    logger.warn("Google Sheet Webhook URL is not configured.");
-    addFailedLead(lead);
+    logger.warn("Google Sheet Webhook URL is not configured in Integrations.");
     return false;
   }
 
@@ -161,10 +160,10 @@ export async function retryFailedLeads(customWebhookUrl?: string): Promise<{ suc
  * optionally filtered by a specific sub-sheet (tab) name.
  */
 export async function fetchLeadsFromGoogleSheet(sheetName?: string, customWebhookUrl?: string): Promise<Lead[]> {
-  const webhookUrl = customWebhookUrl || process.env.GOOGLE_SHEET_WEBHOOK_URL;
+  const webhookUrl = customWebhookUrl;
   if (!webhookUrl || webhookUrl.trim() === "" || webhookUrl === "YOUR_WEBHOOK_URL") {
-    logger.warn("Google Sheet webhook URL is not configured. Cannot fetch leads from Google Sheet.");
-    return [];
+    logger.warn("Google Sheet webhook URL is not configured in Integrations. Cannot fetch leads.");
+    throw new Error("Google Sheet integration is not connected. Please connect your Google Sheet under Settings > Integrations.");
   }
 
   try {
@@ -224,9 +223,9 @@ export async function fetchLeadsFromGoogleSheet(sheetName?: string, customWebhoo
  * Fetches the active list of sub-sheets (tab names) from the Google Sheet via Web App GET request.
  */
 export async function fetchSheetNamesFromGoogleSheet(customWebhookUrl?: string): Promise<string[]> {
-  const webhookUrl = customWebhookUrl || process.env.GOOGLE_SHEET_WEBHOOK_URL;
+  const webhookUrl = customWebhookUrl;
   if (!webhookUrl || webhookUrl.trim() === "" || webhookUrl === "YOUR_WEBHOOK_URL") {
-    logger.warn("Google Sheet webhook URL is not configured. Cannot fetch sub-sheet names.");
+    logger.warn("Google Sheet webhook URL is not configured in Integrations. Cannot fetch sub-sheet names.");
     return [];
   }
 
@@ -252,4 +251,68 @@ export async function fetchSheetNamesFromGoogleSheet(customWebhookUrl?: string):
     logger.error(`Failed to fetch sub-sheet names from Google Sheet: ${error.message || error}`);
   }
   return [];
+}
+
+/**
+ * Synchronize a durable campaign's terminal outreach state to the workspace's
+ * connected Google Sheet.
+ *
+ * Delivery has already happened when this runs, so a Sheet outage must never
+ * cause the SMTP/WhatsApp provider call to be repeated. The webhook gets its
+ * own short retries and returns false for logging/repair instead.
+ */
+export async function syncCampaignOutreachToGoogleSheet(options: {
+  webhookUrl: string;
+  businessName: string;
+  mapsUrl?: string;
+  channel: "email" | "whatsapp";
+  status: "SENT" | "FAILED";
+}): Promise<boolean> {
+  const webhookUrl = String(options.webhookUrl || "").trim();
+  if (!webhookUrl || webhookUrl === "YOUR_WEBHOOK_URL") return false;
+
+  const date = new Date().toISOString().split("T")[0];
+  const payload = {
+    action: "updateOutreach",
+    businessName: options.businessName,
+    mapsUrl: options.mapsUrl || "",
+    emailStatus: options.channel === "email" ? options.status : undefined,
+    emailSentDate: options.channel === "email" ? date : undefined,
+    whatsappStatus: options.channel === "whatsapp" ? options.status : undefined,
+    whatsappSentDate: options.channel === "whatsapp" ? date : undefined,
+  };
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await axios.post(webhookUrl, payload, {
+        headers: { "Content-Type": "application/json" },
+        timeout: 8_000,
+      });
+      let data = response.data;
+      if (typeof data === "string") {
+        try {
+          data = JSON.parse(data);
+        } catch {
+          // A successful Apps Script deployment can return an empty/plain body.
+        }
+      }
+      if (data && typeof data === "object" && data.status === "error") {
+        throw new Error(`Google Apps Script error: ${data.message || "unknown error"}`);
+      }
+      logger.success(
+        `Synchronized ${options.channel} ${options.status} status for '${options.businessName}' to the workspace Google Sheet.`
+      );
+      return true;
+    } catch (error: any) {
+      if (attempt === 3) {
+        logger.warn(
+          `Could not synchronize campaign status for '${options.businessName}' to Google Sheets after 3 attempts: ${error?.message || error}`
+        );
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
+    }
+  }
+
+  return false;
 }

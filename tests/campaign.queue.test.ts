@@ -1,17 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TenantContext } from "../src/tenancy/context";
 
-const mocks = vi.hoisted(() => ({ prisma: null as any, sendEmail: vi.fn(), sendWhatsApp: vi.fn(), integration: vi.fn() }));
+const mocks = vi.hoisted(() => ({ prisma: null as any, sendEmail: vi.fn(), sendWhatsApp: vi.fn(), integration: vi.fn(), syncSheet: vi.fn() }));
 vi.mock("../src/prisma", () => ({ prisma: new Proxy({}, { get: (_t, key) => mocks.prisma[key as any] }) }));
 vi.mock("../src/outreachService", () => ({ sendEmailOutreach: mocks.sendEmail }));
 vi.mock("../src/whatsappGateway", () => ({ sendWhatsAppUnified: mocks.sendWhatsApp }));
 vi.mock("../src/userIntegrationService", () => ({ getUserIntegration: mocks.integration }));
+vi.mock("../src/googleSheetsWebhook", () => ({ syncCampaignOutreachToGoogleSheet: mocks.syncSheet }));
 
 const queue = await import("../src/campaign/campaignExecutor");
 const ctx: TenantContext = { tenantId: "tenant-a", userId: "user-a", membershipId: "member-a", role: "owner", tenantName: "A", tenantSlug: "a", permissions: new Set() };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.integration.mockImplementation(async (_userId: string, type: string) =>
+    type === "google_sheet"
+      ? { webhookUrl: "https://sheet.test/webhook" }
+      : { host: "smtp.test", port: 587, user: "sender", password: "secret", fromEmail: "sender@test" }
+  );
+  mocks.syncSheet.mockResolvedValue(true);
   mocks.prisma = {
     $transaction: vi.fn(async (fn: any) => fn(mocks.prisma)),
     campaign: { updateMany: vi.fn().mockResolvedValue({ count: 1 }), findFirst: vi.fn().mockResolvedValue({ id: "campaign-a", status: "approved", name: "A" }), update: vi.fn(), },

@@ -155,9 +155,13 @@ describe("Content-Security-Policy", () => {
     // Google Fonts stylesheet + font files
     expect(csp["style-src"]).toContain("https://fonts.googleapis.com");
     expect(csp["font-src"]).toContain("https://fonts.gstatic.com");
-    // Map tiles
-    expect(csp["img-src"]).toContain("https://*.basemaps.cartocdn.com");
-    // External connections are restricted to the one CDN asset source. Vite
+    // OpenFreeMap's public vector-tile service requires no API key. The two
+    // raster hosts that failed in production are intentionally absent.
+    expect(csp["connect-src"]).toContain("https://tiles.openfreemap.org");
+    expect(csp["img-src"]).toContain("https://tiles.openfreemap.org");
+    expect(csp["img-src"]).not.toContain("https://tile.openstreetmap.org");
+    expect(csp["img-src"]).not.toContain("https://*.basemaps.cartocdn.com");
+    // External connections are restricted to the asset and tile origins. Vite
     // websocket origins are allowed only in development.
     expect(csp["connect-src"]).toContain("'self'");
     expect(csp["connect-src"]).toContain("https://unpkg.com");

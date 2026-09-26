@@ -24,13 +24,40 @@
  * lead access without the ability to delete records or export the database.
  */
 
-import express, { type Request, type Response } from "express";
+import express, { type Request, type Response, type NextFunction } from "express";
+import multer from "multer";
 import { prisma } from "./src/prisma";
 import { Lead as LeadType } from "./src/types";
 import { logger } from "./src/logger";
 import { resolveTenantContext, requirePermission, ctxOf } from "./src/tenancy/context";
 import * as repo from "./src/tenancy/repository";
 import { suppressContact } from "./src/compliance/suppressionService";
+import { extractTextFromFile, BUSINESS_UPLOAD_MAX_BYTES, UnsupportedFileError } from "./src/business/fileIngest";
+import { generateText, extractJson } from "./src/ai/aiService";
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: BUSINESS_UPLOAD_MAX_BYTES, files: 1 },
+});
+
+function uploadSingle(field: string) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    upload.single(field)(req, res, (err: any) => {
+      if (!err) return next();
+      if (err instanceof multer.MulterError) {
+        const limitMb = Math.round(BUSINESS_UPLOAD_MAX_BYTES / (1024 * 1024));
+        const message =
+          err.code === "LIMIT_FILE_SIZE"
+            ? `Files must be ${limitMb} MB or smaller.`
+            : err.code === "LIMIT_FILE_COUNT"
+              ? "Upload one file at a time."
+              : `Upload rejected: ${err.message}`;
+        return res.status(400).json({ error: message, code: "validation" });
+      }
+      return next(err);
+    });
+  };
+}
 
 const router = express.Router();
 
@@ -562,6 +589,281 @@ router.post("/lists/:id/leads", requirePermission("EDIT_LEADS"), async (req: Req
     res.status(500).json({ error: "Failed to save leads." });
   }
 });
+
+interface ExtractedLead {
+  businessName: string;
+  contactName?: string;
+  emails?: string[];
+  phone?: string;
+  address?: string;
+  category?: string;
+  website?: string;
+  source: "IMPORTED";
+  status: "NEW";
+}
+
+function parseTabularFallback(text: string): ExtractedLead[] {
+  const lines = text.trim().split(/\r?\n/).filter(line => line.trim().length > 0);
+  if (lines.length === 0) return [];
+
+  const sample = lines.slice(0, 5).join("\n");
+  const tabCount = (sample.match(/\t/g) || []).length;
+  const commaCount = (sample.match(/,/g) || []).length;
+  const semiCount = (sample.match(/;/g) || []).length;
+  const delimiter = tabCount > commaCount && tabCount > semiCount ? "\t" : semiCount > commaCount ? ";" : ",";
+
+  const rows = lines.map(line => {
+    if (delimiter === ",") {
+      const result: string[] = [];
+      let cur = "";
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') inQuotes = !inQuotes;
+        else if (char === ',' && !inQuotes) {
+          result.push(cur.trim().replace(/^"|"$/g, ''));
+          cur = "";
+        } else {
+          cur += char;
+        }
+      }
+      result.push(cur.trim().replace(/^"|"$/g, ''));
+      return result;
+    }
+    return line.split(delimiter).map(v => v.trim().replace(/^"|"$/g, ''));
+  });
+
+  const header = rows[0].map(x => x.toLowerCase());
+  const hasHeader = header.some(x => x.includes("name") || x.includes("company") || x.includes("business") || x.includes("email") || x.includes("phone"));
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+
+  const getCol = (names: string[], fallbackIdx: number, row: string[]) => {
+    const idx = header.findIndex(h => names.some(n => h.includes(n)));
+    return (idx >= 0 ? row[idx] : row[fallbackIdx]) || "";
+  };
+
+  const results: ExtractedLead[] = [];
+  for (const row of dataRows) {
+    if (!row || row.length === 0) continue;
+    let bName = hasHeader ? getCol(["business", "company", "firm", "name"], 0, row) : row[0];
+    if (!bName) continue;
+    bName = bName.replace(/^\d+[\.\)]\s*/, "").trim();
+    if (!bName) continue;
+
+    const contact = hasHeader ? getCol(["contact", "person", "owner", "manager"], 1, row) : (row[1] || "");
+    const emailRaw = hasHeader ? getCol(["email", "mail"], 2, row) : (row[2] || "");
+    const phone = hasHeader ? getCol(["phone", "mobile", "tel", "whatsapp", "contact_no"], 3, row) : (row[3] || "");
+    const address = hasHeader ? getCol(["location", "address", "city", "state"], 4, row) : (row[4] || "");
+    const category = hasHeader ? getCol(["industry", "category", "type", "sector"], 5, row) : (row[5] || "");
+    const website = hasHeader ? getCol(["website", "web", "url", "domain"], 6, row) : (row[6] || "");
+
+    const emails: string[] = [];
+    if (emailRaw) {
+      const emailMatches = emailRaw.match(/[\w.-]+@[\w.-]+\.\w+/g);
+      if (emailMatches) emails.push(...emailMatches);
+      else if (emailRaw.includes("@")) emails.push(emailRaw.trim());
+    }
+
+    results.push({
+      businessName: bName,
+      contactName: contact || undefined,
+      emails: emails.length > 0 ? Array.from(new Set(emails)) : undefined,
+      phone: phone || undefined,
+      address: address || undefined,
+      category: category || undefined,
+      website: website || undefined,
+      source: "IMPORTED",
+      status: "NEW",
+    });
+  }
+
+  return results;
+}
+
+async function extractLeadsWithAi(text: string, fileName: string): Promise<{ leads: ExtractedLead[]; suggestedListName: string }> {
+  const cleanBase = fileName.replace(/\.[^/.]+$/, "").replace(/[_-]/g, " ").trim();
+  let suggestedListName = cleanBase
+    .split(" ")
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+  if (!suggestedListName || suggestedListName.length < 2) {
+    suggestedListName = "Imported Leads";
+  }
+
+  const tabularLeads = parseTabularFallback(text);
+
+  try {
+    const prompt = `You are an expert AI lead extractor. Analyze the following document text and extract all business leads, companies, or potential client prospects.
+For each lead, extract:
+- businessName: company or business name (string, required)
+- contactName: contact person name if mentioned (string or null)
+- emails: array of valid email addresses found (e.g. ["info@example.com"])
+- phone: phone/mobile number if found (string or null)
+- address: address, city, region or country (string or null)
+- category: industry or business category (string or null)
+- website: website URL or domain (string or null)
+
+Also suggest a concise, professional lead list name (suggestedListName) describing these leads based on their industry or city (e.g. "Pune Dentists Q3", "Retail Suppliers", etc.).
+
+Return pure JSON in this structure:
+{
+  "suggestedListName": "${suggestedListName}",
+  "leads": [
+    {
+      "businessName": "...",
+      "contactName": "...",
+      "emails": ["..."],
+      "phone": "...",
+      "address": "...",
+      "category": "...",
+      "website": "..."
+    }
+  ]
+}
+
+Document Content:
+${text.slice(0, 35000)}
+`;
+
+    const aiRes = await generateText(
+      {
+        messages: [{ role: "user", content: prompt }],
+        maxTokens: 4000,
+        temperature: 0.2,
+      },
+      { operation: "lead_document_extraction" }
+    );
+
+    const jsonStr = extractJson(aiRes.text);
+    const parsed = JSON.parse(jsonStr);
+
+    if (parsed && Array.isArray(parsed.leads) && parsed.leads.length > 0) {
+      const validLeads: ExtractedLead[] = [];
+      const seen = new Set<string>();
+
+      for (const item of parsed.leads) {
+        if (!item || !item.businessName) continue;
+        const name = String(item.businessName).trim();
+        const key = name.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const emails: string[] = [];
+        if (Array.isArray(item.emails)) {
+          for (const e of item.emails) if (typeof e === "string" && e.includes("@")) emails.push(e.trim());
+        } else if (typeof item.emails === "string" && item.emails.includes("@")) {
+          emails.push(item.emails.trim());
+        }
+
+        validLeads.push({
+          businessName: name,
+          contactName: item.contactName ? String(item.contactName).trim() : undefined,
+          emails: emails.length > 0 ? Array.from(new Set(emails)) : undefined,
+          phone: item.phone ? String(item.phone).trim() : undefined,
+          address: item.address ? String(item.address).trim() : undefined,
+          category: item.category ? String(item.category).trim() : undefined,
+          website: item.website ? String(item.website).trim() : undefined,
+          source: "IMPORTED",
+          status: "NEW",
+        });
+      }
+
+      if (validLeads.length > 0) {
+        return {
+          leads: validLeads,
+          suggestedListName: parsed.suggestedListName ? String(parsed.suggestedListName).trim() : suggestedListName,
+        };
+      }
+    }
+  } catch (err: any) {
+    logger.warn(`AI lead extraction fell back to tabular/pattern parsing: ${err?.message || err}`);
+  }
+
+  return {
+    leads: tabularLeads,
+    suggestedListName,
+  };
+}
+
+/**
+ * POST /api/crm/leads/import-file
+ * Analyzes an uploaded document (Excel, CSV, Word, PDF, TXT) with AI,
+ * returns extracted structured leads and a suggested list name for review.
+ */
+router.post(
+  "/leads/import-file",
+  requirePermission("EDIT_LEADS"),
+  uploadSingle("file"),
+  async (req: Request, res: Response) => {
+    try {
+      let buffer: Buffer | null = null;
+      let originalName = "uploaded_file.txt";
+      let mimeType = "text/plain";
+      let size = 0;
+
+      const file = (req as any).file;
+      if (file) {
+        buffer = file.buffer;
+        originalName = file.originalname || "document";
+        mimeType = file.mimetype || "application/octet-stream";
+        size = file.size || buffer.length;
+      } else if (req.body?.fileData) {
+        buffer = Buffer.from(req.body.fileData, "base64");
+        originalName = req.body.fileName || "document";
+        mimeType = req.body.mimeType || "application/octet-stream";
+        size = buffer.length;
+      } else if (req.body?.text) {
+        buffer = Buffer.from(String(req.body.text), "utf8");
+        originalName = req.body.fileName || "pasted_leads.txt";
+        mimeType = "text/plain";
+        size = buffer.length;
+      }
+
+      if (!buffer || buffer.length === 0) {
+        return res.status(400).json({ error: "No file or text content was provided.", code: "validation" });
+      }
+
+      const ingested = await extractTextFromFile({
+        originalName,
+        mimeType,
+        buffer,
+        size,
+      });
+
+      if (!ingested.text || ingested.text.trim().length === 0) {
+        return res.status(400).json({
+          error: ingested.warning || "Could not extract any readable text from this file.",
+          code: "empty_document",
+        });
+      }
+
+      const { leads, suggestedListName } = await extractLeadsWithAi(ingested.text, originalName);
+
+      if (leads.length === 0) {
+        return res.status(400).json({
+          error: "No leads or business records could be extracted from this document. Please verify the file contains company names.",
+          code: "no_leads_found",
+        });
+      }
+
+      res.json({
+        success: true,
+        fileName: originalName,
+        kind: ingested.kind,
+        charCount: ingested.charCount,
+        count: leads.length,
+        suggestedListName,
+        leads,
+      });
+    } catch (err: any) {
+      logger.error("CRM: Lead import-file failed", err);
+      if (err instanceof UnsupportedFileError) {
+        return res.status(400).json({ error: err.message, code: "validation" });
+      }
+      res.status(500).json({ error: err.message || "Failed to process lead document." });
+    }
+  }
+);
 
 /** GET /api/crm/leads/:id — universal detail, outreach history and CRM context. */
 router.get("/leads/:id", requirePermission("VIEW_LEADS"), async (req: Request, res: Response) => {

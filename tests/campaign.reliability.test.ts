@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   sendWhatsApp: vi.fn(),
   integration: vi.fn(),
   recordOutbound: vi.fn(),
+  syncSheet: vi.fn(),
 }));
 
 vi.mock("../src/prisma", () => ({
@@ -35,6 +36,7 @@ vi.mock("../src/prisma", () => ({
 vi.mock("../src/outreachService", () => ({ sendEmailOutreach: mocks.sendEmail, getWhatsAppStatus: () => ({ status: "CONNECTED" }) }));
 vi.mock("../src/whatsappGateway", () => ({ sendWhatsAppUnified: mocks.sendWhatsApp }));
 vi.mock("../src/userIntegrationService", () => ({ getUserIntegration: mocks.integration }));
+vi.mock("../src/googleSheetsWebhook", () => ({ syncCampaignOutreachToGoogleSheet: mocks.syncSheet }));
 vi.mock("../src/conversations/conversationService", () => ({ recordOutbound: mocks.recordOutbound }));
 
 const {
@@ -74,7 +76,12 @@ function seed(options: { messages?: any[]; jobs?: any[]; campaigns?: any[]; supp
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.integration.mockResolvedValue({ host: "smtp.test", port: 587, secure: true, user: "sender", password: "secret", fromEmail: "sender@test" });
+  mocks.integration.mockImplementation(async (_userId: string, type: string) =>
+    type === "google_sheet"
+      ? { webhookUrl: "https://sheet.test/webhook" }
+      : { host: "smtp.test", port: 587, secure: true, user: "sender", password: "secret", fromEmail: "sender@test" }
+  );
+  mocks.syncSheet.mockResolvedValue(true);
   mocks.sendEmail.mockResolvedValue({ success: true, messageId: "smtp-1" });
   mocks.sendWhatsApp.mockResolvedValue({ ok: true, messageId: "wa-1" });
   mocks.recordOutbound.mockResolvedValue({ id: "thread-1" });
@@ -351,15 +358,18 @@ describe("retry handling", () => {
     expect(db.state.campaignDispatches[0]).toMatchObject({ status: "FAILED" });
   });
 
-  it("treats a missing integration as permanent rather than retrying forever", async () => {
+  it("fails preflight without touching approved messages when integrations disappear before claim", async () => {
     mocks.integration.mockResolvedValue(null);
     seed({ jobs: [jobRow({ id: "job-1" })], messages: [messageRow({ id: "m1" })] });
 
     const result = await runCampaignWorkerCycle("worker-1");
 
-    expect(db.state.campaignMessages[0].status).toBe("failed");
-    expect(db.state.campaignMessages[0].errorMessage).toMatch(/not configured/i);
-    expect(result?.failed).toBe(1);
+    expect(db.state.campaignMessages[0].status).toBe("approved");
+    expect(db.state.campaigns[0].status).toBe("approved");
+    expect(db.state.jobs[0].status).toBe("failed");
+    expect(db.state.jobs[0].error).toMatch(/Google Sheet/i);
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
+    expect(result?.failed).toBe(0);
   });
 
   it("gives up after the attempt ceiling instead of retrying indefinitely", async () => {

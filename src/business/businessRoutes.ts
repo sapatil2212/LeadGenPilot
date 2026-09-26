@@ -87,8 +87,19 @@ function fail(res: Response, err: any, context: string) {
   }
   if (err instanceof AiUnavailableError) {
     logger.warn(`${context}: no AI provider available — ${err.message}`);
+
+    // Distinguish configuration problems from transient failures so the UI
+    // can show an actionable message instead of a generic "try again".
+    const isConfigProblem =
+      err.message.includes("not configured") ||
+      err.attempts.every((a) => /not configured|no.*key|UNAUTHENTICATED|API_KEY_INVALID/i.test(a.message));
+
+    const userMessage = isConfigProblem
+      ? "AI is not configured. Set a valid GEMINI_API_KEY (starts with \"AIza\") in your .env file. Get one at https://aistudio.google.com/apikey"
+      : "AI providers are temporarily unavailable. Please try again in a moment.";
+
     return res.status(503).json({
-      error: "No AI provider is currently available. Try again shortly.",
+      error: userMessage,
       code: "ai_unavailable",
       attempts: err.attempts,
     });

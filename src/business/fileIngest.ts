@@ -77,7 +77,12 @@ function isSpreadsheet(file: FileInput): boolean {
 
 function readGeminiKey(): string {
   const key = (process.env.GEMINI_API_KEY || "").trim();
-  return key && key !== "MY_GEMINI_API_KEY" ? key : "";
+  if (!key || key === "MY_GEMINI_API_KEY") return "";
+  // Google AI Studio keys always start with "AIza". Anything else (e.g.
+  // Firebase ephemeral tokens starting with "AQ.") will be rejected by the
+  // API with ACCESS_TOKEN_TYPE_UNSUPPORTED. Treat as unconfigured.
+  if (!key.startsWith("AIza")) return "";
+  return key;
 }
 
 /**

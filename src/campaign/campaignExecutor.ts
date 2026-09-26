@@ -10,12 +10,16 @@ import { logger, logContext } from "../logger";
 import { sendEmailOutreach } from "../outreachService";
 import { sendWhatsAppUnified } from "../whatsappGateway";
 import { getUserIntegration } from "../userIntegrationService";
+import { syncCampaignOutreachToGoogleSheet } from "../googleSheetsWebhook";
+import { assertCampaignReadiness } from "./campaignReadiness";
 import { recordCampaignDispatch } from "./dispatchService";
 import { recordOutbound } from "../conversations/conversationService";
 import { isSuppressed } from "../compliance/suppressionService";
 import type { TenantContext } from "../tenancy/context";
 
 const DEFAULT_DELAY_MS = 5_000;
+const MIN_LIVE_DELAY_MS = 5_000;
+const DELAY_JITTER_RATIO = 0.4;
 const DEFAULT_PAGE_SIZE = 25;
 const MAX_DELAY_MS = 10 * 60 * 1_000;
 const MAX_PAGE_SIZE = 100;
@@ -49,29 +53,57 @@ interface CampaignMessageSnapshot {
   idempotencyKey?: string | null;
 }
 interface TenantSmtpConfig { host: string; port: number; secure: boolean; user: string; pass: string; from: string }
+interface TenantGoogleSheetConfig { webhookUrl: string }
+
+function parseCampaignChannels(value: string | null | undefined): { email: boolean; whatsapp: boolean } {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return { email: Boolean(parsed?.email), whatsapp: Boolean(parsed?.whatsapp) };
+  } catch {
+    return { email: false, whatsapp: false };
+  }
+}
 
 export function normalizeExecutionOptions(options: ExecutionOptions = {}): NormalizedExecutionOptions {
   const delayMs = options.delayMs ?? DEFAULT_DELAY_MS;
   const batchSize = options.batchSize ?? DEFAULT_PAGE_SIZE;
-  if (!Number.isInteger(delayMs) || delayMs < 0 || delayMs > MAX_DELAY_MS) throw new Error(`delayMs must be an integer between 0 and ${MAX_DELAY_MS}.`);
+  // Unit tests can opt into zero-delay jobs, but live callers cannot remove the
+  // pacing barrier. The worker then adds jitter so sends do not form a fixed,
+  // bot-like interval.
+  const minimumDelay = process.env.NODE_ENV === "test" ? 0 : MIN_LIVE_DELAY_MS;
+  if (!Number.isInteger(delayMs) || delayMs < minimumDelay || delayMs > MAX_DELAY_MS) {
+    throw new Error(`delayMs must be an integer between ${minimumDelay} and ${MAX_DELAY_MS}.`);
+  }
   if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > MAX_PAGE_SIZE) throw new Error(`batchSize must be an integer between 1 and ${MAX_PAGE_SIZE}.`);
   return { delayMs, batchSize };
 }
 
-/** Atomically claim the campaign and create a queued durable job. */
+/** Atomically claim a fully reviewed campaign and create a queued durable job. */
 export async function enqueueCampaignExecution(ctx: TenantContext, campaignId: string, options: ExecutionOptions = {}): Promise<EnqueuedCampaignExecution> {
+  const campaign = await prisma.campaign.findFirst({
+    where: { id: campaignId, tenantId: ctx.tenantId },
+    select: { status: true, channels: true },
+  });
+  if (!campaign) throw new Error("Campaign not found");
+  if (campaign.status === "sent") throw new Error("Campaign has already been sent");
+  if (campaign.status !== "approved") {
+    throw new Error("Campaign is no longer ready to send; finish reviewing every message before starting delivery");
+  }
+
+  const channels = parseCampaignChannels(campaign.channels);
+  await assertCampaignReadiness(ctx, channels);
   const execution = normalizeExecutionOptions(options);
   const now = new Date();
   const job = await prisma.$transaction(async (tx: any) => {
     const claim = await tx.campaign.updateMany({
-      where: { id: campaignId, tenantId: ctx.tenantId, status: { in: ["approved", "partially_approved"] } },
+      where: { id: campaignId, tenantId: ctx.tenantId, status: "approved" },
       data: { status: "sending", startedAt: now, completedAt: null },
     });
     if (claim.count !== 1) {
-      const campaign = await tx.campaign.findFirst({ where: { id: campaignId, tenantId: ctx.tenantId }, select: { status: true } });
-      if (!campaign) throw new Error("Campaign not found");
-      if (campaign.status === "sent") throw new Error("Campaign has already been sent");
-      throw new Error("Campaign is already queued, sending, or is no longer ready to send");
+      const latest = await tx.campaign.findFirst({ where: { id: campaignId, tenantId: ctx.tenantId }, select: { status: true } });
+      if (!latest) throw new Error("Campaign not found");
+      if (latest.status === "sent") throw new Error("Campaign has already been sent");
+      throw new Error("Campaign is already queued, sending, or is no longer ready to start");
     }
     return tx.job.create({
       data: {
@@ -81,7 +113,7 @@ export async function enqueueCampaignExecution(ctx: TenantContext, campaignId: s
       },
     });
   });
-  logger.info(`Queued a campaign for durable execution.${logContext({ tenant: ctx.tenantId, user: ctx.userId, campaign: campaignId, job: job.id })}`);
+  logger.info(`Queued a fully reviewed campaign for paced execution.${logContext({ tenant: ctx.tenantId, user: ctx.userId, campaign: campaignId, job: job.id })}`);
   return { jobId: job.id, campaignId, status: "queued" };
 }
 
@@ -243,10 +275,34 @@ function isPermanentError(reason: string): boolean {
 export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> {
   const params = parseParams(job.params);
   if (!params.campaignId) throw new Error("Campaign job has no campaignId parameter.");
-  const campaign = await prisma.campaign.findFirst({ where: { id: params.campaignId, tenantId: job.tenantId }, select: { id: true, name: true } });
+  const campaign = await prisma.campaign.findFirst({
+    where: { id: params.campaignId, tenantId: job.tenantId },
+    select: { id: true, name: true, channels: true },
+  });
   if (!campaign) return finishOwnedJob(job, "failed", { error: "Campaign no longer exists." });
   const ctx = { tenantId: job.tenantId, userId: job.userId, membershipId: "worker", role: "owner", tenantName: "worker", tenantSlug: "worker", permissions: new Set<string>() } as TenantContext;
-  const smtp = await resolveTenantSmtpConfig(ctx);
+  const channels = parseCampaignChannels(campaign.channels);
+  const [smtp, googleSheet] = await Promise.all([
+    resolveTenantSmtpConfig(ctx),
+    resolveTenantGoogleSheetConfig(ctx),
+  ]);
+
+  // Integrations can be disabled after enqueue and before a worker claims the
+  // job. Recheck without sending anything, restore the approved campaign, and
+  // let the user reconnect and start it again.
+  const readinessError = !googleSheet
+    ? "Google Sheet is no longer connected for this workspace."
+    : channels.email && !smtp
+      ? "SMTP email is no longer configured for this workspace."
+      : null;
+  if (readinessError) {
+    await prisma.campaign.updateMany({
+      where: { id: campaign.id, tenantId: job.tenantId, status: "sending" },
+      data: { status: "approved", startedAt: null },
+    });
+    return finishOwnedJob(job, "failed", { error: readinessError });
+  }
+
   let sent = 0; let failed = 0; let skipped = 0;
   const jobFields = { tenant: job.tenantId, job: job.id, campaign: campaign.id, worker: job.workerId };
   const total = await prisma.campaignMessage.count({ where: { campaignId: campaign.id, tenantId: job.tenantId, status: { in: ["approved", "retry_wait", "sending"] } } });
@@ -288,7 +344,7 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
         if (await finishLeasedMessage(message, job, "sent", undefined, externalMessageId)) {
           sent++;
           await recordCampaignDispatch({ message, campaignName: campaign.name, status: "SENT", externalMessageId }).catch((error) => logger.warn(`Delivery persisted but report repair is needed: ${error?.message || error}${logContext(messageFields)}`));
-          await syncDeliveryToCrmAndInbox(job, message, { status: "SENT", externalMessageId });
+          await syncDeliveryToCrmAndInbox(job, message, { status: "SENT", externalMessageId }, googleSheet!.webhookUrl);
           logger.info(`Campaign message delivered.${logContext({ ...messageFields, providerMessageId: externalMessageId })}`);
         }
       }
@@ -299,14 +355,31 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
         if (permanent) {
           failed++;
           await recordCampaignDispatch({ message, campaignName: campaign.name, status: "FAILED", errorMessage: reason }).catch((reportError) => logger.warn(`Failure persisted but report repair is needed: ${reportError?.message || reportError}${logContext(messageFields)}`));
-          await syncDeliveryToCrmAndInbox(job, message, { status: "FAILED" });
+          await syncDeliveryToCrmAndInbox(job, message, { status: "FAILED" }, googleSheet!.webhookUrl);
         }
       }
       logger.warn(`Campaign message ${permanent ? "failed permanently" : "will retry"}: ${reason}${logContext(messageFields)}`);
     }
     const complete = sent + failed + skipped;
     await prisma.job.updateMany({ where: { id: job.id, workerId: job.workerId, leaseToken: job.leaseToken, status: "running" }, data: { progress: JSON.stringify({ stage: "sending", current: complete, total, sent, failed, skipped }) } });
-    if (params.delayMs > 0) await delayHoldingLease(job, params.delayMs);
+    // Do not wait after the final message. For remaining work, add bounded
+    // jitter to the configured floor so provider traffic is paced rather than
+    // emitted at an identical, bot-like interval.
+    if (params.delayMs > 0) {
+      const moreMessages = await prisma.campaignMessage.findFirst({
+        where: {
+          campaignId: campaign.id,
+          tenantId: job.tenantId,
+          status: { in: ["approved", "retry_wait", "sending"] },
+        },
+        select: { id: true },
+      });
+      if (moreMessages) {
+        const pacingMs = randomizedPacingDelay(params.delayMs);
+        logger.info(`Campaign pacing: waiting ${Math.ceil(pacingMs / 1_000)}s before the next message.${logContext(jobFields)}`);
+        await delayHoldingLease(job, pacingMs);
+      }
+    }
   }
 }
 
@@ -332,12 +405,22 @@ async function isSuppressedRecipient(job: any, message: CampaignMessageSnapshot)
 async function syncDeliveryToCrmAndInbox(
   job: any,
   message: CampaignMessageSnapshot,
-  options: { status: "SENT" | "FAILED"; externalMessageId?: string }
+  options: { status: "SENT" | "FAILED"; externalMessageId?: string },
+  sheetWebhookUrl: string
 ): Promise<void> {
   if (message.channel !== "email" && message.channel !== "whatsapp") return;
   const today = new Date().toISOString().split("T")[0];
+  let mapsUrl = "";
+
+  // Database/inbox repair is best-effort because provider delivery has already
+  // happened and must never be retried due to a bookkeeping error.
   try {
     if (message.leadId) {
+      const lead = await prisma.lead.findFirst({
+        where: { id: message.leadId, tenantId: job.tenantId },
+        select: { mapsUrl: true },
+      });
+      mapsUrl = String(lead?.mapsUrl || "");
       const data = message.channel === "email"
         ? { emailStatus: options.status, emailSentDate: today }
         : { whatsappStatus: options.status, whatsappSentDate: today };
@@ -359,6 +442,19 @@ async function syncDeliveryToCrmAndInbox(
     }
   } catch (error: any) {
     logger.warn(`Delivery recorded but CRM/inbox sync failed: ${error?.message || error}${logContext({ tenant: job.tenantId, job: job.id, message: message.id, lead: message.leadId })}`);
+  }
+
+  // Sheet synchronization is intentionally separate from provider delivery.
+  // Its own retries cannot resend the email/WhatsApp message.
+  const sheetSynced = await syncCampaignOutreachToGoogleSheet({
+    webhookUrl: sheetWebhookUrl,
+    businessName: message.businessName,
+    mapsUrl,
+    channel: message.channel,
+    status: options.status,
+  }).catch(() => false);
+  if (!sheetSynced) {
+    logger.warn(`Delivery recorded but Google Sheet sync needs repair.${logContext({ tenant: job.tenantId, job: job.id, message: message.id })}`);
   }
 }
 
@@ -418,6 +514,14 @@ export async function runCampaignWorkerCycle(workerId: string): Promise<WorkerRu
   }
 }
 
+async function resolveTenantGoogleSheetConfig(ctx: TenantContext): Promise<TenantGoogleSheetConfig | null> {
+  if (!ctx.userId) return null;
+  const raw = (await getUserIntegration(ctx.userId, "google_sheet", ctx.tenantId)) as any;
+  const webhookUrl = String(raw?.webhookUrl || "").trim();
+  if (!webhookUrl || webhookUrl === "YOUR_WEBHOOK_URL") return null;
+  return { webhookUrl };
+}
+
 async function resolveTenantSmtpConfig(ctx: TenantContext): Promise<TenantSmtpConfig | null> {
   if (!ctx.userId) return null;
   const raw = (await getUserIntegration(ctx.userId, "smtp", ctx.tenantId)) as any;
@@ -457,6 +561,11 @@ export async function recomputeCampaignCounts(campaignId: string, tenantId: stri
   const skipped = countFor("suppressed");
   const status = terminal === "cancelled" ? "cancelled" : terminal === "complete" ? "sent" : pending ? (queued ? "partially_approved" : "pending_review") : queued ? "approved" : "cancelled";
   await prisma.campaign.updateMany({ where: { id: campaignId, tenantId }, data: { status, pendingCount: pending, approvedCount: queued, rejectedCount: rejected, sentCount: sent, failedCount: failed, skippedCount: skipped, ...(terminal ? { completedAt: new Date() } : {}) } });
+}
+function randomizedPacingDelay(baseMs: number): number {
+  if (baseMs <= 0) return 0;
+  const jitter = Math.floor(Math.random() * Math.max(1, baseMs * DELAY_JITTER_RATIO));
+  return Math.min(MAX_DELAY_MS, baseMs + jitter);
 }
 function isValidEmail(value: string): boolean { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim()); }
 function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }

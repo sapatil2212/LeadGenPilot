@@ -32,7 +32,13 @@ import {
   Paperclip,
   Camera,
   Mic,
-  Loader2
+  Loader2,
+  Upload,
+  AlignLeft,
+  AlignCenter,
+  AlignRight,
+  Image as ImageIcon,
+  X
 } from "lucide-react";
 import { api, messageOf } from "./ui/api";
 
@@ -48,6 +54,7 @@ interface EmailTemplate {
   useLogo: boolean;
   logoType: "text" | "image";
   logoValue: string; // Title or image url
+  textAlign?: "left" | "center" | "right";
   
   introText: string; // Common welcome message
   
@@ -107,6 +114,35 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
   const [legacyStorageKeys, setLegacyStorageKeys] = useState<string[]>([]);
   const [isImportingLegacy, setIsImportingLegacy] = useState(false);
   const [generationResult, setGenerationResult] = useState<GeneratedTemplateResponse | null>(null);
+  
+  const logoFileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const handleLogoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setTemplateError("Please select a valid image file (PNG, JPG, SVG, WebP).");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setTemplateError("Logo image size must be under 2MB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+      if (dataUrl && selectedTemplate) {
+        setSelectedTemplate({
+          ...selectedTemplate,
+          useLogo: true,
+          logoType: "image",
+          logoValue: dataUrl,
+        });
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
   
   const highlightVariables = (text: string) => {
     if (!text) return "";
@@ -254,6 +290,7 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
       useLogo: true,
       logoType: "image",
       logoValue: "/logo.png",
+      textAlign: "left",
       introText: "Hi {{company}} team,",
       useAiBody: false,
       customBodyText: "",
@@ -430,6 +467,10 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
           <tr>
             <td style="padding: 24px 28px 24px 28px;">`;
 
+    const align = tpl.textAlign || "left";
+    const textAlignCss = `text-align: ${align};`;
+    const marginCss = align === "center" ? "0 auto" : align === "right" ? "0 0 0 auto" : "0";
+
     // 1. Logo Section
     if (tpl.useLogo) {
       const logoSrc = tpl.logoValue && tpl.logoValue.trim() ? tpl.logoValue.trim() : "/logo.png";
@@ -438,8 +479,8 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
               <!-- LOGO BANNER IMAGE -->
               <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 20px; border-bottom: 1px solid #f1f5f9; padding-bottom: 18px;">
                 <tr>
-                  <td align="center" style="text-align: center;">
-                    <img src="${logoSrc}" alt="Logo" style="max-height: 38px; height: 38px; width: auto; object-contain: contain; margin: 0 auto; display: block; border: 0;" />
+                  <td align="${align}" style="${textAlignCss}">
+                    <img src="${logoSrc}" alt="Logo" style="max-height: 44px; height: auto; max-width: 190px; object-fit: contain; margin: ${marginCss}; display: inline-block; border: 0;" />
                   </td>
                 </tr>
               </table>`;
@@ -448,8 +489,8 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
               <!-- LOGO BANNER TEXT -->
               <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 20px; border-bottom: 1px solid #f1f5f9; padding-bottom: 18px;">
                 <tr>
-                  <td align="center" style="text-align: center;">
-                    <span style="font-size: 18px; font-weight: 600; color: #0f172a; letter-spacing: -0.2px; font-family: 'Inter', sans-serif; display: block; text-align: center;">${tpl.logoValue}</span>
+                  <td align="${align}" style="${textAlignCss}">
+                    <span style="font-size: 18px; font-weight: 600; color: #0f172a; letter-spacing: -0.2px; font-family: 'Inter', sans-serif; display: block; ${textAlignCss}">${tpl.logoValue}</span>
                   </td>
                 </tr>
               </table>`;
@@ -462,7 +503,7 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
               <!-- WELCOME / COMMON GREETING -->
               <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 14px;">
                 <tr>
-                  <td align="center" style="font-size: 13px; color: #334155; line-height: 1.5; white-space: pre-line; font-family: 'Inter', sans-serif; text-align: center;">${tpl.introText}</td>
+                  <td align="${align}" style="font-size: 13px; color: #334155; line-height: 1.6; white-space: pre-line; font-family: 'Inter', sans-serif; ${textAlignCss}">${tpl.introText}</td>
                 </tr>
               </table>`;
     }
@@ -473,8 +514,9 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
               <!-- AI GENERATED OUTREACH BODY PLACEHOLDER -->
               <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 16px;">
                 <tr>
-                  <td align="center" style="padding: 12px 16px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 13px; color: #475569; font-style: italic; line-height: 1.5; font-family: 'Inter', sans-serif; text-align: center;">
-                    [🤖 AI Outreach Agent: A personalized campaign pitch based on prospect's GMB scores, priority tier, and city signals will be automatically generated and injected here during dispatches.]
+                  <td align="${align}" style="padding: 14px 16px; background-color: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 8px; font-size: 13px; color: #475569; line-height: 1.6; font-family: 'Inter', sans-serif; ${textAlignCss}">
+                    <div style="font-weight: 600; color: #4f46e5; margin-bottom: 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;">✨ Dynamic AI Body (Tailored per lead during campaign send)</div>
+                    ${tpl.customBodyText?.trim() ? tpl.customBodyText : "Our AI Outreach Agent will automatically analyze {{company}}'s digital presence, GMB metrics, category and city signals to write a tailored pitch for every lead."}
                   </td>
                 </tr>
               </table>`;
@@ -483,7 +525,7 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
               <!-- CUSTOM OUTREACH BODY -->
               <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 16px;">
                 <tr>
-                  <td align="center" style="font-size: 13px; color: #334155; line-height: 1.6; white-space: pre-line; font-family: 'Inter', sans-serif; text-align: center;">${tpl.customBodyText}</td>
+                  <td align="${align}" style="font-size: 13px; color: #334155; line-height: 1.6; white-space: pre-line; font-family: 'Inter', sans-serif; ${textAlignCss}">${tpl.customBodyText}</td>
                 </tr>
               </table>`;
     }
@@ -494,8 +536,8 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
               <!-- CTA OUTREACH BUTTON -->
               <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin: 22px 0;">
                 <tr>
-                  <td align="center" style="text-align: center;">
-                    <table border="0" cellpadding="0" cellspacing="0" align="center" style="border-collapse: separate; margin: 0 auto;">
+                  <td align="${align}" style="${textAlignCss}">
+                    <table border="0" cellpadding="0" cellspacing="0" align="${align}" style="border-collapse: separate; margin: ${marginCss};">
                       <tr>
                         <td align="center" style="border-radius: 8px; background-color: ${tpl.ctaBgColor || "#0f172a"};">
                           <a href="${tpl.ctaUrl || "#"}" target="_blank" style="display: inline-block; padding: 9px 20px; font-size: 13px; font-weight: 500; color: #ffffff; text-decoration: none; border-radius: 8px; font-family: 'Inter', sans-serif;">
@@ -515,7 +557,7 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
               <!-- CONTACT OUTLET DETAILS -->
               <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-top: 20px; border-top: 1px solid #f1f5f9; padding-top: 12px; margin-bottom: 6px;">
                 <tr>
-                  <td align="center" style="font-size: 11px; color: #64748b; line-height: 1.5; white-space: pre-line; font-family: 'Inter', sans-serif; text-align: center;">${tpl.contactText}</td>
+                  <td align="${align}" style="font-size: 11px; color: #64748b; line-height: 1.5; white-space: pre-line; font-family: 'Inter', sans-serif; ${textAlignCss}">${tpl.contactText}</td>
                 </tr>
               </table>`;
     }
@@ -526,7 +568,7 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
               <!-- OUTREACH FOOTER / DISCLAIMER -->
               <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-top: 6px;">
                 <tr>
-                  <td align="center" style="font-size: 10px; color: #94a3b8; line-height: 1.4; white-space: pre-line; font-family: 'Inter', sans-serif; text-align: center;">${tpl.footerText}</td>
+                  <td align="${align}" style="font-size: 10px; color: #94a3b8; line-height: 1.4; white-space: pre-line; font-family: 'Inter', sans-serif; ${textAlignCss}">${tpl.footerText}</td>
                 </tr>
               </table>`;
     }
@@ -1055,6 +1097,54 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
                       <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
                         {selectedTemplate.templateType === "email" ? "Email Layout Shell Wizard" : "WhatsApp Outreach Wizard"}
                       </span>
+                      {selectedTemplate.templateType === "email" && (
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] font-semibold text-slate-400">Align:</span>
+                          <div className={`flex items-center rounded-lg p-0.5 border ${
+                            isLight ? "bg-slate-100 border-slate-200" : "bg-slate-900 border-slate-800"
+                          }`}>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedTemplate({ ...selectedTemplate, textAlign: "left" })}
+                              title="Align Left (Recommended for business emails)"
+                              className={`px-2 py-0.5 rounded text-xs transition-colors flex items-center gap-1 cursor-pointer ${
+                                (selectedTemplate.textAlign || "left") === "left"
+                                  ? "bg-indigo-600 text-white font-medium shadow-sm"
+                                  : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-slate-200"
+                              }`}
+                            >
+                              <AlignLeft className="h-3 w-3" />
+                              <span className="text-[10px]">Left</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedTemplate({ ...selectedTemplate, textAlign: "center" })}
+                              title="Align Center"
+                              className={`px-2 py-0.5 rounded text-xs transition-colors flex items-center gap-1 cursor-pointer ${
+                                selectedTemplate.textAlign === "center"
+                                  ? "bg-indigo-600 text-white font-medium shadow-sm"
+                                  : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-slate-200"
+                              }`}
+                            >
+                              <AlignCenter className="h-3 w-3" />
+                              <span className="text-[10px]">Center</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedTemplate({ ...selectedTemplate, textAlign: "right" })}
+                              title="Align Right"
+                              className={`px-2 py-0.5 rounded text-xs transition-colors flex items-center gap-1 cursor-pointer ${
+                                selectedTemplate.textAlign === "right"
+                                  ? "bg-indigo-600 text-white font-medium shadow-sm"
+                                  : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-slate-200"
+                              }`}
+                            >
+                              <AlignRight className="h-3 w-3" />
+                              <span className="text-[10px]">Right</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     {/* 1. Logo Section (Only Email) */}
@@ -1079,32 +1169,125 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
                                 <input
                                   type="radio"
                                   name="logoType"
+                                  checked={selectedTemplate.logoType === "image"}
+                                  onChange={() => setSelectedTemplate({ ...selectedTemplate, logoType: "image" })}
+                                  className="text-indigo-600 focus:ring-indigo-500"
+                                />
+                                <span className="font-medium">Logo Image</span>
+                              </label>
+                              <label className="flex items-center gap-1 cursor-pointer">
+                                <input
+                                  type="radio"
+                                  name="logoType"
                                   checked={selectedTemplate.logoType === "text"}
                                   onChange={() => setSelectedTemplate({ ...selectedTemplate, logoType: "text" })}
                                   className="text-indigo-600 focus:ring-indigo-500"
                                 />
                                 <span>Text Logo</span>
                               </label>
-                              <label className="flex items-center gap-1 cursor-pointer">
-                                <input
-                                  type="radio"
-                                  name="logoType"
-                                  checked={selectedTemplate.logoType === "image"}
-                                  onChange={() => setSelectedTemplate({ ...selectedTemplate, logoType: "image" })}
-                                  className="text-indigo-600 focus:ring-indigo-500"
-                                />
-                                <span>Image URL</span>
-                              </label>
                             </div>
-                            <input
-                              type="text"
-                              value={selectedTemplate.logoValue}
-                              onChange={(e) => setSelectedTemplate({ ...selectedTemplate, logoValue: e.target.value })}
-                              placeholder={selectedTemplate.logoType === "text" ? "Enter business name" : "https://example.com/logo.png"}
-                              className={`w-full p-2 text-xs rounded-lg border outline-none ${
-                                isLight ? "bg-white border-slate-200 text-slate-850" : "bg-slate-950 border-slate-850 text-slate-200"
-                              }`}
-                            />
+
+                            {selectedTemplate.logoType === "image" ? (
+                              <div className="space-y-2">
+                                <input
+                                  type="file"
+                                  ref={logoFileInputRef}
+                                  accept="image/png,image/jpeg,image/svg+xml,image/webp"
+                                  onChange={handleLogoFileUpload}
+                                  className="hidden"
+                                />
+                                
+                                {selectedTemplate.logoValue && selectedTemplate.logoValue.trim() ? (
+                                  <div className={`p-2.5 rounded-lg border flex items-center justify-between gap-3 ${
+                                    isLight ? "bg-white border-slate-200" : "bg-slate-950 border-slate-800"
+                                  }`}>
+                                    <div className="flex items-center gap-2.5 min-w-0">
+                                      <div className={`h-10 w-16 rounded border flex items-center justify-center p-1 shrink-0 overflow-hidden ${
+                                        isLight ? "bg-slate-100 border-slate-200" : "bg-slate-900 border-slate-800"
+                                      }`}>
+                                        <img
+                                          src={selectedTemplate.logoValue}
+                                          alt="Logo preview"
+                                          className="max-h-full max-w-full object-contain"
+                                          onError={(e) => {
+                                            (e.target as HTMLElement).style.display = 'none';
+                                          }}
+                                        />
+                                      </div>
+                                      <div className="min-w-0">
+                                        <div className="text-[11px] font-semibold truncate text-slate-300">
+                                          {selectedTemplate.logoValue.startsWith("data:") ? "Uploaded logo from device" : selectedTemplate.logoValue}
+                                        </div>
+                                        <div className="text-[9.5px] text-slate-500">
+                                          {selectedTemplate.logoValue.startsWith("data:") ? "Base64 image ready" : "Image URL source"}
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-1.5 shrink-0">
+                                      <button
+                                        type="button"
+                                        onClick={() => logoFileInputRef.current?.click()}
+                                        className="px-2 py-1 text-[10px] font-semibold rounded border border-indigo-500/40 text-indigo-400 hover:bg-indigo-500/10 transition-colors cursor-pointer flex items-center gap-1"
+                                      >
+                                        <Upload className="h-3 w-3" />
+                                        <span>Replace</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setSelectedTemplate({ ...selectedTemplate, logoValue: "" })}
+                                        className="p-1 text-slate-400 hover:text-rose-400 transition-colors rounded hover:bg-rose-500/10 cursor-pointer"
+                                        title="Remove logo"
+                                      >
+                                        <X className="h-3.5 w-3.5" />
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div
+                                    onClick={() => logoFileInputRef.current?.click()}
+                                    className={`border-2 border-dashed rounded-xl p-3.5 text-center cursor-pointer transition-all hover:border-indigo-500/80 ${
+                                      isLight
+                                        ? "border-slate-300 bg-slate-50/50 hover:bg-indigo-50/30"
+                                        : "border-slate-800 bg-slate-950/60 hover:bg-indigo-950/20"
+                                    }`}
+                                  >
+                                    <div className="w-8 h-8 rounded-lg bg-indigo-500/10 text-indigo-400 flex items-center justify-center mx-auto mb-1.5">
+                                      <Upload className="h-4 w-4" />
+                                    </div>
+                                    <div className="text-xs font-semibold text-slate-200">
+                                      Upload logo from local machine
+                                    </div>
+                                    <div className="text-[10px] text-slate-400 mt-0.5">
+                                      Click to select PNG, JPG, SVG or WebP from your computer (max 2MB)
+                                    </div>
+                                  </div>
+                                )}
+
+                                <div className="flex items-center gap-2 pt-0.5">
+                                  <span className="text-[10px] text-slate-500 font-medium">Or URL:</span>
+                                  <input
+                                    type="text"
+                                    value={selectedTemplate.logoValue.startsWith("data:") ? "" : selectedTemplate.logoValue}
+                                    onChange={(e) => setSelectedTemplate({ ...selectedTemplate, logoValue: e.target.value })}
+                                    placeholder="https://example.com/logo.png or /logo.png"
+                                    className={`flex-1 p-1.5 text-[11px] rounded-lg border outline-none ${
+                                      isLight ? "bg-white border-slate-200 text-slate-850" : "bg-slate-950 border-slate-850 text-slate-200"
+                                    }`}
+                                  />
+                                </div>
+                              </div>
+                            ) : (
+                              <input
+                                type="text"
+                                value={selectedTemplate.logoValue}
+                                onChange={(e) => setSelectedTemplate({ ...selectedTemplate, logoValue: e.target.value })}
+                                placeholder="Enter business name (e.g. Vantara Network Solutions)"
+                                className={`w-full p-2 text-xs rounded-lg border outline-none ${
+                                  isLight ? "bg-white border-slate-200 text-slate-850" : "bg-slate-950 border-slate-850 text-slate-200"
+                                }`}
+                              />
+                            )}
                           </div>
                         )}
                       </div>
