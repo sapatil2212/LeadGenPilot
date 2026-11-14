@@ -13,7 +13,12 @@
  */
 
 import { logger } from "./logger";
-import { sendWhatsAppMessage as sendViaWeb, getWhatsAppStatus } from "./outreachService";
+import {
+  sendWhatsAppMessage as sendViaWeb,
+  getWhatsAppStatus,
+  getAllWhatsAppStatuses,
+  hasAnyConnectedWhatsAppSession,
+} from "./outreachService";
 import {
   sendCloudText,
   sendCloudTemplate,
@@ -42,24 +47,8 @@ export async function resolveProvider(
   userId?: string,
   tenantId?: string
 ): Promise<{ provider: WhatsAppProvider; cloudConfig?: MetaCloudConfig }> {
-  if (!userId) return { provider: "web" };
-
-  try {
-    const preferred = await getWhatsAppProvider(userId, tenantId);
-    if (preferred !== "cloud") return { provider: "web" };
-
-    const cloudConfig = await getWhatsAppCloudConfig(userId, tenantId);
-    if (!cloudConfig) {
-      logger.warn(
-        "Cloud API is selected as the WhatsApp provider but no valid credentials are saved. Falling back to the WhatsApp Web gateway."
-      );
-      return { provider: "web" };
-    }
-    return { provider: "cloud", cloudConfig };
-  } catch (err: any) {
-    logger.warn(`Could not resolve WhatsApp provider, defaulting to web: ${err?.message || err}`);
-    return { provider: "web" };
-  }
+  // Always use WhatsApp Web QR gateway — Cloud API is disabled.
+  return { provider: "web" };
 }
 
 /**
@@ -74,9 +63,9 @@ export async function resolveProvider(
 export async function sendWhatsAppUnified(
   phone: string,
   text: string,
-  options: { userId?: string; tenantId?: string; allowTemplateFallback?: boolean } = {}
+  options: { userId?: string; tenantId?: string; allowTemplateFallback?: boolean; slot?: number } = {}
 ): Promise<UnifiedSendResult> {
-  const { userId, tenantId, allowTemplateFallback = true } = options;
+  const { userId, tenantId, allowTemplateFallback = true, slot } = options;
   const { provider, cloudConfig } = await resolveProvider(userId, tenantId);
 
   if (provider === "cloud" && cloudConfig) {
@@ -115,7 +104,10 @@ export async function sendWhatsAppUnified(
     };
   }
 
-  const ok = await sendViaWeb(phone, text);
+  // `slot` selects the specific linked WhatsApp account (1-5) chosen by the
+  // campaign sender-rotation layer. When omitted, outreachService picks a
+  // connected slot in round-robin order.
+  const ok = await sendViaWeb(phone, text, slot);
   return {
     ok,
     provider: "web",
@@ -131,6 +123,9 @@ export async function getUnifiedWhatsAppStatus(userId?: string, tenantId?: strin
   provider: WhatsAppProvider;
   status: string;
   qr: string;
+  qrDataUrl?: string;
+  /** Per-slot status for the multi-account web gateway (slots 1-5). */
+  sessions?: Array<{ slot: number; status: string; qr: string; qrDataUrl?: string }>;
   cloud?: {
     connected: boolean;
     displayPhoneNumber?: string;
@@ -157,6 +152,19 @@ export async function getUnifiedWhatsAppStatus(userId?: string, tenantId?: strin
     };
   }
 
-  const web = getWhatsAppStatus();
-  return { provider: "web", status: web.status, qr: web.qr };
+  // Multi-account web gateway: report the primary slot (1) at the top level for
+  // backward compatibility, plus the full per-slot breakdown. The top-level
+  // status reads CONNECTED when ANY slot is connected so campaign gating and
+  // the legacy single-session UI keep working.
+  const sessions = getAllWhatsAppStatuses();
+  const anyConnected = hasAnyConnectedWhatsAppSession();
+  const primary = getWhatsAppStatus(1);
+  const topLevelStatus = anyConnected ? "CONNECTED" : primary.status;
+  return {
+    provider: "web",
+    status: topLevelStatus,
+    qr: primary.qr,
+    qrDataUrl: primary.qrDataUrl,
+    sessions,
+  };
 }

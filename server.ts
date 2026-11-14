@@ -24,9 +24,17 @@ import { duplicateChecker } from "./src/duplicateChecker";
 import { loadFailedLeads, retryFailedLeads, sendLeadToWebhook, fetchLeadsFromGoogleSheet, fetchSheetNamesFromGoogleSheet } from "./src/googleSheetsWebhook";
 import { 
   getWhatsAppStatus,
+  hasAnyConnectedWhatsAppSession,
+  initializeWhatsApp,
   disconnectWhatsApp,
+  disconnectAllWhatsApp,
+  restoreWhatsAppSessions,
+  shutdownWhatsAppSessions,
   sendEmailOutreach,
-  setIncomingWhatsAppHandler
+  setIncomingWhatsAppHandler,
+  sendWhatsAppTestMessage,
+  getAllWhatsAppStatuses,
+  MAX_WHATSAPP_SESSIONS
 } from "./src/outreachService";
 import { normalizePhoneKey } from "./src/conversationStore";
 import {
@@ -53,6 +61,7 @@ import productionRoutes from "./src/productionRoutes";
 import businessRoutes from "./src/business/businessRoutes";
 import knowledgeRoutes from "./src/knowledge/knowledgeRoutes";
 import templateRoutes from "./src/templates/templateRoutes";
+import messageTemplateRoutes from "./src/messageTemplates/messageTemplateRoutes";
 import assistantRoutes from "./src/assistant/assistantRoutes";
 import icpRoutes from "./src/icp/icpRoutes";
 import scoringRoutes from "./src/scoring/scoringRoutes";
@@ -262,7 +271,7 @@ app.get("/api/ready", (req, res) => {
     smtpConfigured: env.isSmtpConfigured(),
     geminiConfigured: env.isGeminiConfigured(),
     databaseConfigured: env.isDatabaseConfigured(),
-    whatsapp: getWhatsAppStatus().status,
+    whatsapp: hasAnyConnectedWhatsAppSession() ? "CONNECTED" : getWhatsAppStatus().status,
     // Deliberately not reported here: whether any scrape or campaign is running
     // is per-workspace state, and this endpoint is public and unauthenticated.
     // Ask GET /api/status or GET /api/campaign/status with a session instead.
@@ -522,6 +531,7 @@ app.use("/api/production", productionRoutes);
 app.use("/api/business", businessRoutes);
 app.use("/api/knowledge", knowledgeRoutes);
 app.use("/api/templates", templateRoutes);
+app.use("/api/message-templates", messageTemplateRoutes);
 app.use("/api/assistant", assistantRoutes);
 
 /*
@@ -543,8 +553,10 @@ app.use("/api/scoring", scoringRoutes);
  * campaign loop with a durable review workflow.
  */
 import campaignRoutes from "./src/campaign/campaignRoutes";
+import templateVariationRoutes from "./src/campaign/templateVariationRoutes";
 import { recordDispatch } from "./src/campaign/dispatchService";
 app.use("/api/campaigns", campaignRoutes);
+app.use("/api/campaigns", templateVariationRoutes);
 
 /*
  * ── Discovery settings, formerly the global CONFIG ───────────────────────────
@@ -1325,9 +1337,16 @@ app.post(
   })
 );
 
-// Tenant dashboards use the official per-user Cloud API integration. The
-// legacy WhatsApp Web client has one process-global session and is therefore
-// disabled here; sharing it would let one workspace affect another.
+/**
+ * Parse and validate a 1-based WhatsApp session slot from a request value.
+ * Returns the slot number, or null if it is out of the 1..MAX range.
+ */
+function parseWhatsAppSlot(value: unknown): number | null {
+  const slot = typeof value === "number" ? value : parseInt(String(value ?? "1"), 10);
+  if (!Number.isInteger(slot) || slot < 1 || slot > MAX_WHATSAPP_SESSIONS) return null;
+  return slot;
+}
+
 app.get(
   "/api/whatsapp/status",
   resolveTenantContext,
@@ -1335,15 +1354,6 @@ app.get(
   asyncHandler(async (req, res) => {
     const ctx = ctxOf(req);
     const userId = ctx.userId;
-    const { provider } = await resolveWhatsAppProvider(userId, ctx.tenantId);
-    if (provider !== "cloud") {
-      return res.json({
-        status: "DISCONNECTED",
-        qr: "",
-        provider: "web",
-        error: "The shared WhatsApp Web gateway is disabled for tenant isolation. Configure WhatsApp Cloud API in Integrations.",
-      });
-    }
     res.json(await getUnifiedWhatsAppStatus(userId, ctx.tenantId));
   })
 );
@@ -1352,9 +1362,13 @@ app.post(
   "/api/whatsapp/initialize",
   resolveTenantContext,
   requirePermission("MANAGE_INTEGRATIONS"),
-  (_req, res) => res.status(410).json({
-    error: "The shared WhatsApp Web gateway is disabled. Configure WhatsApp Cloud API in Integrations.",
-    code: "legacy_provider_disabled",
+  asyncHandler(async (req, res) => {
+    // Optional `slot` in the body links an additional account (1-5). Omitting
+    // it targets the primary slot (1), preserving the legacy single-session API.
+    const slot = parseWhatsAppSlot(req.body?.slot);
+    if (slot === null) return res.status(400).json({ error: `slot must be 1-${MAX_WHATSAPP_SESSIONS}.` });
+    initializeWhatsApp(slot);
+    res.json({ success: true, slot, message: `WhatsApp Web gateway initialization started for slot ${slot}.` });
   })
 );
 
@@ -1362,9 +1376,64 @@ app.post(
   "/api/whatsapp/disconnect",
   resolveTenantContext,
   requirePermission("MANAGE_INTEGRATIONS"),
-  (_req, res) => res.status(410).json({
-    error: "Manage the tenant's WhatsApp Cloud API connection in Integrations.",
-    code: "legacy_provider_disabled",
+  asyncHandler(async (req, res) => {
+    // With no slot, disconnect every linked account; with a slot, just that one.
+    if (req.body?.slot === undefined || req.body?.slot === null || req.body?.slot === "all") {
+      await disconnectAllWhatsApp();
+      return res.json({ success: true, message: "All WhatsApp sessions disconnected." });
+    }
+    const slot = parseWhatsAppSlot(req.body?.slot);
+    if (slot === null) return res.status(400).json({ error: `slot must be 1-${MAX_WHATSAPP_SESSIONS}.` });
+    await disconnectWhatsApp(slot);
+    res.json({ success: true, slot, message: `WhatsApp session (slot ${slot}) disconnected.` });
+  })
+);
+
+/**
+ * GET /api/whatsapp/sessions
+ * Status of every WhatsApp account slot (1-5) in the pool, so the Integrations
+ * UI can render and manage up to 5 independent sessions.
+ */
+app.get(
+  "/api/whatsapp/sessions",
+  resolveTenantContext,
+  requirePermission("MANAGE_INTEGRATIONS"),
+  asyncHandler(async (_req, res) => {
+    const sessions = getAllWhatsAppStatuses();
+    const connectedCount = sessions.filter((s) => s.status === "CONNECTED").length;
+    res.json({ provider: "web", maxSessions: MAX_WHATSAPP_SESSIONS, connectedCount, sessions });
+  })
+);
+
+/**
+ * POST /api/whatsapp/sessions/:slot/initialize
+ * Launch (or regenerate the QR for) a specific WhatsApp account slot.
+ */
+app.post(
+  "/api/whatsapp/sessions/:slot/initialize",
+  resolveTenantContext,
+  requirePermission("MANAGE_INTEGRATIONS"),
+  asyncHandler(async (req, res) => {
+    const slot = parseWhatsAppSlot(req.params.slot);
+    if (slot === null) return res.status(400).json({ error: `slot must be 1-${MAX_WHATSAPP_SESSIONS}.` });
+    initializeWhatsApp(slot);
+    res.json({ success: true, slot, message: `WhatsApp Web gateway initialization started for slot ${slot}.` });
+  })
+);
+
+/**
+ * POST /api/whatsapp/sessions/:slot/disconnect
+ * Disconnect and wipe a specific WhatsApp account slot.
+ */
+app.post(
+  "/api/whatsapp/sessions/:slot/disconnect",
+  resolveTenantContext,
+  requirePermission("MANAGE_INTEGRATIONS"),
+  asyncHandler(async (req, res) => {
+    const slot = parseWhatsAppSlot(req.params.slot);
+    if (slot === null) return res.status(400).json({ error: `slot must be 1-${MAX_WHATSAPP_SESSIONS}.` });
+    await disconnectWhatsApp(slot);
+    res.json({ success: true, slot, message: `WhatsApp session (slot ${slot}) disconnected.` });
   })
 );
 
@@ -1375,22 +1444,32 @@ app.post(
   requirePermission("MANAGE_INTEGRATIONS"),
   requireFeature("whatsappOutreach", "WhatsApp outreach"),
   asyncHandler(async (req, res) => {
-    const { phone } = req.body || {};
-    const ctx = ctxOf(req);
-    const userId = ctx.userId;
-    const { provider } = await resolveWhatsAppProvider(userId, ctx.tenantId);
-    if (provider !== "cloud") {
-      return res.status(410).json({ error: "Configure WhatsApp Cloud API before sending a test.", code: "legacy_provider_disabled" });
-    }
-    if (!phone) return res.status(400).json({ error: "Enter a destination number to test the Cloud API." });
+    const { phone, message } = req.body || {};
+    // Optional `slot` picks which linked account sends the test (defaults to 1).
+    const slot = parseWhatsAppSlot(req.body?.slot ?? 1);
+    if (slot === null) return res.status(400).json({ error: `slot must be 1-${MAX_WHATSAPP_SESSIONS}.` });
 
-    const result = await sendWhatsAppUnified(String(phone), "Test message from LeadGenPilot.", {
-      userId,
-      tenantId: ctx.tenantId,
-      allowTemplateFallback: true,
-    });
-    if (result.ok) return res.json({ success: true, message: "Test message sent successfully.", provider });
-    return res.status(500).json({ error: result.error || "Failed to send test message." });
+    if (typeof message === "string" && message.length > 4096) {
+      return res.status(400).json({ error: "Message is too long. WhatsApp allows up to 4096 characters." });
+    }
+
+    const result = await sendWhatsAppTestMessage(
+      typeof phone === "string" ? phone : undefined,
+      slot,
+      typeof message === "string" ? message : undefined
+    );
+
+    if (result.ok) {
+      return res.json({
+        success: true,
+        slot,
+        target: result.target,
+        message: `Test message sent successfully via WhatsApp account ${slot}.`,
+      });
+    }
+    // A rejected recipient or an unlinked account is a client-correctable
+    // problem, so report it as 400 with the specific reason rather than a 500.
+    return res.status(400).json({ error: result.error || "Failed to send test message." });
   })
 );
 
@@ -1752,7 +1831,7 @@ app.post(
   requirePermission("EDIT_LEADS"),
   asyncHandler(async (req, res) => {
     const ctx = ctxOf(req);
-    const { to, subject, body, leadId } = req.body || {};
+    const { to, subject, body, leadId, attachments } = req.body || {};
     if (!leadId || !to || !subject || !body) {
       return res.status(400).json({ error: "Missing parameters (leadId, to, subject, body)" });
     }
@@ -1777,7 +1856,8 @@ app.post(
       };
     }
 
-    const result = await sendEmailOutreach(String(to), String(subject), String(body), userSmtpConfig);
+    const emailOpts: any = Array.isArray(attachments) && attachments.length > 0 ? { attachments } : undefined;
+    const result = await sendEmailOutreach(String(to), String(subject), String(body), userSmtpConfig, emailOpts);
     await trackManualOutreach(ctx, {
       leadId: String(leadId),
       channel: "email",
@@ -2492,7 +2572,7 @@ app.get(
       webhookUrlConfigured:
         !!process.env.GOOGLE_SHEET_WEBHOOK_URL &&
         process.env.GOOGLE_SHEET_WEBHOOK_URL !== "YOUR_WEBHOOK_URL",
-      whatsappConnected: getWhatsAppStatus().status === "CONNECTED",
+      whatsappConnected: hasAnyConnectedWhatsAppSession(),
       // Durable, per-workspace: a queued or running campaign job belonging to
       // this tenant, not a deployment-wide boolean.
       campaignRunning: !!(await findActiveJob(ctx.tenantId, "campaign")),
@@ -2588,12 +2668,14 @@ async function startServer() {
   // Serve static assets directory
   app.use("/assets", express.static(path.join(process.cwd(), "assets")));
 
-  // ── Company & Legal static pages (About, Privacy, Terms, Cookies) ──
+  // ── Company & Legal static pages (About, Privacy, Terms, Cookies, Refund, Shipping) ──
   const companyPages = [
     { routes: ["/about", "/about-us", "/about/", "/about-us/"], file: "about" },
     { routes: ["/privacy", "/privacy-policy", "/privacy/", "/privacy-policy/"], file: "privacy" },
-    { routes: ["/terms", "/terms-of-service", "/terms/", "/terms-of-service/"], file: "terms" },
+    { routes: ["/terms", "/terms-of-service", "/terms-and-conditions", "/terms/", "/terms-of-service/", "/terms-and-conditions/"], file: "terms" },
     { routes: ["/cookies", "/cookie-policy", "/cookies/", "/cookie-policy/"], file: "cookies" },
+    { routes: ["/refund", "/refund-policy", "/cancellation-refund-policy", "/refund/", "/refund-policy/", "/cancellation-refund-policy/"], file: "refund-policy" },
+    { routes: ["/shipping", "/shipping-delivery", "/shipping-and-delivery", "/shipping/", "/shipping-delivery/", "/shipping-and-delivery/"], file: "shipping" },
   ];
 
   for (const { routes, file } of companyPages) {
@@ -2743,6 +2825,15 @@ async function startServer() {
     cleanupJobInterval = startUnverifiedUserCleanup();
     // The backup service owns retention; this boot hook activates its daily run.
     scheduleAutomaticBackups();
+
+    // Bring previously linked WhatsApp accounts back online. Credentials are
+    // persisted per slot, so a restart must not force the user to re-scan all
+    // five QR codes. Slots that were never linked stay idle.
+    try {
+      restoreWhatsAppSessions();
+    } catch (err: any) {
+      logger.warn(`Could not restore saved WhatsApp sessions: ${err?.message || err}`);
+    }
   });
 
   // ── Graceful shutdown ──
@@ -2768,9 +2859,12 @@ async function startServer() {
     const halted = cancelAllScrapes("server is shutting down");
     if (halted > 0) logger.warn(`Signalled ${halted} in-flight lead search(es) to stop.`);
     try {
+      // Close the browsers but keep credentials on disk. Using the full
+      // disconnect here would log out and delete every session folder, so each
+      // restart would demand five fresh QR scans.
       await Promise.race([
-        disconnectWhatsApp(),
-        new Promise((resolve) => setTimeout(resolve, 5000)),
+        shutdownWhatsAppSessions(),
+        new Promise((resolve) => setTimeout(resolve, 8000)),
       ]);
     } catch (err) {
       logger.warn(`WhatsApp cleanup during shutdown failed: ${(err as Error).message}`);

@@ -56,8 +56,16 @@ export interface WhatsAppProviderPref {
 
 export type IntegrationType =
   | "smtp"
+  | "smtp_2"
+  | "smtp_3"
+  | "smtp_4"
+  | "smtp_5"
   | "google_sheet"
   | "whatsapp"
+  | "whatsapp_2"
+  | "whatsapp_3"
+  | "whatsapp_4"
+  | "whatsapp_5"
   | "whatsapp_cloud"
   | "whatsapp_provider";
 
@@ -92,6 +100,17 @@ function decrypt(encryptedText: string): string {
   let decrypted = decipher.update(encrypted, "hex", "utf8");
   decrypted += decipher.final("utf8");
   return decrypted;
+}
+
+/**
+ * Decrypt a stored integration config blob.
+ *
+ * Exported so routes that read rows directly (the multi-sender slot endpoints)
+ * can decrypt without duplicating the cipher setup. Throws on malformed input,
+ * so callers should treat a failure as "unreadable credentials".
+ */
+export function decryptIntegrationConfig(encryptedText: string): string {
+  return decrypt(encryptedText);
 }
 
 /**
@@ -160,10 +179,14 @@ export async function getUserIntegration(
 /**
  * List every enabled SMTP integration across all users, with decrypted
  * credentials. Used by the email-reply poller to know which mailboxes to watch.
+ *
+ * Covers all five sender slots, not just the primary: with multi-SMTP rotation
+ * a campaign can send from smtp_2..smtp_5, and replies land in whichever
+ * mailbox sent the message. Watching only "smtp" would silently miss them.
  */
 export async function getAllEnabledSmtpConfigs(): Promise<(SMTPConfig & { userId: string | null; tenantId: string | null })[]> {
   const integrations = await prisma.userIntegration.findMany({
-    where: { type: "smtp", enabled: true },
+    where: { type: { in: ["smtp", "smtp_2", "smtp_3", "smtp_4", "smtp_5"] }, enabled: true },
   });
   const results: (SMTPConfig & { userId: string | null; tenantId: string | null })[] = [];
   for (const integ of integrations) {

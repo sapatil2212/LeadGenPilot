@@ -73,14 +73,12 @@ export function normalizeTemplate(input: unknown): Omit<OutreachTemplate, "id" |
     throw new TemplateValidationError("A template object is required.");
   }
   const raw = input as Record<string, unknown>;
-  if (raw.designMode === "code") {
-    throw new TemplateValidationError(
-      "Code-mode templates cannot be imported or saved. Recreate this template in the safe builder."
-    );
-  }
+  const isCodeMode = raw.designMode === "code";
   const templateType = raw.templateType === "whatsapp" ? "whatsapp" : "email";
   const name = cleanText(raw.name, 120);
   if (!name) throw new TemplateValidationError("Template name is required.");
+
+  const htmlCode = isCodeMode && typeof raw.htmlCode === "string" ? raw.htmlCode.slice(0, 500_000) : "";
 
   const useAiBody = raw.useAiBody === true;
   const useCta = raw.useCta === true;
@@ -104,9 +102,12 @@ export function normalizeTemplate(input: unknown): Omit<OutreachTemplate, "id" |
     : 220;
   const customBodyText = trimWords(cleanText(raw.customBodyText, 5_000), bodyWordLimit);
   
-  // If AI dynamic body is not selected, require either customBodyText or introText
-  if (!useAiBody && !customBodyText && !introText) {
+  // If not code mode and AI dynamic body is not selected, require either customBodyText or introText
+  if (!isCodeMode && !useAiBody && !customBodyText && !introText) {
     throw new TemplateValidationError("Add template body text or intro message before saving.");
+  }
+  if (isCodeMode && !htmlCode.trim()) {
+    throw new TemplateValidationError("Please paste or enter your HTML template code before saving.");
   }
 
   const useLogo = raw.useLogo === true;
@@ -126,17 +127,39 @@ export function normalizeTemplate(input: unknown): Omit<OutreachTemplate, "id" |
     }
   }
 
+  let headerImage: string | undefined = undefined;
+  if (typeof raw.headerImage === "string" && raw.headerImage.trim()) {
+    const trimmedHeader = raw.headerImage.trim();
+    if (trimmedHeader.startsWith("data:image/")) {
+      headerImage = trimmedHeader.slice(0, 3_000_000);
+    } else {
+      headerImage = cleanText(trimmedHeader, 2000);
+    }
+  }
+
+  const attachments = Array.isArray(raw.attachments)
+    ? raw.attachments.slice(0, 10).map((att: any, idx: number) => ({
+        id: String(att?.id || `att-${idx}`),
+        name: cleanText(att?.name, 120) || `document-${idx + 1}`,
+        size: typeof att?.size === "number" ? att.size : 0,
+        type: typeof att?.type === "string" ? att.type.slice(0, 80) : "application/octet-stream",
+        dataUrl: typeof att?.dataUrl === "string" ? att.dataUrl.slice(0, 15_000_000) : undefined,
+        url: typeof att?.url === "string" ? safeUrl(att.url) : undefined,
+      }))
+    : undefined;
+
   const textAlign = raw.textAlign === "center" ? "center" : raw.textAlign === "right" ? "right" : "left";
 
   return {
     name,
     templateType,
     subject: templateType === "email" ? cleanText(raw.subject, 120) : "",
-    designMode: "builder",
-    htmlCode: "",
+    designMode: isCodeMode ? "code" : "builder",
+    htmlCode,
     useLogo,
     logoType,
     logoValue,
+    headerImage,
     textAlign,
     introText,
     useAiBody,
@@ -149,6 +172,7 @@ export function normalizeTemplate(input: unknown): Omit<OutreachTemplate, "id" |
     contactText,
     useFooter,
     footerText,
+    attachments,
   };
 }
 

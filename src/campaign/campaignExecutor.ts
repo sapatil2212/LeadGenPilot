@@ -3,6 +3,13 @@
  *
  * HTTP requests only enqueue work. A separately deployed worker claims the Job
  * and each CampaignMessage with short database leases before invoking a provider.
+ *
+ * Extended in v2 to support:
+ *   - Multiple WhatsApp/Email senders with persistent round-robin rotation.
+ *   - Random inter-message delay (configurable min/max seconds per campaign).
+ *   - Batch-pause: after N successful sends the worker sleeps M seconds.
+ *   - AI template variation rotation.
+ *   - Safe {{name}} variable fallback.
  */
 import crypto from "node:crypto";
 import { prisma } from "../prisma";
@@ -15,11 +22,17 @@ import { assertCampaignReadiness } from "./campaignReadiness";
 import { recordCampaignDispatch } from "./dispatchService";
 import { recordOutbound } from "../conversations/conversationService";
 import { isSuppressed } from "../compliance/suppressionService";
+import { determineMessageSender, type SenderChannel } from "./senderRotationService";
+import { selectNextVariation, compileVariationForLead } from "./templateVariationService";
+import { shuffleMessageContent } from "./contentShuffle";
 import type { TenantContext } from "../tenancy/context";
 
+const DEFAULT_DELAY_MIN_S = 10;  // seconds
+const DEFAULT_DELAY_MAX_S = 60;  // seconds
+/** Legacy compatibility: old campaigns used a fixed ms delay via job params. */
 const DEFAULT_DELAY_MS = 5_000;
-const MIN_LIVE_DELAY_MS = 5_000;
-const DELAY_JITTER_RATIO = 0.4;
+const MIN_LIVE_DELAY_MS = 1_000; // lowered: campaigns now use their own random range
+const DELAY_JITTER_RATIO = 0.4;  // kept for legacy paths only
 const DEFAULT_PAGE_SIZE = 25;
 const MAX_DELAY_MS = 10 * 60 * 1_000;
 const MAX_PAGE_SIZE = 100;
@@ -41,6 +54,9 @@ const LEASE_RENEW_MS = Math.max(10, Number(process.env.CAMPAIGN_LEASE_RENEW_MS) 
 /** How many queued jobs a worker will try before concluding the queue is taken. */
 const CLAIM_CANDIDATE_LIMIT = 10;
 
+/** Batch-pause progress key inside Job.progress JSON. */
+const BATCH_SENT_KEY = "batchSentCount";
+
 export interface ExecutionOptions { delayMs?: number; batchSize?: number }
 export interface NormalizedExecutionOptions { delayMs: number; batchSize: number }
 export interface EnqueuedCampaignExecution { jobId: string; campaignId: string; status: "queued" }
@@ -51,9 +67,25 @@ interface CampaignMessageSnapshot {
   businessName: string; recipient: string; channel: string; subject: string | null;
   body: string; attemptCount: number; leaseToken: string | null;
   idempotencyKey?: string | null;
+  selectedSenderId?: string | null;
 }
 interface TenantSmtpConfig { host: string; port: number; secure: boolean; user: string; pass: string; from: string }
 interface TenantGoogleSheetConfig { webhookUrl: string }
+
+/** Campaign-level throttle settings read from the Campaign row. */
+interface CampaignThrottle {
+  delayMinMs: number;
+  delayMaxMs: number;
+  batchSize: number;
+  batchPauseMs: number;
+  /** When > 0, pause after this many ms of continuous sending (time-based). */
+  pauseEveryMs: number;
+  /** When true, reword each message's wording at send time for anti-block. */
+  shuffleContent: boolean;
+}
+
+/** Progress key for the time-based pause window start (epoch ms). */
+const BATCH_WINDOW_KEY = "batchWindowStartedAt";
 
 function parseCampaignChannels(value: string | null | undefined): { email: boolean; whatsapp: boolean } {
   try {
@@ -76,6 +108,32 @@ export function normalizeExecutionOptions(options: ExecutionOptions = {}): Norma
   }
   if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > MAX_PAGE_SIZE) throw new Error(`batchSize must be an integer between 1 and ${MAX_PAGE_SIZE}.`);
   return { delayMs, batchSize };
+}
+
+/**
+ * Validate campaign-level delay settings supplied via the API or UI.
+ * Returns an error string or null if valid.
+ */
+export function validateCampaignThrottleSettings(
+  messageDelayMin: unknown,
+  messageDelayMax: unknown,
+  batchSize?: unknown,
+  batchPauseSeconds?: unknown
+): string | null {
+  const min = Number(messageDelayMin);
+  const max = Number(messageDelayMax);
+  if (!Number.isInteger(min) || min < 0) return "messageDelayMin must be a non-negative integer.";
+  if (!Number.isInteger(max) || max < min) return "messageDelayMax must be >= messageDelayMin.";
+  if (max > 3600) return "messageDelayMax cannot exceed 3600 seconds (1 hour).";
+  if (batchSize !== undefined) {
+    const bs = Number(batchSize);
+    if (!Number.isInteger(bs) || bs < 1 || bs > 1000) return "batchSize must be an integer between 1 and 1000.";
+  }
+  if (batchPauseSeconds !== undefined) {
+    const bp = Number(batchPauseSeconds);
+    if (!Number.isInteger(bp) || bp < 0 || bp > 3600) return "batchPauseSeconds must be between 0 and 3600.";
+  }
+  return null;
 }
 
 /** Atomically claim a fully reviewed campaign and create a queued durable job. */
@@ -272,12 +330,92 @@ function isPermanentError(reason: string): boolean {
   return /not configured|authentication failed|invalid.*(email|recipient|address)|no valid email|no phone recipient|unknown campaign channel|not on whatsapp/i.test(reason);
 }
 
+/** Parse the throttle settings from a Campaign row into unified ms values. */
+function parseCampaignThrottle(campaignRow: any): CampaignThrottle {
+  const isTest = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);
+  const hasCustomDelay = campaignRow?.messageDelayMin != null || campaignRow?.messageDelayMax != null;
+  const hasCustomBatchPause = campaignRow?.batchPauseSeconds != null;
+
+  let delayMinMs = 0;
+  let delayMaxMs = 0;
+  if (hasCustomDelay) {
+    delayMinMs = Math.max(0, (Number(campaignRow?.messageDelayMin) || 0) * 1_000);
+    delayMaxMs = Math.max(delayMinMs, (Number(campaignRow?.messageDelayMax) || 0) * 1_000);
+  } else if (!isTest) {
+    delayMinMs = DEFAULT_DELAY_MIN_S * 1_000;
+    delayMaxMs = DEFAULT_DELAY_MAX_S * 1_000;
+  }
+
+  const batchSize = Math.max(1, Number(campaignRow?.batchSize) || DEFAULT_PAGE_SIZE);
+  const batchPauseMs = hasCustomBatchPause
+    ? Math.max(0, Number(campaignRow.batchPauseSeconds) * 1_000)
+    : (isTest ? 0 : 60 * 1_000);
+
+  const pauseEveryMs = Math.max(0, (Number(campaignRow?.pauseEveryMinutes) || 0) * 60_000);
+  const shuffleContent = Boolean(campaignRow?.shuffleContent);
+
+  return { delayMinMs, delayMaxMs, batchSize, batchPauseMs, pauseEveryMs, shuffleContent };
+}
+
+/** Read the persisted time-pause window start from Job.progress (epoch ms). */
+function readBatchWindowStart(progressJson: string | null | undefined): number {
+  try {
+    const p = JSON.parse(progressJson || "{}");
+    const v = Number(p[BATCH_WINDOW_KEY]);
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Patch the time-pause window start into a progress JSON string. */
+function withBatchWindow(progressJson: string | null | undefined, startedAt: number): string {
+  try {
+    const p = JSON.parse(progressJson || "{}");
+    return JSON.stringify({ ...p, [BATCH_WINDOW_KEY]: startedAt });
+  } catch {
+    return JSON.stringify({ [BATCH_WINDOW_KEY]: startedAt });
+  }
+}
+
+/** Pick a uniformly-random integer delay in [minMs, maxMs]. */
+function randomRangeDelay(minMs: number, maxMs: number): number {
+  if (minMs >= maxMs) return minMs;
+  return minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
+}
+
+/** Read the persisted batchSentCount from Job.progress. */
+function readBatchSentCount(progressJson: string | null | undefined): number {
+  try {
+    const p = JSON.parse(progressJson || "{}");
+    return Math.max(0, Number(p[BATCH_SENT_KEY] || 0));
+  } catch {
+    return 0;
+  }
+}
+
+/** Patch batchSentCount into a progress JSON string. */
+function withBatchCount(progressJson: string | null | undefined, count: number): string {
+  try {
+    const p = JSON.parse(progressJson || "{}");
+    return JSON.stringify({ ...p, [BATCH_SENT_KEY]: count });
+  } catch {
+    return JSON.stringify({ [BATCH_SENT_KEY]: count });
+  }
+}
+
 export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> {
   const params = parseParams(job.params);
   if (!params.campaignId) throw new Error("Campaign job has no campaignId parameter.");
   const campaign = await prisma.campaign.findFirst({
     where: { id: params.campaignId, tenantId: job.tenantId },
-    select: { id: true, name: true, channels: true },
+    select: {
+      id: true, name: true, channels: true,
+      // Throttle settings (new; default values applied in parseCampaignThrottle).
+      messageDelayMin: true, messageDelayMax: true, batchSize: true, batchPauseSeconds: true,
+      // Anti-block controls.
+      shuffleContent: true, pauseEveryMinutes: true,
+    },
   });
   if (!campaign) return finishOwnedJob(job, "failed", { error: "Campaign no longer exists." });
   const ctx = { tenantId: job.tenantId, userId: job.userId, membershipId: "worker", role: "owner", tenantName: "worker", tenantSlug: "worker", permissions: new Set<string>() } as TenantContext;
@@ -286,6 +424,9 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
     resolveTenantSmtpConfig(ctx),
     resolveTenantGoogleSheetConfig(ctx),
   ]);
+
+  // Throttle settings: use campaign-specific values (may be defaults for old campaigns).
+  const throttle = parseCampaignThrottle(campaign);
 
   // Integrations can be disabled after enqueue and before a worker claims the
   // job. Recheck without sending anything, restore the approved campaign, and
@@ -304,6 +445,12 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
   }
 
   let sent = 0; let failed = 0; let skipped = 0;
+  // Restore batch counter from persisted progress so a worker restart doesn't
+  // reset it, causing an extra batch pause.
+  let batchSentCount = readBatchSentCount(job.progress);
+  // Time-based pause window: when the current sending window started. Restored
+  // from progress across restarts; initialised lazily on the first send.
+  let batchWindowStartedAt = readBatchWindowStart(job.progress);
   const jobFields = { tenant: job.tenantId, job: job.id, campaign: campaign.id, worker: job.workerId };
   const total = await prisma.campaignMessage.count({ where: { campaignId: campaign.id, tenantId: job.tenantId, status: { in: ["approved", "retry_wait", "sending"] } } });
 
@@ -312,12 +459,15 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
       logger.warn(`Campaign worker lost its job lease and stopped processing.${logContext(jobFields)}`);
       return { jobId: job.id, sent, failed, skipped, cancelled: false, deferred: false };
     }
-    const state = await prisma.job.findFirst({ where: { id: job.id, tenantId: job.tenantId, workerId: job.workerId, leaseToken: job.leaseToken }, select: { status: true, cancelRequestedAt: true } });
-    if (!state || state.status === "cancelling" || state.cancelRequestedAt) {
+    const jobRow = await prisma.job.findFirst({ where: { id: job.id, tenantId: job.tenantId, workerId: job.workerId, leaseToken: job.leaseToken }, select: { status: true, cancelRequestedAt: true, progress: true } });
+    if (!jobRow || jobRow.status === "cancelling" || jobRow.cancelRequestedAt) {
       await recomputeCampaignCounts(campaign.id, job.tenantId, "cancelled");
       logger.info(`Campaign execution cancelled after ${sent} sent, ${failed} failed, ${skipped} skipped.${logContext(jobFields)}`);
       return finishOwnedJob(job, "cancelled", { result: { campaignId: campaign.id, sent, failed, skipped, cancelled: true } });
     }
+    // Sync the batch counter from DB in case this worker just started after a restart.
+    if (sent === 0) batchSentCount = readBatchSentCount(jobRow.progress);
+
     const message = await claimNextCampaignMessage(job);
     if (!message) {
       const waiting = await prisma.campaignMessage.findFirst({ where: { campaignId: campaign.id, tenantId: job.tenantId, status: "retry_wait" }, orderBy: { nextAttemptAt: "asc" }, select: { nextAttemptAt: true } });
@@ -331,6 +481,40 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
     }
     const messageFields = { ...jobFields, message: message.id, channel: message.channel, attempt: message.attemptCount };
 
+    // ── Feature 1 & 2: Sender selection / rotation ──────────────────────────
+    // On a retry, reuse the sender already committed to this message.
+    // On a first attempt, select the next sender in the rotation.
+    let resolvedSenderId: string | null = message.selectedSenderId ?? null;
+    let resolvedSenderConfig: Record<string, unknown> | null = null;
+    // The 1-based WhatsApp session slot (1-5) the rotation selected. For email
+    // this is unused. Defaults to slot 1 so sending degrades to the primary
+    // account if rotation produced nothing.
+    let resolvedSenderSlot = 1;
+
+    const senderChannel: SenderChannel = message.channel === "email" ? "email" : "whatsapp";
+    const senderResult = await determineMessageSender(
+      campaign.id,
+      job.tenantId,
+      senderChannel,
+      resolvedSenderId
+    );
+    if (senderResult) {
+      resolvedSenderId = senderResult.integrationId;
+      resolvedSenderConfig = senderResult.config;
+      resolvedSenderSlot = senderResult.slot;
+      // Persist the selected sender on first attempt so retries use the same one.
+      if (!message.selectedSenderId) {
+        await prisma.campaignMessage.updateMany({
+          where: { id: message.id, tenantId: job.tenantId },
+          data: { selectedSenderId: resolvedSenderId },
+        }).catch(() => undefined);
+      }
+    }
+
+    // ── Feature 7: Template variation selection ──────────────────────────────
+    // Atomically pick the next approved variation for this campaign+channel.
+    const variation = await selectNextVariation(campaign.id, job.tenantId, message.channel).catch(() => null);
+
     try {
       // Compliance is checked at delivery time, not only at generation time: a
       // contact can opt out after the copy was approved but before it is sent.
@@ -340,12 +524,45 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
           logger.info(`Campaign message skipped: the recipient has opted out.${logContext(messageFields)}`);
         }
       } else {
-        const externalMessageId = await withLeaseKeepAlive(job, message, () => deliverMessage(ctx, message, smtp));
+        // Apply template variation content if available, otherwise use message body.
+        const baseBody = variation
+          ? compileVariationForLead(variation.content, { businessName: message.businessName })
+          : message.body;
+
+        // ── Anti-block: per-message AI content shuffle ──────────────────────
+        // Reword the final, variable-resolved text so a bulk run is not
+        // byte-identical. shuffleMessageContent is self-contained: it returns
+        // the original text on any AI failure or unsafe reword, so it can never
+        // block or corrupt a send.
+        const effectiveBody = throttle.shuffleContent
+          ? await shuffleMessageContent(baseBody, { tenantId: job.tenantId, userId: job.userId })
+          : baseBody;
+
+        const effectiveSubject = variation?.subject || message.subject;
+        const effectiveMessage = { ...message, body: effectiveBody, subject: effectiveSubject ?? null };
+
+        // Resolve SMTP config for this specific sender (may differ from primary).
+        const smtpForSender = senderChannel === "email" && resolvedSenderConfig
+          ? resolvedSmtpFromConfig(resolvedSenderConfig)
+          : smtp;
+
+        const externalMessageId = await withLeaseKeepAlive(job, message, () =>
+          deliverMessageWithSender(ctx, effectiveMessage, smtpForSender, resolvedSenderId, resolvedSenderSlot)
+        );
         if (await finishLeasedMessage(message, job, "sent", undefined, externalMessageId)) {
           sent++;
-          await recordCampaignDispatch({ message, campaignName: campaign.name, status: "SENT", externalMessageId }).catch((error) => logger.warn(`Delivery persisted but report repair is needed: ${error?.message || error}${logContext(messageFields)}`));
+          batchSentCount++;
+          await recordCampaignDispatch({
+            message: effectiveMessage,
+            campaignName: campaign.name,
+            status: "SENT",
+            externalMessageId,
+            senderIntegrationId: resolvedSenderId ?? undefined,
+            variationId: variation?.variationId,
+            variationIndex: variation?.variationIndex,
+          }).catch((error) => logger.warn(`Delivery persisted but report repair is needed: ${error?.message || error}${logContext(messageFields)}`));
           await syncDeliveryToCrmAndInbox(job, message, { status: "SENT", externalMessageId }, googleSheet!.webhookUrl);
-          logger.info(`Campaign message delivered.${logContext({ ...messageFields, providerMessageId: externalMessageId })}`);
+          logger.info(`Campaign message delivered.${logContext({ ...messageFields, providerMessageId: externalMessageId, sender: resolvedSenderId, variation: variation?.variationIndex })}`);
         }
       }
     } catch (error: any) {
@@ -361,23 +578,79 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
       logger.warn(`Campaign message ${permanent ? "failed permanently" : "will retry"}: ${reason}${logContext(messageFields)}`);
     }
     const complete = sent + failed + skipped;
-    await prisma.job.updateMany({ where: { id: job.id, workerId: job.workerId, leaseToken: job.leaseToken, status: "running" }, data: { progress: JSON.stringify({ stage: "sending", current: complete, total, sent, failed, skipped }) } });
-    // Do not wait after the final message. For remaining work, add bounded
-    // jitter to the configured floor so provider traffic is paced rather than
-    // emitted at an identical, bot-like interval.
-    if (params.delayMs > 0) {
+
+    // ── Batch pause (time-based or count-based) ──────────────────────────────
+    //
+    // Time-based (pauseEveryMs > 0): pause after `pauseEveryMinutes` of
+    // continuous sending — this is the "pause every 5 minutes" behaviour. The
+    // window-start timestamp lives in Job.progress so it survives restarts.
+    //
+    // Count-based (fallback): pause after `batchSize` successful sends. Both
+    // persist their counters in Job.progress.
+    //
+    // Open the time window on the first send if it is not already running.
+    if (throttle.pauseEveryMs > 0 && batchWindowStartedAt === 0) {
+      batchWindowStartedAt = Date.now();
+    }
+
+    let progressPayload = withBatchCount(
+      JSON.stringify({ stage: "sending", current: complete, total, sent, failed, skipped }),
+      batchSentCount
+    );
+    if (throttle.pauseEveryMs > 0) {
+      progressPayload = withBatchWindow(progressPayload, batchWindowStartedAt);
+    }
+    await prisma.job.updateMany({
+      where: { id: job.id, workerId: job.workerId, leaseToken: job.leaseToken, status: "running" },
+      data: { progress: progressPayload },
+    });
+
+    const timeTriggered =
+      throttle.pauseEveryMs > 0 &&
+      batchWindowStartedAt > 0 &&
+      Date.now() - batchWindowStartedAt >= throttle.pauseEveryMs;
+    const countTriggered =
+      throttle.pauseEveryMs === 0 &&
+      batchSentCount > 0 &&
+      batchSentCount % throttle.batchSize === 0;
+
+    if ((timeTriggered || countTriggered) && throttle.batchPauseMs > 0) {
       const moreMessages = await prisma.campaignMessage.findFirst({
-        where: {
-          campaignId: campaign.id,
-          tenantId: job.tenantId,
-          status: { in: ["approved", "retry_wait", "sending"] },
-        },
+        where: { campaignId: campaign.id, tenantId: job.tenantId, status: { in: ["approved", "retry_wait", "sending"] } },
         select: { id: true },
       });
       if (moreMessages) {
-        const pacingMs = randomizedPacingDelay(params.delayMs);
-        logger.info(`Campaign pacing: waiting ${Math.ceil(pacingMs / 1_000)}s before the next message.${logContext(jobFields)}`);
-        await delayHoldingLease(job, pacingMs);
+        const reason = timeTriggered
+          ? `${Math.round(throttle.pauseEveryMs / 60_000)} min of sending elapsed`
+          : `${batchSentCount} messages sent`;
+        logger.info(`Campaign batch pause: ${reason}. Pausing ${Math.ceil(throttle.batchPauseMs / 1_000)}s before continuing.${logContext(jobFields)}`);
+        await delayHoldingLease(job, throttle.batchPauseMs);
+        // Reset both counters so the next window/batch triggers another pause.
+        batchSentCount = 0;
+        batchWindowStartedAt = throttle.pauseEveryMs > 0 ? Date.now() : 0;
+        let resetPayload = withBatchCount(progressPayload, 0);
+        if (throttle.pauseEveryMs > 0) resetPayload = withBatchWindow(resetPayload, batchWindowStartedAt);
+        await prisma.job.updateMany({
+          where: { id: job.id, workerId: job.workerId, leaseToken: job.leaseToken, status: "running" },
+          data: { progress: resetPayload },
+        });
+      }
+    }
+
+    // ── Feature 4: Random inter-message delay ────────────────────────────────
+    // Pick a uniformly-random delay in [delayMinMs, delayMaxMs]. Skip after
+    // the final message.
+    const delayMs = throttle.delayMinMs > 0 || throttle.delayMaxMs > 0
+      ? randomRangeDelay(throttle.delayMinMs, throttle.delayMaxMs)
+      : (params.delayMs > 0 ? randomizedPacingDelay(params.delayMs) : 0);
+    if (delayMs > 0) {
+      const moreMessages = await prisma.campaignMessage.findFirst({
+        where: { campaignId: campaign.id, tenantId: job.tenantId, status: { in: ["approved", "retry_wait", "sending"] } },
+        select: { id: true },
+      });
+      if (moreMessages) {
+        logger.info(`Campaign pacing: waiting ${Math.ceil(delayMs / 1_000)}s before the next message.${logContext(jobFields)}`);
+        await delayHoldingLease(job, delayMs);
       }
     }
   }
@@ -531,7 +804,35 @@ async function resolveTenantSmtpConfig(ctx: TenantContext): Promise<TenantSmtpCo
   return { host: String(raw.host), port, secure: Boolean(raw.secure), user: String(raw.user), pass: String(raw.password), from: String(raw.fromName || raw.fromEmail || raw.user) };
 }
 
-async function deliverMessage(ctx: TenantContext, message: CampaignMessageSnapshot, smtp: TenantSmtpConfig | null): Promise<string | undefined> {
+/**
+ * Convert a generic config object from the integration store into a typed SMTP config.
+ * Returns null if required fields are missing.
+ */
+function resolvedSmtpFromConfig(config: Record<string, unknown>): TenantSmtpConfig | null {
+  const port = Number(config.port);
+  if (!config.host || !config.user || !config.password) return null;
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) return null;
+  return {
+    host: String(config.host),
+    port,
+    secure: Boolean(config.secure),
+    user: String(config.user),
+    pass: String(config.password),
+    from: String(config.fromName || config.fromEmail || config.user),
+  };
+}
+
+/**
+ * Core delivery function. Accepts an optional senderId for multi-sender
+ * WhatsApp routing (future: pass the specific client/session per sender).
+ */
+async function deliverMessageWithSender(
+  ctx: TenantContext,
+  message: CampaignMessageSnapshot,
+  smtp: TenantSmtpConfig | null,
+  _senderId?: string | null,
+  senderSlot?: number
+): Promise<string | undefined> {
   if (message.channel === "email") {
     if (!smtp) throw new Error("Email is not configured for this workspace. Add an enabled SMTP integration before sending.");
     if (!isValidEmail(message.recipient)) throw new Error("The approved message has no valid email recipient.");
@@ -546,11 +847,18 @@ async function deliverMessage(ctx: TenantContext, message: CampaignMessageSnapsh
   }
   if (message.channel === "whatsapp") {
     if (!message.recipient.trim()) throw new Error("The approved message has no phone recipient.");
-    const result = await sendWhatsAppUnified(message.recipient, message.body, { userId: ctx.userId, tenantId: ctx.tenantId, allowTemplateFallback: true });
+    // `senderSlot` routes the send through the specific linked WhatsApp account
+    // picked by the rotation layer, so campaigns spread across all 5 sessions.
+    const result = await sendWhatsAppUnified(message.recipient, message.body, { userId: ctx.userId, tenantId: ctx.tenantId, allowTemplateFallback: true, slot: senderSlot });
     if (!result.ok) throw new Error(result.error || "WhatsApp send failed");
     return result.messageId;
   }
   throw new Error(`Unknown campaign channel: ${message.channel}`);
+}
+
+/** Backward-compat alias used by tests that import deliverMessage. */
+async function deliverMessage(ctx: TenantContext, message: CampaignMessageSnapshot, smtp: TenantSmtpConfig | null): Promise<string | undefined> {
+  return deliverMessageWithSender(ctx, message, smtp, null);
 }
 
 export async function recomputeCampaignCounts(campaignId: string, tenantId: string, terminal?: "complete" | "cancelled"): Promise<void> {

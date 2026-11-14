@@ -120,6 +120,7 @@ model Tenant {
   knowledgeChunks    KnowledgeChunk[]
   knowledgeItems     KnowledgeItem[]
   outreachTemplates  OutreachTemplate[]
+  messageTemplates   MessageTemplate[]
   aiConversations    AiConversation[]
   aiMessages         AiMessage[]
 
@@ -132,6 +133,7 @@ model Tenant {
   conversationMessages ConversationMessage[]
   campaignDispatches   CampaignDispatch[]
   suppressions         SuppressionEntry[]
+  templateVariations   TemplateVariation[]
 
   subscriptions Subscription[]
   invoices      Invoice[]
@@ -780,6 +782,61 @@ model OutreachTemplate {
   @@map("outreach_templates")
 }
 
+/// A component-based message template for WhatsApp outreach.
+///
+/// Designed around a structured JSON payload (header/body/footer/actions/
+/// quickReplies/variables) that can be rendered into either a WhatsApp Web
+/// plain-text message or a Meta Cloud API template submission without the user
+/// rebuilding anything.
+///
+/// Sits alongside OutreachTemplate rather than replacing it. OutreachTemplate
+/// continues to serve email; this model is purpose-built for the richer
+/// WhatsApp composition surface (multi-CTA, quick replies, media headers,
+/// variable manager, delivery-method rendering).
+model MessageTemplate {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  name        String
+  description String? @db.Text
+  /// "marketing" | "sales" | "utility" | "support" | "custom"
+  category    String  @default("marketing")
+  /// ISO 639-1 language code. Default English.
+  language    String  @default("en")
+  /// "whatsapp" — extensible to "sms", "telegram", etc.
+  channel     String  @default("whatsapp")
+  /// "web" | "cloud_api" — determines which renderer compiles the output.
+  deliveryMethod String @default("web") @map("delivery_method")
+  /// JSON string array of user-defined labels for filtering.
+  tags        String? @db.Text
+
+  /// The full component-based builder payload as JSON. Never queried inside
+  /// SQL — always deserialized and validated in the service layer.
+  payload     String @db.LongText
+
+  /// "draft" | "active" | "archived"
+  status      String @default("draft")
+  version     Int    @default(1)
+  usageCount  Int    @default(0) @map("usage_count")
+
+  /// True for system-provided starter templates seeded on workspace creation.
+  isPrebuilt  Boolean @default(false) @map("is_prebuilt")
+
+  createdById String  @map("created_by_id")
+  updatedById String  @map("updated_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, category, status])
+  @@index([tenantId, channel, status])
+  @@index([tenantId, deliveryMethod, status])
+  @@index([tenantId, updatedAt])
+  @@index([createdById])
+  @@map("message_templates")
+}
+
 /// An assistant chat thread.
 model AiConversation {
   id       String  @id @default(cuid())
@@ -1090,6 +1147,49 @@ model Campaign {
   /// a delivery failure.
   skippedCount  Int @default(0) @map("skipped_count")
 
+  // ── Outreach throttle settings (Features 4 & 5) ──────────────────────────
+  //
+  // Random delay between every message, in seconds. The worker picks a
+  // uniformly-random integer in [messageDelayMin, messageDelayMax] so traffic
+  // is unpredictable rather than bot-like. Defaults (40–100s) apply to new
+  // campaigns; existing campaigns get the defaults and behave as before.
+  //
+  // Batch pause: after `batchSize` successful sends the worker sleeps for
+  // `batchPauseSeconds` before resuming. Surviving worker restarts because
+  // batchSentCount is stored on Job.progress.
+
+  /// Minimum random send gap in seconds. Must be >= 0. Default: 40.
+  messageDelayMin     Int @default(40) @map("message_delay_min")
+  /// Maximum random send gap in seconds. Must be >= messageDelayMin. Default: 100.
+  messageDelayMax     Int @default(100) @map("message_delay_max")
+  /// Number of messages to send before a batch pause. Default: 25.
+  batchSize           Int @default(25) @map("batch_size")
+  /// Seconds to pause between batches. Default: 60.
+  batchPauseSeconds   Int @default(60) @map("batch_pause_seconds")
+
+  /// Anti-block AI content shuffle: when true, each outgoing message's wording
+  /// is lightly reworded at send time (same meaning, offer and variables) so a
+  /// bulk run is not byte-identical. Default off for backward compatibility.
+  shuffleContent      Boolean @default(false) @map("shuffle_content")
+  /// Time-based batch pause: pause after this many minutes of continuous
+  /// sending (for `batchPauseSeconds`). 0 disables the time trigger and falls
+  /// back to the count-based `batchSize` trigger. Default 0.
+  pauseEveryMinutes   Int @default(0) @map("pause_every_minutes")
+
+  // ── Sender / template rotation state (Features 1, 2, 6, 7) ──────────────
+  //
+  // Persisted in the DB rather than process memory so the correct next sender
+  // and variation are selected consistently across worker restarts, PM2
+  // reloads, and multi-worker deployments. Incremented atomically by the
+  // worker via a conditional UPDATE that mirrors the message-lease pattern.
+
+  /// 0-based index into the tenant's enabled sender list for this channel.
+  /// Wraps modulo the number of enabled senders.
+  senderRotationIndex   Int @default(0) @map("sender_rotation_index")
+  /// 0-based index into this campaign's approved TemplateVariations.
+  /// Wraps modulo the number of approved variations.
+  templateRotationIndex Int @default(0) @map("template_rotation_index")
+
   createdById String   @map("created_by_id")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
@@ -1100,10 +1200,11 @@ model Campaign {
   /// Timestamp when every approved message finished (success or failure).
   completedAt DateTime? @map("completed_at")
 
-  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  messages   CampaignMessage[]
-  dispatches CampaignDispatch[]
-  user       User?             @relation(fields: [userId], references: [id])
+  tenant             Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  messages           CampaignMessage[]
+  dispatches         CampaignDispatch[]
+  templateVariations TemplateVariation[]
+  user               User?                @relation(fields: [userId], references: [id])
   userId   String?
 
   @@index([tenantId, status])
@@ -1190,6 +1291,11 @@ model CampaignMessage {
   /// duplicate collapsible by the transport (as the SMTP Message-ID) and
   /// detectable afterwards, because the same key appears on the delivery report.
   idempotencyKey String? @map("idempotency_key")
+
+  /// The UserIntegration.id of the sender account chosen for this message.
+  /// Null for campaigns created before multi-sender support, or single-sender
+  /// campaigns. Stored on first attempt; retries reuse the same sender.
+  selectedSenderId String? @map("selected_sender_id")
 
   campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   lead     Lead?    @relation(fields: [leadId], references: [id], onDelete: SetNull)
@@ -1289,6 +1395,12 @@ model CampaignDispatch {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  /// Analytics: which sender integration was used.
+  senderIntegrationId   String? @map("sender_integration_id")
+  /// Analytics: which template variation was selected.
+  templateVariationId   String? @map("template_variation_id")
+  templateVariationIndex Int?   @map("template_variation_index")
+
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
   campaignMessage CampaignMessage? @relation(fields: [campaignMessageId], references: [id], onDelete: SetNull)
@@ -1304,6 +1416,71 @@ model CampaignDispatch {
   @@index([tenantId, externalMessageId])
   @@index([tenantId, idempotencyKey], map: "campaign_dispatches_idempotency_idx")
   @@map("campaign_dispatches")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI TEMPLATE VARIATIONS
+//
+// A set of semantically-equivalent outreach messages generated from one
+// outreach approach by the AI variation service. Approved variations are
+// rotated across leads so recipients see different wording while the offer,
+// CTA and intent remain consistent.
+//
+// Rotation is independent from sender rotation. Both indices are persisted on
+// the Campaign row so multi-worker deployments stay in sync without a
+// separate coordination record.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model TemplateVariation {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  /// The campaign this variation set belongs to, when generated per-campaign.
+  campaignId String? @map("campaign_id")
+
+  /// The OutreachTemplate this set was derived from, when generated from an
+  /// existing template.
+  outreachTemplateId String? @map("outreach_template_id")
+
+  /// "email" | "whatsapp"
+  channel String
+
+  /// 0-based slot in the rotation. Variations are delivered in ascending order
+  /// of variationIndex, cycling back to 0 after the last one.
+  variationIndex Int @default(0) @map("variation_index")
+
+  /// The intent/brief that was used to generate this variation. Stored so
+  /// the user can see what they asked for and regenerate with the same brief.
+  outreachApproach String? @map("outreach_approach") @db.Text
+
+  /// Email subject line (email channel only).
+  subject String? @db.Text
+
+  /// The generated message body. Variables like {{name}} are preserved as-is
+  /// and substituted at delivery time.
+  content String @db.LongText
+
+  /// "draft" | "approved" | "rejected"
+  ///
+  /// Only approved variations enter the rotation. A draft variation is visible
+  /// in the review UI but will not be sent.
+  status String @default("draft")
+
+  /// Provenance of the AI call that generated this variation.
+  aiProvider String? @map("ai_provider")
+  aiModel    String? @map("ai_model")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([campaignId])
+  @@index([outreachTemplateId])
+  @@index([tenantId, channel, status])
+  @@map("template_variations")
 }
 
 /// A contact this workspace must not contact again on a given channel.

@@ -162,7 +162,8 @@ export async function generateTemplateDraft(
         operation: "outreach.templateDraft",
         tenantId: ctx.tenantId,
         userId: ctx.userId,
-        requiredProvider: "gemini",
+        // No requiredProvider: see messageTemplateGenerator — template drafting
+        // is provider-agnostic and must fall back rather than fail closed.
         validate: (candidate) => validateOutreachTemplateDraft(candidate, channel),
         ...promptRef(outreachTemplateDraftPrompt),
       }
@@ -170,8 +171,8 @@ export async function generateTemplateDraft(
   } catch (err: any) {
     if (err instanceof AiUnavailableError) throw err;
     throw new AiUnavailableError(
-      "Gemini could not produce a valid template draft.",
-      [{ provider: "gemini", message: err?.message || String(err) }]
+      `The AI provider could not produce a valid template draft. ${err?.message || String(err)}`.trim(),
+      []
     );
   }
   const { value, result } = generated;

@@ -21,13 +21,17 @@ const navigationLinks = [
 const companyLinks = [
   { label: "About", href: "/about" },
   { label: "Privacy Policy", href: "/privacy" },
-  { label: "Terms of Service", href: "/terms" },
+  { label: "Terms & Conditions", href: "/terms-and-conditions" },
+  { label: "Refund Policy", href: "/refund-policy" },
+  { label: "Shipping & Delivery", href: "/shipping" },
   { label: "Cookie Policy", href: "/cookies" },
 ];
 
 const legalLinks = [
   { label: "Privacy", href: "/privacy" },
-  { label: "Terms", href: "/terms" },
+  { label: "Terms & Conditions", href: "/terms-and-conditions" },
+  { label: "Refund Policy", href: "/refund-policy" },
+  { label: "Shipping & Delivery", href: "/shipping" },
   { label: "Cookies", href: "/cookies" },
 ];
 

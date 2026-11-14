@@ -237,6 +237,8 @@ export function createFakeCampaignDb(seed: Partial<FakeDbState> = {}) {
     lead: model(() => state.leads, "lead"),
     conversationThread: model(() => [], "thread"),
     conversationMessage: model(() => [], "conversation-message"),
+    userIntegration: model(() => [], "user-integration"),
+    templateVariation: model(() => [], "template-variation"),
     $transaction: async (fn: any) => (typeof fn === "function" ? fn(prisma) : Promise.all(fn)),
   };
 

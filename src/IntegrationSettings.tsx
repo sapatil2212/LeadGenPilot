@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect } from "react";
 import WhatsAppLogo from "./WhatsAppLogo";
+import { ModalPortal } from "./ui/primitives";
 import { 
   Mail, 
   FileSpreadsheet, 
@@ -55,57 +56,1034 @@ interface GoogleSheetFormData {
   label: string;
 }
 
-/** Meta WhatsApp Business Cloud API credentials, as entered in the form. */
-interface CloudFormData {
-  phoneNumberId: string;
-  wabaId: string;
-  accessToken: string;
-  verifyToken: string;
-  appSecret: string;
-  defaultTemplateName: string;
-  defaultTemplateLang: string;
-}
 
-interface CloudStatusState {
-  connected: boolean;
-  displayPhoneNumber?: string;
-  verifiedName?: string;
-  qualityRating?: string;
-  error?: string;
-}
-
-/** An approved (or pending) message template on the connected WABA. */
-interface CloudTemplate {
-  name: string;
+/** Per-slot WhatsApp session status for the multi-account gateway. */
+export interface WhatsAppSessionStatus {
+  slot: number;
   status: string;
-  language: string;
-  category?: string;
+  qr: string;
+  qrDataUrl?: string;
+  error?: string;
+  /** Linked account's phone number (digits only), once connected. */
+  phoneNumber?: string;
+  /** Linked account's WhatsApp profile name, once connected. */
+  pushName?: string;
+  /** WhatsApp offline-sync progress while authenticating (0-100). */
+  loadingPercent?: number;
+  /** Credentials exist on disk, so this slot auto-restores after a restart. */
+  hasSavedSession?: boolean;
+}
+
+/**
+ * Normalise a user-entered phone number the same way the server does, so the
+ * modal can reject bad input before a request is made. Mirrors
+ * formatWhatsAppJid in outreachService.ts.
+ */
+function normalizeWhatsAppNumber(input: string): { ok: boolean; digits?: string; error?: string } {
+  const raw = (input || "").trim();
+  if (!raw) return { ok: false, error: "Enter the WhatsApp number to send the test to." };
+  if (/[a-zA-Z]/.test(raw)) {
+    return { ok: false, error: "Numbers only. Include the country code, for example 919876543210." };
+  }
+
+  let cleaned = raw.replace(/[^0-9]/g, "");
+  if (!cleaned) return { ok: false, error: "Enter digits only, including the country code." };
+  if (cleaned.startsWith("0")) cleaned = cleaned.substring(1);
+  if (cleaned.startsWith("910") && cleaned.length === 13) cleaned = "91" + cleaned.substring(3);
+  if (cleaned.length === 10) cleaned = "91" + cleaned;
+
+  if (cleaned.length < 10 || cleaned.length > 15) {
+    return { ok: false, error: "That does not look like a valid number. Use the country code, e.g. 919876543210." };
+  }
+  return { ok: true, digits: cleaned };
+}
+
+const DEFAULT_TEST_MESSAGE =
+  "Hello from LeadGenPilot! This is a test outreach message verifying your gateway connection. 🚀";
+
+/** Max characters WhatsApp accepts in a single text message. */
+const WHATSAPP_MAX_CHARS = 4096;
+
+/**
+ * Dialog for sending a test WhatsApp message from a specific linked account.
+ * Replaces the old window.prompt, which accepted any string (including "test")
+ * and only failed server-side.
+ */
+function WhatsAppTestModal({
+  isLight,
+  slot,
+  fromNumber,
+  isSending,
+  onCancel,
+  onSend,
+}: {
+  isLight: boolean;
+  slot: number;
+  fromNumber?: string;
+  isSending: boolean;
+  onCancel: () => void;
+  onSend: (slot: number, phone: string, message: string) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const [phone, setPhone] = useState("");
+  const [message, setMessage] = useState(DEFAULT_TEST_MESSAGE);
+  const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState<string | null>(null);
+
+  const submit = async () => {
+    setError(null);
+    const parsed = normalizeWhatsAppNumber(phone);
+    if (!parsed.ok) {
+      setError(parsed.error || "Enter a valid WhatsApp number.");
+      return;
+    }
+    if (!message.trim()) {
+      setError("Enter the message you want to send.");
+      return;
+    }
+    const result = await onSend(slot, parsed.digits!, message.trim());
+    if (result.ok) {
+      setSent(parsed.digits!);
+    } else {
+      setError(result.error || "Could not send the test message.");
+    }
+  };
+
+  const inputClass = `w-full text-xs border rounded-lg px-3 py-2.5 focus:outline-none focus:border-indigo-500 ${
+    isLight ? "bg-white border-slate-200 text-slate-800" : "bg-[#030712] border-[#1e293b] text-white"
+  }`;
+
+  return (
+    <ModalPortal>
+      <div
+        className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-fadeIn"
+        onMouseDown={onCancel}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Send a test WhatsApp message from account ${slot}`}
+      >
+        <div
+          onMouseDown={(e) => e.stopPropagation()}
+          className={`border rounded-2xl p-6 w-full max-w-md shadow-2xl animate-scaleUp ${
+            isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
+          }`}
+        >
+          <h3 className={`text-base font-bold mb-1 flex items-center gap-2 ${isLight ? "text-slate-900" : "text-white"}`}>
+            <Smartphone className="h-5 w-5 text-indigo-400" /> Send Test Message
+          </h3>
+          <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
+            Sends from <strong className={isLight ? "text-slate-700" : "text-slate-200"}>
+              WhatsApp Account {slot}{fromNumber ? ` (+${fromNumber})` : ""}
+            </strong>. Use it to confirm the gateway can deliver before launching a campaign.
+          </p>
+
+          {sent ? (
+            <>
+              <div className={`flex items-start gap-2.5 p-3 rounded-lg border text-xs leading-relaxed mb-4 ${
+                isLight ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-emerald-500/5 border-emerald-500/20 text-emerald-300"
+              }`}>
+                <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-bold">Message sent to +{sent}.</span>{" "}
+                  Check that device to confirm it arrived.
+                </div>
+              </div>
+              <div className="flex justify-end">
+                <button
+                  onClick={onCancel}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer transition-all"
+                >
+                  Done
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <label className={`block text-[11px] font-bold mb-1.5 ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+                Recipient WhatsApp number
+              </label>
+              <input
+                autoFocus
+                type="tel"
+                inputMode="numeric"
+                placeholder="919876543210 (with country code)"
+                value={phone}
+                onChange={(e) => { setPhone(e.target.value); setError(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter") void submit(); if (e.key === "Escape") onCancel(); }}
+                className={inputClass}
+                disabled={isSending}
+              />
+              <p className="text-[10px] text-slate-500 mt-1 mb-3">
+                Digits only, including country code. A 10-digit number assumes +91.
+              </p>
+
+              <label className={`block text-[11px] font-bold mb-1.5 ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+                Message
+              </label>
+              <textarea
+                rows={4}
+                value={message}
+                onChange={(e) => { setMessage(e.target.value.slice(0, WHATSAPP_MAX_CHARS)); setError(null); }}
+                onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}
+                placeholder="Type the message to send..."
+                className={`${inputClass} resize-y leading-relaxed`}
+                disabled={isSending}
+              />
+              <div className="flex items-center justify-between mt-1 mb-3">
+                <button
+                  type="button"
+                  onClick={() => setMessage(DEFAULT_TEST_MESSAGE)}
+                  className="text-[10px] text-indigo-400 hover:text-indigo-300 font-bold cursor-pointer"
+                >
+                  Reset to default
+                </button>
+                <span className={`text-[10px] ${message.length >= WHATSAPP_MAX_CHARS ? "text-rose-400" : "text-slate-500"}`}>
+                  {message.length}/{WHATSAPP_MAX_CHARS}
+                </span>
+              </div>
+
+              {error && (
+                <div className={`flex items-start gap-2.5 p-3 rounded-lg border text-xs leading-relaxed mb-3 ${
+                  isLight ? "bg-rose-50 border-rose-200 text-rose-800" : "bg-rose-500/5 border-rose-500/20 text-rose-300"
+                }`}>
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{error}</span>
+                </div>
+              )}
+
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={onCancel}
+                  disabled={isSending}
+                  className={`px-4 py-2 border rounded-lg text-xs cursor-pointer transition-all disabled:opacity-50 ${
+                    isLight ? "border-slate-200 text-slate-600 hover:bg-slate-50" : "border-[#1e293b] text-slate-400 hover:bg-slate-800"
+                  }`}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => void submit()}
+                  disabled={isSending || !phone.trim() || !message.trim()}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer transition-all disabled:opacity-50 flex items-center gap-2"
+                >
+                  {isSending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {isSending ? "Sending..." : "Send Test Message"}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </ModalPortal>
+  );
+}
+
+/** Maximum SMTP sender accounts that can be configured at once. */
+const MAX_SMTP_SLOTS = 5;
+
+/** One configured SMTP sender slot, as listed by /api/integrations/senders/email. */
+export interface SmtpSender {
+  id: string;
+  type: string;
+  label: string | null;
+  slot: number;
+  enabled: boolean;
+}
+
+/**
+ * Card for a single SMTP sender slot (1-5). Renders either a configured
+ * account with manage actions, or an empty slot inviting the user to add one.
+ */
+interface SmtpSenderCardProps {
+  key?: React.Key;
+  isLight: boolean;
+  slot: number;
+  sender?: SmtpSender;
+  busy: boolean;
+  onAdd: (slot: number) => void;
+  onEdit: (sender: SmtpSender) => void;
+  onTest: (sender: SmtpSender) => void;
+  onSendTestEmail: (sender: SmtpSender) => void;
+  onToggle: (sender: SmtpSender) => void;
+  onDelete: (sender: SmtpSender) => void;
+}
+
+function SmtpSenderCard({
+  isLight,
+  slot,
+  sender,
+  busy,
+  onAdd,
+  onEdit,
+  onTest,
+  onSendTestEmail,
+  onToggle,
+  onDelete,
+}: SmtpSenderCardProps) {
+  if (!sender) {
+    return (
+      <div className={`border border-dashed rounded-xl p-4 flex items-center justify-between gap-3 ${
+        isLight ? "bg-slate-50/60 border-slate-300" : "bg-[#070b12] border-[#1e293b]"
+      }`}>
+        <div className="flex items-center gap-2.5">
+          <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${
+            isLight ? "bg-slate-200/70" : "bg-slate-800/60"
+          }`}>
+            <Mail className="w-4 h-4 text-slate-400" />
+          </div>
+          <div>
+            <h4 className={`text-xs font-bold ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+              SMTP Account {slot}
+              {slot === 1 && <span className="ml-1.5 text-[9px] font-semibold text-indigo-400">(Primary)</span>}
+            </h4>
+            <p className="text-[9.5px] text-slate-500 mt-0.5">Not configured</p>
+          </div>
+        </div>
+        <button
+          onClick={() => onAdd(slot)}
+          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold rounded-lg cursor-pointer transition-all flex items-center gap-1.5 shrink-0"
+        >
+          <Plus className="w-3 h-3" />
+          Add Account
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`border rounded-xl p-4 ${
+      isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
+    }`}>
+      <div className="flex justify-between items-start gap-3 flex-wrap">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-9 h-9 rounded-lg bg-indigo-500/10 flex items-center justify-center shrink-0">
+            <Mail className="w-4 h-4 text-indigo-500" />
+          </div>
+          <div className="min-w-0">
+            <h4 className={`text-xs font-bold truncate ${isLight ? "text-slate-900" : "text-white"}`}>
+              {sender.label || `SMTP Account ${slot}`}
+              {slot === 1 && <span className="ml-1.5 text-[9px] font-semibold text-indigo-400">(Primary)</span>}
+            </h4>
+            <p className="text-[9.5px] text-slate-500 mt-0.5">
+              Slot {slot} · {sender.enabled ? "In rotation" : "Excluded from rotation"}
+            </p>
+          </div>
+        </div>
+
+        <button
+          onClick={() => onToggle(sender)}
+          disabled={busy}
+          className={`px-2.5 py-1 rounded-lg text-[9.5px] font-bold border transition-all cursor-pointer flex items-center gap-1.5 shrink-0 disabled:opacity-50 ${
+            sender.enabled
+              ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
+              : "bg-slate-500/10 border-slate-500/20 text-slate-400"
+          }`}
+        >
+          <Power className="w-3 h-3" />
+          {sender.enabled ? "Enabled" : "Disabled"}
+        </button>
+      </div>
+
+      <div className="flex gap-2 flex-wrap mt-3.5 pt-3 border-t border-slate-200/20">
+        <button
+          onClick={() => onEdit(sender)}
+          disabled={busy}
+          className={`px-3 py-1.5 text-[11px] font-semibold rounded-lg border transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50 ${
+            isLight ? "border-slate-200 text-slate-600 hover:bg-slate-50" : "border-slate-800 text-slate-300 hover:bg-slate-800/60"
+          }`}
+        >
+          <Edit2 className="w-3 h-3 text-indigo-400" />
+          Edit
+        </button>
+        <button
+          onClick={() => onTest(sender)}
+          disabled={busy}
+          title="Check the credentials authenticate, without sending anything"
+          className={`px-3 py-1.5 text-[11px] font-semibold rounded-lg border transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50 ${
+            isLight ? "border-slate-200 text-slate-600 hover:bg-slate-50" : "border-slate-800 text-slate-300 hover:bg-slate-800/60"
+          }`}
+        >
+          {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3 text-emerald-500" />}
+          Verify
+        </button>
+        <button
+          onClick={() => onSendTestEmail(sender)}
+          disabled={busy}
+          title="Deliver a real test email from this account"
+          className="px-3 py-1.5 text-[11px] font-semibold rounded-lg bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 border border-indigo-500/25 transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+        >
+          <Mail className="w-3 h-3" />
+          Send Test Email
+        </button>
+        <button
+          onClick={() => onDelete(sender)}
+          disabled={busy}
+          className="ml-auto px-3 py-1.5 text-[11px] font-semibold rounded-lg bg-rose-600/10 hover:bg-rose-600/20 text-rose-400 border border-rose-500/25 transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+        >
+          <Trash2 className="w-3 h-3" />
+          Delete
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const DEFAULT_TEST_EMAIL_SUBJECT = "LeadGenPilot test email";
+const DEFAULT_TEST_EMAIL_BODY =
+  "This is a test email from LeadGenPilot confirming this SMTP account can deliver outreach messages.";
+
+/**
+ * Dialog for sending a real test email from one SMTP slot.
+ *
+ * Separate from the connection check: verify() only proves the credentials
+ * authenticate, while this proves a message actually leaves and arrives.
+ */
+function SmtpTestEmailModal({
+  isLight,
+  slot,
+  label,
+  isSending,
+  onCancel,
+  onSend,
+}: {
+  isLight: boolean;
+  slot: number;
+  label?: string | null;
+  isSending: boolean;
+  onCancel: () => void;
+  onSend: (to: string, subject: string, message: string) => Promise<{ ok: boolean; error?: string; sentFrom?: string }>;
+}) {
+  const [to, setTo] = useState("");
+  const [subject, setSubject] = useState(DEFAULT_TEST_EMAIL_SUBJECT);
+  const [body, setBody] = useState(DEFAULT_TEST_EMAIL_BODY);
+  const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState<{ to: string; from?: string } | null>(null);
+
+  const submit = async () => {
+    setError(null);
+    const recipient = to.trim();
+    if (!recipient) { setError("Enter the email address to send the test to."); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) { setError("That is not a valid email address."); return; }
+    if (!subject.trim()) { setError("Enter a subject."); return; }
+    if (!body.trim()) { setError("Enter the message you want to send."); return; }
+
+    const result = await onSend(recipient, subject.trim(), body.trim());
+    if (result.ok) setSent({ to: recipient, from: result.sentFrom });
+    else setError(result.error || "Could not send the test email.");
+  };
+
+  const inputClass = `w-full text-xs border rounded-lg px-3 py-2.5 focus:outline-none focus:border-indigo-500 ${
+    isLight ? "bg-white border-slate-200 text-slate-800" : "bg-[#030712] border-[#1e293b] text-white"
+  }`;
+  const labelClass = `block text-[11px] font-bold mb-1.5 ${isLight ? "text-slate-700" : "text-slate-300"}`;
+
+  return (
+    <ModalPortal>
+      <div
+        className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 overflow-y-auto animate-fadeIn"
+        onMouseDown={onCancel}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Send a test email from SMTP account ${slot}`}
+      >
+        <div
+          onMouseDown={(e) => e.stopPropagation()}
+          className={`border rounded-2xl p-6 w-full max-w-md shadow-2xl animate-scaleUp my-auto ${
+            isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
+          }`}
+        >
+          <h3 className={`text-base font-bold mb-1 flex items-center gap-2 ${isLight ? "text-slate-900" : "text-white"}`}>
+            <Mail className="h-5 w-5 text-indigo-400" /> Send Test Email
+          </h3>
+          <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
+            Sends from <strong className={isLight ? "text-slate-700" : "text-slate-200"}>
+              SMTP Account {slot}{label ? ` (${label})` : ""}
+            </strong> using the same mail path campaigns use, so a success here means outreach will deliver.
+          </p>
+
+          {sent ? (
+            <>
+              <div className={`flex items-start gap-2.5 p-3 rounded-lg border text-xs leading-relaxed mb-4 ${
+                isLight ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-emerald-500/5 border-emerald-500/20 text-emerald-300"
+              }`}>
+                <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-bold">Test email sent to {sent.to}.</span>{" "}
+                  {sent.from ? `It was sent from ${sent.from}. ` : ""}
+                  Check the inbox, and the spam folder if it is not there.
+                </div>
+              </div>
+              <div className="flex justify-end">
+                <button
+                  onClick={onCancel}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer transition-all"
+                >
+                  Done
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <label className={labelClass}>Recipient email</label>
+              <input
+                autoFocus
+                type="email"
+                placeholder="you@example.com"
+                value={to}
+                onChange={(e) => { setTo(e.target.value); setError(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter") void submit(); if (e.key === "Escape") onCancel(); }}
+                className={inputClass}
+                disabled={isSending}
+              />
+
+              <label className={`${labelClass} mt-3`}>Subject</label>
+              <input
+                type="text"
+                value={subject}
+                onChange={(e) => { setSubject(e.target.value.slice(0, 500)); setError(null); }}
+                onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}
+                className={inputClass}
+                disabled={isSending}
+              />
+
+              <label className={`${labelClass} mt-3`}>Message</label>
+              <textarea
+                rows={4}
+                value={body}
+                onChange={(e) => { setBody(e.target.value); setError(null); }}
+                onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}
+                placeholder="Type the email body..."
+                className={`${inputClass} resize-y leading-relaxed`}
+                disabled={isSending}
+              />
+              <div className="flex items-center justify-between mt-1 mb-3">
+                <button
+                  type="button"
+                  onClick={() => { setSubject(DEFAULT_TEST_EMAIL_SUBJECT); setBody(DEFAULT_TEST_EMAIL_BODY); }}
+                  className="text-[10px] text-indigo-400 hover:text-indigo-300 font-bold cursor-pointer"
+                >
+                  Reset to default
+                </button>
+                <span className="text-[10px] text-slate-500">{body.length} characters</span>
+              </div>
+
+              {error && (
+                <div className={`flex items-start gap-2.5 p-3 rounded-lg border text-xs leading-relaxed mb-3 ${
+                  isLight ? "bg-rose-50 border-rose-200 text-rose-800" : "bg-rose-500/5 border-rose-500/20 text-rose-300"
+                }`}>
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{error}</span>
+                </div>
+              )}
+
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={onCancel}
+                  disabled={isSending}
+                  className={`px-4 py-2 border rounded-lg text-xs cursor-pointer transition-all disabled:opacity-50 ${
+                    isLight ? "border-slate-200 text-slate-600 hover:bg-slate-50" : "border-[#1e293b] text-slate-400 hover:bg-slate-800"
+                  }`}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => void submit()}
+                  disabled={isSending || !to.trim() || !subject.trim() || !body.trim()}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer transition-all disabled:opacity-50 flex items-center gap-2"
+                >
+                  {isSending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {isSending ? "Sending..." : "Send Test Email"}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </ModalPortal>
+  );
+}
+
+/**
+ * Add/edit dialog for one SMTP sender slot.
+ *
+ * Validates the same fields the server requires (host, user, password,
+ * fromEmail, and an integer port) so a bad config cannot be saved. That matters
+ * because an unusable stored config does not fail loudly at send time — every
+ * message routed to that slot fails with a generic "email is not configured".
+ */
+function SmtpSenderModal({
+  isLight,
+  slot,
+  mode,
+  initial,
+  busy,
+  onCancel,
+  onSubmit,
+  onTestDraft,
+}: {
+  isLight: boolean;
+  slot: number;
+  mode: "add" | "edit";
+  initial?: SMTPFormData;
+  busy: boolean;
+  onCancel: () => void;
+  onSubmit: (form: SMTPFormData) => Promise<{ ok: boolean; error?: string }>;
+  onTestDraft: (form: SMTPFormData) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const [form, setForm] = useState<SMTPFormData>(
+    initial || {
+      host: "",
+      port: "587",
+      secure: false,
+      user: "",
+      password: "",
+      fromEmail: "",
+      fromName: "",
+      label: `SMTP Account ${slot}`,
+    }
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [showPass, setShowPass] = useState(false);
+
+  const set = (patch: Partial<SMTPFormData>) => {
+    setForm((prev) => ({ ...prev, ...patch }));
+    setError(null);
+    setNotice(null);
+  };
+
+  /** Mirror of the server's validation so errors appear before a round trip. */
+  const validate = (): string | null => {
+    if (!form.host.trim()) return "SMTP host is required.";
+    if (!form.user.trim()) return "SMTP username is required.";
+    if (!form.password) return "SMTP password is required.";
+    if (!form.fromEmail.trim()) return "From email is required.";
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.fromEmail.trim())) return "From email is not a valid address.";
+    const port = Number(form.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return "Port must be a whole number between 1 and 65535.";
+    return null;
+  };
+
+  const handleSave = async () => {
+    const invalid = validate();
+    if (invalid) { setError(invalid); return; }
+    const result = await onSubmit(form);
+    if (!result.ok) setError(result.error || "Could not save this SMTP account.");
+  };
+
+  const handleTest = async () => {
+    const invalid = validate();
+    if (invalid) { setError(invalid); return; }
+    setNotice(null);
+    const result = await onTestDraft(form);
+    if (result.ok) setNotice("Connection successful. These credentials work.");
+    else setError(result.error || "Connection failed.");
+  };
+
+  const inputClass = `w-full px-2.5 py-2 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
+    isLight ? "bg-white border-slate-200 text-slate-900" : "bg-[#030712] border-slate-700 text-white"
+  }`;
+  const labelClass = "block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1";
+
+  return (
+    <ModalPortal>
+      <div
+        className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 overflow-y-auto animate-fadeIn"
+        onMouseDown={onCancel}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${mode === "add" ? "Add" : "Edit"} SMTP account ${slot}`}
+      >
+        <div
+          onMouseDown={(e) => e.stopPropagation()}
+          className={`border rounded-2xl p-6 w-full max-w-lg shadow-2xl animate-scaleUp my-auto ${
+            isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
+          }`}
+        >
+          <h3 className={`text-base font-bold mb-1 flex items-center gap-2 ${isLight ? "text-slate-900" : "text-white"}`}>
+            <Key className="h-4.5 w-4.5 text-indigo-400" />
+            {mode === "add" ? `Add SMTP Account ${slot}` : `Edit SMTP Account ${slot}`}
+          </h3>
+          <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
+            Campaigns rotate email sends across every enabled account to spread volume and protect deliverability.
+          </p>
+
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-3">
+              <div className="col-span-2">
+                <label className={labelClass}>SMTP Host</label>
+                <input type="text" value={form.host} onChange={(e) => set({ host: e.target.value })} placeholder="smtp.gmail.com" className={inputClass} disabled={busy} />
+              </div>
+              <div>
+                <label className={labelClass}>Port</label>
+                <input type="number" value={form.port} onChange={(e) => set({ port: e.target.value })} placeholder="587" className={inputClass} disabled={busy} />
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2 py-0.5 cursor-pointer">
+              <input type="checkbox" checked={form.secure} onChange={(e) => set({ secure: e.target.checked })} className="rounded accent-indigo-600" disabled={busy} />
+              <span className={`text-[11px] font-semibold ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+                Use SSL/TLS (typically port 465)
+              </span>
+            </label>
+
+            <div>
+              <label className={labelClass}>Username / Email</label>
+              <input type="text" value={form.user} onChange={(e) => set({ user: e.target.value })} placeholder="yourname@gmail.com" className={inputClass} disabled={busy} />
+            </div>
+
+            <div>
+              <label className={labelClass}>Password / App Password</label>
+              <div className="relative">
+                <input
+                  type={showPass ? "text" : "password"}
+                  value={form.password}
+                  onChange={(e) => set({ password: e.target.value })}
+                  placeholder="App password"
+                  className={`${inputClass} pr-9`}
+                  disabled={busy}
+                />
+                <button type="button" onClick={() => setShowPass(!showPass)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                  {showPass ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+              {mode === "edit" && (
+                <p className="text-[10px] text-slate-500 mt-1">
+                  Leave the masked value untouched to keep the saved password.
+                </p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelClass}>From Email</label>
+                <input type="email" value={form.fromEmail} onChange={(e) => set({ fromEmail: e.target.value })} placeholder="noreply@domain.com" className={inputClass} disabled={busy} />
+              </div>
+              <div>
+                <label className={labelClass}>From Name</label>
+                <input type="text" value={form.fromName} onChange={(e) => set({ fromName: e.target.value })} placeholder="e.g. Sales Team" className={inputClass} disabled={busy} />
+              </div>
+            </div>
+
+            <div>
+              <label className={labelClass}>Label</label>
+              <input type="text" value={form.label} onChange={(e) => set({ label: e.target.value })} placeholder="e.g. Gmail Sales Inbox" className={inputClass} disabled={busy} />
+            </div>
+
+            <p className="text-[10px] text-slate-500 leading-relaxed">
+              Note: messages are always sent from the SMTP username's address. "From Name" sets the display name.
+            </p>
+
+            {error && (
+              <div className={`flex items-start gap-2.5 p-3 rounded-lg border text-xs leading-relaxed ${
+                isLight ? "bg-rose-50 border-rose-200 text-rose-800" : "bg-rose-500/5 border-rose-500/20 text-rose-300"
+              }`}>
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{error}</span>
+              </div>
+            )}
+            {notice && (
+              <div className={`flex items-start gap-2.5 p-3 rounded-lg border text-xs leading-relaxed ${
+                isLight ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-emerald-500/5 border-emerald-500/20 text-emerald-300"
+              }`}>
+                <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{notice}</span>
+              </div>
+            )}
+
+            <div className="flex gap-2 justify-end pt-2 border-t border-slate-200/20">
+              <button
+                onClick={onCancel}
+                disabled={busy}
+                className={`px-4 py-2 border rounded-lg text-xs cursor-pointer transition-all disabled:opacity-50 ${
+                  isLight ? "border-slate-200 text-slate-600 hover:bg-slate-50" : "border-[#1e293b] text-slate-400 hover:bg-slate-800"
+                }`}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void handleTest()}
+                disabled={busy}
+                className="px-4 py-2 bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-300 text-xs font-bold rounded-lg cursor-pointer transition-all disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {busy && <Loader2 className="w-3 h-3 animate-spin" />}
+                Test Connection
+              </button>
+              <button
+                onClick={() => void handleSave()}
+                disabled={busy}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer transition-all disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                {mode === "add" ? "Add Account" : "Save Changes"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </ModalPortal>
+  );
+}
+
+/** Human-readable label for each session state. */
+function sessionStateLabel(status: string): string {
+  switch (status) {
+    case "CONNECTED": return "WHATSAPP CONNECTED";
+    case "AUTHENTICATING": return "SYNCING";
+    case "QR_READY": return "WAITING FOR SCAN";
+    case "CONNECTING": return "STARTING";
+    default: return "NOT CONNECTED";
+  }
 }
 
 interface IntegrationSettingsProps {
   isLight: boolean;
   canWhatsapp?: boolean;
-  whatsappStatus: { status: string; qr: string };
-  onInitializeWhatsApp: () => Promise<void>;
-  onDisconnectWhatsApp: () => Promise<void>;
-  onSendWhatsAppTest: () => Promise<void>;
+  whatsappStatus: { status: string; qr: string; qrDataUrl?: string; error?: string };
+  /**
+   * Status of every WhatsApp account slot (1-5). When provided, the UI renders
+   * one gateway card per slot so a workspace can link up to five business lines.
+   * Falls back to the single `whatsappStatus` (as slot 1) when absent.
+   */
+  whatsappSessions?: WhatsAppSessionStatus[];
+  onInitializeWhatsApp: (slot?: number) => Promise<void>;
+  onDisconnectWhatsApp: (slot?: number) => Promise<void>;
+  /**
+   * Sends a test message and resolves with the outcome, so the dialog can show
+   * the specific failure reason inline instead of raising a browser alert.
+   */
+  onSendWhatsAppTest: (slot: number, phone: string, message: string) => Promise<{ ok: boolean; error?: string }>;
   isSendingTestMsg: boolean;
   isDisconnectingWa: boolean;
+  /** The slot currently performing a disconnect, for per-card button state. */
+  disconnectingSlot?: number | null;
   webhookConfigured: boolean;
   onWebhookConfiguredChange: (val: boolean) => void;
   onIntegrationsChange?: () => void;
   onRequestPricingModal?: () => void;
 }
 
+/** Maximum WhatsApp accounts that can be linked at once. */
+const MAX_WHATSAPP_SLOTS = 5;
+
+/**
+ * A single WhatsApp Web gateway session card (one linked account / slot).
+ * Rendered up to five times so a workspace can authenticate multiple business
+ * lines that outreach campaigns rotate across.
+ */
+interface WhatsAppSessionCardProps {
+  isLight: boolean;
+  session: WhatsAppSessionStatus;
+  onInitialize: (slot: number) => void;
+  onDisconnect: (slot: number) => void;
+  onSendTest: (slot: number) => void;
+  isSendingTestMsg: boolean;
+  isDisconnecting: boolean;
+}
+
+const WhatsAppSessionCard: React.FC<WhatsAppSessionCardProps> = ({
+  isLight,
+  session,
+  onInitialize,
+  onDisconnect,
+  onSendTest,
+  isSendingTestMsg,
+  isDisconnecting,
+}) => {
+  const slot = session.slot;
+  return (
+    <div className={`border rounded-xl p-4 sm:p-4.5 space-y-3.5 ${
+      isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
+    }`}>
+      <div className={`flex items-center justify-between pb-2.5 border-b ${
+        isLight ? "border-slate-200" : "border-[#1e293b]/60"
+      }`}>
+        <div className="flex items-center gap-2">
+          <Smartphone className="h-4 w-4 text-indigo-400" />
+          <h3 className={`text-xs font-bold ${isLight ? "text-slate-800" : "text-white"}`}>
+            WhatsApp Account {slot}
+            {slot === 1 && <span className="ml-1.5 text-[9px] font-semibold text-indigo-400">(Primary)</span>}
+          </h3>
+        </div>
+
+        {session.status === "CONNECTED" && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => onSendTest(slot)}
+              disabled={isSendingTestMsg}
+              className="px-3 py-1 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 border border-indigo-500/25 font-bold text-[9.5px] rounded-lg cursor-pointer transition-all disabled:opacity-50"
+            >
+              {isSendingTestMsg ? "Sending Test..." : "Send Test Message"}
+            </button>
+            <button
+              onClick={() => onDisconnect(slot)}
+              disabled={isDisconnecting}
+              className="px-3 py-1 bg-rose-600/10 hover:bg-rose-600/20 text-rose-400 border border-rose-500/25 font-bold text-[9.5px] rounded-lg cursor-pointer transition-all disabled:opacity-50"
+            >
+              {isDisconnecting ? "Disconnecting..." : "Disconnect"}
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-col md:flex-row items-center gap-6 py-1">
+        <div className="flex-1 space-y-3 font-sans">
+          <p className={`text-xs leading-relaxed ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+            Authenticates a virtual headless browser with WhatsApp Web. Once authenticated, outreach campaigns can dispatch customized messages directly to business lines, rotating across every linked account.
+          </p>
+
+          {session.error && (
+            <div className={`flex items-start gap-2.5 p-3 rounded-lg border text-xs leading-relaxed ${
+              isLight
+                ? "bg-amber-50 border-amber-200 text-amber-800"
+                : "bg-amber-500/5 border-amber-500/20 text-amber-300"
+            }`}>
+              <span className="shrink-0 mt-0.5">⚠️</span>
+              <div>
+                <span className="font-bold">Gateway Unavailable — </span>
+                {session.error}
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-slate-400">Connection state:</span>
+              <span className={`font-bold px-2 py-0.5 rounded text-[9.5px] tracking-wide ${
+                session.status === "CONNECTED" ? "bg-emerald-500/10 text-emerald-400" :
+                session.status === "CONNECTING" ? "bg-indigo-500/10 text-indigo-400 animate-pulse" :
+                session.status === "AUTHENTICATING" ? "bg-sky-500/10 text-sky-400 animate-pulse" :
+                session.status === "QR_READY" ? "bg-amber-500/10 text-amber-400" :
+                "bg-slate-500/10 text-slate-400"
+              }`}>
+                {sessionStateLabel(session.status)}
+              </span>
+            </div>
+
+            {/* Once linked, say exactly WHICH number is connected. */}
+            {session.status === "CONNECTED" && (
+              <div className={`flex items-center gap-2 p-2 rounded-lg border text-[11px] ${
+                isLight ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-emerald-500/5 border-emerald-500/20 text-emerald-300"
+              }`}>
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                <span className="font-bold">
+                  WhatsApp connected
+                  {session.phoneNumber ? ` — +${session.phoneNumber}` : ""}
+                  {session.pushName ? ` (${session.pushName})` : ""}
+                </span>
+              </div>
+            )}
+
+            {session.status === "AUTHENTICATING" && (
+              <div className="text-[10.5px] text-sky-400 font-sans">
+                Scan accepted. WhatsApp is syncing this account
+                {session.loadingPercent ? ` (${session.loadingPercent}%)` : ""}. This can take up to a minute.
+              </div>
+            )}
+
+            {session.status === "DISCONNECTED" && session.hasSavedSession && (
+              <div className="text-[10.5px] text-slate-400 font-sans">
+                A saved login exists for this account; it reconnects automatically on server start.
+              </div>
+            )}
+          </div>
+
+          <div className="pt-1 flex gap-2">
+            {session.status === "DISCONNECTED" && (
+              <button
+                onClick={() => onInitialize(slot)}
+                className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer transition-all shadow-xs shadow-indigo-600/20"
+              >
+                {slot === 1 ? "Initialize Gateway" : `Link Account ${slot}`}
+              </button>
+            )}
+
+            {(session.status === "QR_READY" || session.status === "AUTHENTICATING") && (
+              <button
+                onClick={() => onInitialize(slot)}
+                className="px-3.5 py-1.5 bg-amber-600/10 hover:bg-amber-600/20 text-amber-400 border border-amber-500/20 text-xs font-bold rounded-lg cursor-pointer transition-all"
+              >
+                Regenerate QR Code
+              </button>
+            )}
+
+            {/* A stuck session can always be torn down and retried. */}
+            {session.status !== "DISCONNECTED" && session.status !== "CONNECTED" && (
+              <button
+                onClick={() => onDisconnect(slot)}
+                disabled={isDisconnecting}
+                className="px-3.5 py-1.5 bg-slate-600/10 hover:bg-slate-600/20 text-slate-400 border border-slate-500/20 text-xs font-bold rounded-lg cursor-pointer transition-all disabled:opacity-50"
+              >
+                {isDisconnecting ? "Resetting..." : "Reset"}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* QR view. Hidden once the scan is accepted — showing a dead QR while
+            WhatsApp syncs is what made the old UI look permanently stuck. */}
+        {session.status !== "CONNECTED" && (
+          <div className="shrink-0 flex items-center justify-center p-3 bg-white rounded-xl border border-slate-200 w-44 h-44 shadow-md relative">
+            {session.status === "AUTHENTICATING" ? (
+              <div className="space-y-2 flex flex-col items-center text-center">
+                <Loader2 className="h-6 w-6 text-sky-600 animate-spin" />
+                <span className="text-[10px] text-slate-600 font-sans font-bold leading-normal">
+                  Scan accepted
+                </span>
+                <span className="text-[9.5px] text-slate-400 font-sans leading-normal">
+                  Syncing{session.loadingPercent ? ` ${session.loadingPercent}%` : ""}...
+                </span>
+              </div>
+            ) : (session.qrDataUrl || session.qr) ? (
+              <img
+                src={session.qrDataUrl || `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(session.qr)}`}
+                alt="WhatsApp Scan QR"
+                className="w-36 h-36"
+              />
+            ) : (
+              <div className="text-slate-400 text-center text-[10px] font-sans">
+                {session.status === "CONNECTING" ? (
+                  <div className="space-y-2 flex flex-col items-center">
+                    <Loader2 className="h-5 w-5 text-indigo-600 animate-spin" />
+                    <span className="leading-normal">{isDisconnecting ? "Disconnecting Gateway..." : "Launching headless client..."}</span>
+                  </div>
+                ) : (
+                  "Gateway connection is inactive. Press button to initialize."
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {session.status === "CONNECTED" && (
+          <div className={`shrink-0 flex flex-col items-center justify-center p-4 border border-emerald-500/20 rounded-xl w-44 h-44 text-emerald-400 text-xs ${
+            isLight ? "bg-emerald-50" : "bg-slate-900/50"
+          }`}>
+            <CheckCircle2 className="h-10 w-10 text-emerald-400 mb-2" />
+            <span className="font-bold text-center">WhatsApp Connected</span>
+            {session.phoneNumber ? (
+              <span className="text-[10px] text-slate-400 mt-1 text-center font-bold">+{session.phoneNumber}</span>
+            ) : null}
+            {session.pushName ? (
+              <span className="text-[9.5px] text-slate-500 mt-0.5 text-center truncate max-w-full px-1">{session.pushName}</span>
+            ) : null}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 export default function IntegrationSettings({ 
   isLight, 
   canWhatsapp = true,
   whatsappStatus,
+  whatsappSessions,
   onInitializeWhatsApp,
   onDisconnectWhatsApp,
   onSendWhatsAppTest,
   isSendingTestMsg,
   isDisconnectingWa,
+  disconnectingSlot,
   webhookConfigured,
   onWebhookConfiguredChange,
   onIntegrationsChange,
@@ -114,6 +1092,18 @@ export default function IntegrationSettings({
   const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"smtp" | "google_sheet" | "whatsapp">("smtp");
+  /** Which account slot the test-message dialog is open for, if any. */
+  const [testModalSlot, setTestModalSlot] = useState<number | null>(null);
+
+  // ── Multi-SMTP sender state ───────────────────────────────────────────────
+  const [emailSenders, setEmailSenders] = useState<SmtpSender[]>([]);
+  const [smtpModal, setSmtpModal] = useState<
+    { mode: "add"; slot: number } | { mode: "edit"; slot: number; sender: SmtpSender; initial: SMTPFormData } | null
+  >(null);
+  /** Slot currently running a save/test/toggle/delete, to disable its buttons. */
+  const [smtpBusySlot, setSmtpBusySlot] = useState<number | null>(null);
+  /** The sender whose "send test email" dialog is open, if any. */
+  const [testEmailSender, setTestEmailSender] = useState<SmtpSender | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -144,49 +1134,9 @@ export default function IntegrationSettings({
     label: "My Google Sheet",
   });
 
-  // ── WhatsApp provider: QR web session vs official Meta Cloud API ──
-  const [waProvider, setWaProvider] = useState<"web" | "cloud">("web");
-  const [cloudForm, setCloudForm] = useState<CloudFormData>({
-    phoneNumberId: "",
-    wabaId: "",
-    accessToken: "",
-    verifyToken: "",
-    appSecret: "",
-    defaultTemplateName: "",
-    defaultTemplateLang: "en_US",
-  });
-  const [cloudConfigured, setCloudConfigured] = useState(false);
-  const [cloudStatus, setCloudStatus] = useState<CloudStatusState | null>(null);
-  const [webhookUrl, setWebhookUrl] = useState("");
-  const [cloudSaving, setCloudSaving] = useState(false);
-  const [cloudTesting, setCloudTesting] = useState(false);
-  const [cloudStatusLoading, setCloudStatusLoading] = useState(false);
-  const [cloudTestPhone, setCloudTestPhone] = useState("");
-  const [sendingCloudTest, setSendingCloudTest] = useState(false);
-  const [showAccessToken, setShowAccessToken] = useState(false);
-  const [showAppSecret, setShowAppSecret] = useState(false);
-  const [copiedWebhook, setCopiedWebhook] = useState(false);
-  const [switchingProvider, setSwitchingProvider] = useState(false);
-  const [cloudTemplates, setCloudTemplates] = useState<CloudTemplate[] | null>(null);
-  const [loadingTemplates, setLoadingTemplates] = useState(false);
-
   useEffect(() => {
     fetchIntegrations();
-    fetchCloudConfig();
   }, []);
-
-  /**
-   * Poll Meta for live connection state while the Cloud tab is visible.
-   * Every check is a real Graph API call, so 30s keeps the badge honest without
-   * hammering the rate limit.
-   */
-  useEffect(() => {
-    if (activeTab !== "whatsapp" || waProvider !== "cloud" || !cloudConfigured) return;
-
-    refreshCloudStatus();
-    const timer = setInterval(refreshCloudStatus, 30000);
-    return () => clearInterval(timer);
-  }, [activeTab, waProvider, cloudConfigured]);
 
   const fetchIntegrations = async () => {
     try {
@@ -209,6 +1159,220 @@ export default function IntegrationSettings({
     setTimeout(() => setMessage(null), 5000);
   };
 
+  // ── Multi-SMTP senders (up to 5 rotating accounts) ────────────────────────
+
+  const fetchEmailSenders = async () => {
+    try {
+      const res = await fetch("/api/integrations/senders/email", { credentials: "include" });
+      const data = await res.json();
+      if (data.ok && Array.isArray(data.senders)) setEmailSenders(data.senders);
+    } catch (error) {
+      console.error("Failed to fetch SMTP senders:", error);
+    }
+  };
+
+  useEffect(() => {
+    void fetchEmailSenders();
+  }, []);
+
+  /** Shape the form into the body both POST and PUT expect. */
+  const senderBody = (form: SMTPFormData) => ({
+    host: form.host.trim(),
+    // Sent as a number: the server rejects a non-integer port, and a stringy
+    // port that slips through would break the campaign executor's config check.
+    port: Number(form.port),
+    secure: Boolean(form.secure),
+    user: form.user.trim(),
+    password: form.password,
+    fromEmail: form.fromEmail.trim(),
+    fromName: form.fromName.trim(),
+    label: form.label.trim(),
+  });
+
+  const openAddSmtp = (slot: number) => setSmtpModal({ mode: "add", slot });
+
+  const openEditSmtp = async (sender: SmtpSender) => {
+    setSmtpBusySlot(sender.slot);
+    try {
+      const res = await fetch(`/api/integrations/senders/email/${sender.id}`, { credentials: "include" });
+      const data = await res.json();
+      if (!data.ok) {
+        showMessage("error", data.error || "Could not load this SMTP account.");
+        return;
+      }
+      const cfg = data.config || {};
+      setSmtpModal({
+        mode: "edit",
+        slot: sender.slot,
+        sender,
+        initial: {
+          host: cfg.host || "",
+          port: String(cfg.port ?? "587"),
+          secure: Boolean(cfg.secure),
+          user: cfg.user || "",
+          password: cfg.password || "",
+          fromEmail: cfg.fromEmail || "",
+          fromName: cfg.fromName || "",
+          label: data.label || `SMTP Account ${sender.slot}`,
+        },
+      });
+    } catch {
+      showMessage("error", "Could not load this SMTP account.");
+    } finally {
+      setSmtpBusySlot(null);
+    }
+  };
+
+  const submitSmtpSender = async (form: SMTPFormData): Promise<{ ok: boolean; error?: string }> => {
+    if (!smtpModal) return { ok: false, error: "No account selected." };
+    const isEdit = smtpModal.mode === "edit";
+    setSmtpBusySlot(smtpModal.slot);
+    try {
+      const url = isEdit
+        ? `/api/integrations/senders/email/${smtpModal.sender.id}`
+        : "/api/integrations/senders/email";
+      const res = await fetch(url, {
+        method: isEdit ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(senderBody(form)),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok || !data.ok) {
+        return { ok: false, error: data.error || `Save failed (HTTP ${res.status}).` };
+      }
+      showMessage("success", isEdit ? "SMTP account updated." : "SMTP account added.");
+      setSmtpModal(null);
+      await fetchEmailSenders();
+      await fetchIntegrations();
+      if (onIntegrationsChange) onIntegrationsChange();
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || "Network error while saving." };
+    } finally {
+      setSmtpBusySlot(null);
+    }
+  };
+
+  /** Test the credentials currently typed in the dialog, before saving. */
+  const testSmtpDraft = async (form: SMTPFormData): Promise<{ ok: boolean; error?: string }> => {
+    const slot = smtpModal?.slot ?? null;
+    setSmtpBusySlot(slot);
+    try {
+      // An existing sender tests through its own slot so a masked password can
+      // be resolved server-side; a brand-new one uses the stateless endpoint.
+      const isEdit = smtpModal?.mode === "edit";
+      const url = isEdit
+        ? `/api/integrations/senders/email/${smtpModal!.sender.id}/test`
+        : "/api/integrations/smtp/test";
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(senderBody(form)),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (data.ok) return { ok: true };
+      return { ok: false, error: data.error || `Test failed (HTTP ${res.status}).` };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || "Network error while testing." };
+    } finally {
+      setSmtpBusySlot(null);
+    }
+  };
+
+  /** Test an already-saved sender exactly as stored, without opening the form. */
+  const testSavedSender = async (sender: SmtpSender) => {
+    setSmtpBusySlot(sender.slot);
+    try {
+      const res = await fetch(`/api/integrations/senders/email/${sender.id}/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (data.ok) showMessage("success", `SMTP account ${sender.slot} connected successfully.`);
+      else showMessage("error", data.error || `SMTP account ${sender.slot} failed to connect.`);
+    } catch {
+      showMessage("error", "Failed to test this SMTP account.");
+    } finally {
+      setSmtpBusySlot(null);
+    }
+  };
+
+  /**
+   * Deliver a real test email from a saved sender. Returns the outcome so the
+   * dialog can render it inline rather than raising a browser alert.
+   */
+  const sendTestEmail = async (
+    to: string,
+    subject: string,
+    message: string
+  ): Promise<{ ok: boolean; error?: string; sentFrom?: string }> => {
+    if (!testEmailSender) return { ok: false, error: "No account selected." };
+    setSmtpBusySlot(testEmailSender.slot);
+    try {
+      const res = await fetch(`/api/integrations/senders/email/${testEmailSender.id}/send-test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ to, subject, message }),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (res.ok && data.ok) return { ok: true, sentFrom: data.sentFrom };
+      return { ok: false, error: data.error || `Send failed (HTTP ${res.status}).` };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || "Network error while sending the test email." };
+    } finally {
+      setSmtpBusySlot(null);
+    }
+  };
+
+  const toggleSender = async (sender: SmtpSender) => {
+    setSmtpBusySlot(sender.slot);
+    try {
+      const res = await fetch(`/api/integrations/senders/email/${sender.id}/toggle`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ enabled: !sender.enabled }),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!data.ok) showMessage("error", data.error || "Could not change this account.");
+      await fetchEmailSenders();
+      await fetchIntegrations();
+      if (onIntegrationsChange) onIntegrationsChange();
+    } catch {
+      showMessage("error", "Could not change this account.");
+    } finally {
+      setSmtpBusySlot(null);
+    }
+  };
+
+  const deleteSender = async (sender: SmtpSender) => {
+    if (!confirm(`Delete SMTP account ${sender.slot}${sender.label ? ` (${sender.label})` : ""}? Campaigns will stop sending from it.`)) return;
+    setSmtpBusySlot(sender.slot);
+    try {
+      // The senders endpoint deliberately refuses to delete the primary row, so
+      // slot 1 goes through the generic integration delete instead.
+      const url = sender.type === "smtp"
+        ? `/api/integrations/${sender.id}`
+        : `/api/integrations/senders/email/${sender.id}`;
+      const res = await fetch(url, { method: "DELETE", credentials: "include" });
+      const data = await res.json().catch(() => ({} as any));
+      if (!data.ok) showMessage("error", data.error || "Could not delete this account.");
+      else showMessage("success", "SMTP account deleted.");
+      await fetchEmailSenders();
+      await fetchIntegrations();
+      if (onIntegrationsChange) onIntegrationsChange();
+    } catch {
+      showMessage("error", "Could not delete this account.");
+    } finally {
+      setSmtpBusySlot(null);
+    }
+  };
+
   const loadSMTPForEditing = async () => {
     try {
       setLoading(true);
@@ -220,7 +1384,7 @@ export default function IntegrationSettings({
           port: String(data.config.port || "587"),
           secure: Boolean(data.config.secure),
           user: data.config.user || "",
-          password: data.config.password || "••••••••",
+          password: data.config.password || "â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢",
           fromEmail: data.config.fromEmail || "",
           fromName: data.config.fromName || "",
           label: integrations.find(i => i.type === "smtp")?.label || "My SMTP",
@@ -265,7 +1429,7 @@ export default function IntegrationSettings({
       });
       const data = await res.json();
       if (data.ok) {
-        showMessage("success", "✓ SMTP connection successful!");
+        showMessage("success", "âœ“ SMTP connection successful!");
       } else {
         showMessage("error", data.error || "SMTP test failed");
       }
@@ -312,7 +1476,7 @@ export default function IntegrationSettings({
       });
       const data = await res.json();
       if (data.ok) {
-        showMessage("success", "✓ Google Sheet webhook is working!");
+        showMessage("success", "âœ“ Google Sheet webhook is working!");
       } else {
         showMessage("error", data.error || "Webhook test failed");
       }
@@ -347,222 +1511,6 @@ export default function IntegrationSettings({
     } finally {
       setSaving(false);
     }
-  };
-
-  /* ── WhatsApp Cloud API (Meta) ─────────────────────────────────────────── */
-
-  const fetchCloudConfig = async () => {
-    try {
-      const res = await fetch("/api/integrations/whatsapp-cloud", { credentials: "include" });
-      const data = await res.json();
-      if (!data.ok) return;
-
-      setWebhookUrl(data.webhookUrl || "");
-      setWaProvider(data.provider === "cloud" ? "cloud" : "web");
-      setCloudConfigured(Boolean(data.configured));
-
-      if (data.configured && data.config) {
-        setCloudForm({
-          phoneNumberId: data.config.phoneNumberId || "",
-          wabaId: data.config.wabaId || "",
-          accessToken: data.config.accessToken || "",
-          verifyToken: data.config.verifyToken || "",
-          appSecret: data.config.appSecret || "",
-          defaultTemplateName: data.config.defaultTemplateName || "",
-          defaultTemplateLang: data.config.defaultTemplateLang || "en_US",
-        });
-      }
-    } catch (error) {
-      console.error("Failed to fetch WhatsApp Cloud config:", error);
-    }
-  };
-
-  /**
-   * `force` bypasses the server-side status cache. The background poll leaves it
-   * off so it stays cheap; the Refresh button turns it on.
-   */
-  const refreshCloudStatus = async (force = false) => {
-    setCloudStatusLoading(true);
-    try {
-      const res = await fetch(`/api/integrations/whatsapp-cloud/status${force ? "?force=1" : ""}`, {
-        credentials: "include",
-      });
-      const data = await res.json();
-      if (data.ok) {
-        setCloudStatus({
-          connected: Boolean(data.connected),
-          displayPhoneNumber: data.displayPhoneNumber,
-          verifiedName: data.verifiedName,
-          qualityRating: data.qualityRating,
-          error: data.error,
-        });
-      }
-    } catch (error) {
-      setCloudStatus({ connected: false, error: "Could not reach the server." });
-    } finally {
-      setCloudStatusLoading(false);
-    }
-  };
-
-  /**
-   * Pull the approved templates for the connected WABA so the user picks from a
-   * real list instead of typing a name from memory. A wrong name only surfaces
-   * mid-campaign otherwise.
-   */
-  const loadCloudTemplates = async () => {
-    setLoadingTemplates(true);
-    try {
-      const res = await fetch("/api/integrations/whatsapp-cloud/templates", { credentials: "include" });
-      const data = await res.json();
-      if (data.ok) {
-        setCloudTemplates(data.templates || []);
-        if (!data.templates?.length) {
-          showMessage("error", "No templates found. Submit one in the Meta dashboard first.");
-        }
-      } else {
-        showMessage("error", data.error || "Could not load templates.");
-      }
-    } catch (error) {
-      showMessage("error", "Could not load templates.");
-    } finally {
-      setLoadingTemplates(false);
-    }
-  };
-
-  const saveCloudConfig = async () => {
-    if (!cloudForm.phoneNumberId.trim() || !cloudForm.verifyToken.trim()) {
-      showMessage("error", "Phone Number ID and Verify Token are required.");
-      return;
-    }
-    setCloudSaving(true);
-    try {
-      const res = await fetch("/api/integrations/whatsapp-cloud", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(cloudForm),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        setCloudConfigured(true);
-        setCloudStatus({
-          connected: Boolean(data.connected),
-          displayPhoneNumber: data.displayPhoneNumber,
-          verifiedName: data.verifiedName,
-          qualityRating: data.qualityRating,
-          error: data.error,
-        });
-        showMessage(data.connected ? "success" : "error", data.message || "Saved.");
-        fetchIntegrations();
-        if (onIntegrationsChange) onIntegrationsChange();
-      } else {
-        showMessage("error", data.error || "Failed to save credentials.");
-      }
-    } catch (error) {
-      showMessage("error", "Failed to save WhatsApp Cloud credentials.");
-    } finally {
-      setCloudSaving(false);
-    }
-  };
-
-  const testCloudConnection = async () => {
-    setCloudTesting(true);
-    try {
-      const res = await fetch("/api/integrations/whatsapp-cloud/test", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          phoneNumberId: cloudForm.phoneNumberId,
-          accessToken: cloudForm.accessToken,
-          wabaId: cloudForm.wabaId,
-        }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        showMessage("success", `✓ ${data.message}`);
-        setCloudStatus({
-          connected: true,
-          displayPhoneNumber: data.displayPhoneNumber,
-          verifiedName: data.verifiedName,
-          qualityRating: data.qualityRating,
-        });
-      } else {
-        showMessage("error", data.error || "Connection test failed.");
-      }
-    } catch (error) {
-      showMessage("error", "Failed to test the Cloud API connection.");
-    } finally {
-      setCloudTesting(false);
-    }
-  };
-
-  const sendCloudTestMessage = async () => {
-    if (!cloudTestPhone.trim()) {
-      showMessage("error", "Enter a phone number to receive the test message.");
-      return;
-    }
-    setSendingCloudTest(true);
-    try {
-      const res = await fetch("/api/integrations/whatsapp-cloud/send-test", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          phone: cloudTestPhone,
-          message: "Test message from LeadGenPilot. Your WhatsApp Cloud API connection is working.",
-        }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        showMessage("success", "✓ Test message sent. Check the recipient's WhatsApp.");
-      } else {
-        showMessage("error", data.error || "Failed to send the test message.");
-      }
-    } catch (error) {
-      showMessage("error", "Failed to send the test message.");
-    } finally {
-      setSendingCloudTest(false);
-    }
-  };
-
-  const switchProvider = async (provider: "web" | "cloud") => {
-    if (provider === waProvider) return;
-    setSwitchingProvider(true);
-    try {
-      const res = await fetch("/api/integrations/whatsapp-provider", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ provider }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        setWaProvider(provider);
-        showMessage(
-          "success",
-          provider === "cloud"
-            ? "Outreach will now use your official WhatsApp Cloud API number."
-            : "Outreach will now use the WhatsApp Web QR gateway."
-        );
-        if (onIntegrationsChange) onIntegrationsChange();
-      } else {
-        // Selecting cloud without saved credentials is rejected server-side;
-        // still move the UI so the user can fill in the form.
-        setWaProvider(provider);
-        showMessage("error", data.error || "Could not switch provider.");
-      }
-    } catch (error) {
-      showMessage("error", "Could not switch provider.");
-    } finally {
-      setSwitchingProvider(false);
-    }
-  };
-
-  const copyWebhookUrl = () => {
-    navigator.clipboard.writeText(webhookUrl);
-    setCopiedWebhook(true);
-    setTimeout(() => setCopiedWebhook(false), 2000);
   };
 
   const deleteIntegration = async (id: string, type: string) => {
@@ -901,35 +1849,11 @@ function doGet(e) {
 
   return (
     <div className="space-y-6 w-full animate-fadeIn">
-      {/* Header Info Panel */}
-      <div className={`border rounded-xl p-4 sm:p-5 relative overflow-hidden ${
-        isLight 
-          ? "bg-white border-slate-200" 
-          : "bg-slate-900/60 border-slate-800 backdrop-blur-md"
-      }`}>
-        <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none -mr-20 -mt-20"></div>
-        <div className="relative z-10 flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
-          <div>
-            <h2 className={`text-base font-bold tracking-tight mb-1 ${isLight ? "text-slate-900" : "text-white"}`}>
-              Integration Hub
-            </h2>
-            <p className={`text-xs leading-relaxed ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-              Configure your personal connection gateways. Use custom SMTP configurations for email dispatches, Google Sheets sync for lead capture, or the virtual WhatsApp Web gateway for outreach dispatches.
-            </p>
-          </div>
-          
-          <div className="flex items-center gap-2.5 shrink-0">
-            <span className={`text-[9.5px] px-2 py-0.5 rounded font-bold ${
-              isLight ? "bg-slate-100 text-slate-600" : "bg-slate-800 text-slate-300"
-            }`}>
-              Active Nodes: {integrations.filter(i => i.enabled).length + (whatsappStatus.status === "CONNECTED" ? 1 : 0)}
-            </span>
-          </div>
-        </div>
-      </div>
 
       {/* Tab Switcher Segmented Control */}
-      <div className="flex p-0.5 gap-1 rounded-xl border border-slate-200/40 bg-slate-100/10 w-full sm:w-auto sm:inline-flex max-w-lg">
+      <div className={`p-1 gap-1 rounded-xl border inline-flex items-center w-fit max-w-full overflow-x-auto transition-all ${
+        isLight ? "bg-slate-100/90 border-slate-200" : "bg-[#0b101d] border-[#1e293b]"
+      }`}>
         <button
           onClick={() => {
             setActiveTab("smtp");
@@ -937,29 +1861,23 @@ function doGet(e) {
               showMessage("error", "SMTP is not connected. Please enter and save your SMTP server credentials below.");
             }
           }}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+          className={`flex items-center justify-center gap-2 py-1.5 px-3.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 ${
             activeTab === "smtp"
-              ? !smtpInt
-                ? isLight
-                  ? "bg-rose-100 text-rose-800 border border-rose-300 shadow-xs"
-                  : "bg-rose-500/20 text-rose-300 border border-rose-500/35 shadow-xs"
-                : "bg-indigo-600 text-white shadow-xs shadow-indigo-600/20"
-              : !smtpInt
-                ? isLight
-                  ? "text-rose-700 hover:bg-rose-50 hover:text-rose-900 border border-rose-200"
-                  : "text-rose-400/90 hover:bg-rose-500/10 hover:text-rose-300 border border-rose-500/20"
-                : isLight
-                  ? "text-slate-600 hover:bg-white hover:text-slate-950"
-                  : "text-slate-400 hover:bg-slate-800/40 hover:text-slate-200"
+              ? isLight
+                ? "bg-slate-200/90 text-slate-800 border border-slate-300/80 shadow-xs"
+                : "bg-slate-800/90 text-slate-100 border border-slate-700/80 shadow-xs"
+              : isLight
+                ? "text-slate-600 hover:text-slate-900 hover:bg-slate-200/40"
+                : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
           }`}
         >
-          <Mail className={`w-3.5 h-3.5 ${!smtpInt ? (isLight ? "text-rose-700" : "text-rose-400") : ""}`} />
-          <span>Configure SMTP</span>
+          <Mail className="w-3.5 h-3.5 shrink-0 text-slate-500 dark:text-slate-400" />
+          <span className="whitespace-nowrap">Configure SMTP</span>
           {!smtpInt && (
-            <span className={`text-[9.5px] px-1.5 py-0.2 rounded font-semibold ${
+            <span className={`text-[9.5px] px-1.5 py-0.5 rounded font-medium whitespace-nowrap shrink-0 ${
               isLight
-                ? "bg-rose-200/90 border border-rose-300 text-rose-800"
-                : "bg-rose-500/20 border border-rose-500/30 text-rose-300"
+                ? "bg-slate-200/90 border border-slate-300 text-slate-600"
+                : "bg-slate-800 border border-slate-700 text-slate-400"
             }`}>
               Not Connected
             </span>
@@ -967,25 +1885,33 @@ function doGet(e) {
         </button>
         <button
           onClick={() => setActiveTab("google_sheet")}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+          className={`flex items-center justify-center gap-2 py-1.5 px-3.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 ${
             activeTab === "google_sheet"
-              ? "bg-indigo-600 text-white shadow-xs shadow-indigo-600/20"
-              : `${isLight ? "text-slate-600 hover:bg-white hover:text-slate-950" : "text-slate-400 hover:bg-slate-800/40 hover:text-slate-200"}`
+              ? isLight
+                ? "bg-slate-200/90 text-slate-800 border border-slate-300/80 shadow-xs"
+                : "bg-slate-800/90 text-slate-100 border border-slate-700/80 shadow-xs"
+              : isLight
+                ? "text-slate-600 hover:text-slate-900 hover:bg-slate-200/40"
+                : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
           }`}
         >
-          <FileSpreadsheet className="w-3.5 h-3.5" />
-          Google Sheets
+          <FileSpreadsheet className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
+          <span className="whitespace-nowrap">Google Sheets</span>
         </button>
         <button
           onClick={() => setActiveTab("whatsapp")}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+          className={`flex items-center justify-center gap-2 py-1.5 px-3.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 ${
             activeTab === "whatsapp"
-              ? "bg-indigo-600 text-white shadow-xs shadow-indigo-600/20"
-              : `${isLight ? "text-slate-600 hover:bg-white hover:text-slate-950" : "text-slate-400 hover:bg-slate-800/40 hover:text-slate-200"}`
+              ? isLight
+                ? "bg-slate-200/90 text-slate-800 border border-slate-300/80 shadow-xs"
+                : "bg-slate-800/90 text-slate-100 border border-slate-700/80 shadow-xs"
+              : isLight
+                ? "text-slate-600 hover:text-slate-900 hover:bg-slate-200/40"
+                : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
           }`}
         >
-          <WhatsAppLogo className="w-3.5 h-3.5 fill-emerald-500 text-emerald-500" />
-          WhatsApp
+          <WhatsAppLogo className="w-3.5 h-3.5 shrink-0" />
+          <span className="whitespace-nowrap">WhatsApp</span>
         </button>
       </div>
 
@@ -1014,343 +1940,105 @@ function doGet(e) {
       {/* TAB 1: SMTP Settings */}
       {activeTab === "smtp" && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-          <div className="lg:col-span-8 space-y-5">
-            {!smtpInt && (
-              <div
-                className={`p-4 rounded-xl border flex items-start gap-3 transition-all ${
-                  isLight
-                    ? "bg-rose-50 border-rose-300 text-rose-900 shadow-xs"
-                    : "bg-rose-500/10 border-rose-500/20 text-rose-300"
-                }`}
-              >
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${
-                  isLight
-                    ? "bg-rose-200/80 border border-rose-300 text-rose-700"
-                    : "bg-rose-500/15 border border-rose-500/25 text-rose-400"
-                }`}>
-                  <AlertTriangle className="w-4 h-4" />
-                </div>
-                <div className="flex-1 space-y-1">
-                  <div className="flex items-center gap-2">
-                    <h4 className={`font-bold text-xs ${isLight ? "text-rose-900" : "text-rose-300"}`}>
-                      SMTP Not Connected
-                    </h4>
-                    <span className={`text-[9.5px] px-1.5 py-0.2 rounded font-bold uppercase tracking-wider ${
-                      isLight
-                        ? "bg-rose-200/90 border border-rose-300 text-rose-800"
-                        : "bg-rose-500/20 border border-rose-500/30 text-rose-300"
+          <div className="lg:col-span-8 space-y-4">
+            {(() => {
+              // Build all 5 slots, filling configured ones from the senders feed.
+              const slots = Array.from({ length: MAX_SMTP_SLOTS }, (_, i) => {
+                const slot = i + 1;
+                return { slot, sender: emailSenders.find((s) => s.slot === slot) };
+              });
+              const configured = emailSenders.length;
+              const active = emailSenders.filter((s) => s.enabled).length;
+              return (
+                <>
+                  <div className="flex items-center justify-between gap-3 px-1 flex-wrap">
+                    <p className={`text-[11px] font-sans leading-relaxed ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                      Add up to <strong className={isLight ? "text-slate-800" : "text-white"}>{MAX_SMTP_SLOTS} SMTP accounts</strong>. Campaigns rotate email sends across every enabled account to spread volume and protect deliverability.
+                    </p>
+                    <span className={`shrink-0 font-bold px-2 py-0.5 rounded text-[9.5px] tracking-wide ${
+                      active > 0 ? "bg-emerald-500/10 text-emerald-400" : "bg-slate-500/10 text-slate-400"
                     }`}>
-                      Action Required
+                      {active}/{MAX_SMTP_SLOTS} IN ROTATION
                     </span>
                   </div>
-                  <p className={`text-[11.5px] leading-relaxed ${
-                    isLight ? "text-rose-800" : "text-rose-300/90"
-                  }`}>
-                    You haven't connected an SMTP email gateway yet. Email outreach campaigns will not be able to dispatch until you enter and save your SMTP server credentials below.
-                  </p>
-                </div>
-              </div>
-            )}
 
-            {smtpInt && !isEditingSmtp ? (
-              /* Active SMTP connection detail card */
-              <div className={`border rounded-xl p-4 sm:p-4.5 ${
-                isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
-              }`}>
-                <div className="flex justify-between items-start border-b border-slate-200/20 pb-3 mb-3">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-9 h-9 rounded-lg bg-indigo-500/10 flex items-center justify-center">
-                      <Mail className="w-4 h-4 text-indigo-500" />
-                    </div>
-                    <div>
-                      <h4 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
-                        {smtpInt.label || "SMTP Email Gateway"}
-                      </h4>
-                      <p className="text-[9.5px] text-slate-500 mt-0.5">
-                        Connected on {new Date(smtpInt.createdAt).toLocaleDateString()}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => toggleIntegration(smtpInt.id, "smtp", !smtpInt.enabled)}
-                      className={`px-2.5 py-1 rounded-lg text-[9.5px] font-bold border transition-all cursor-pointer flex items-center gap-1.5 ${
-                        smtpInt.enabled
-                          ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
-                          : "bg-slate-500/10 border-slate-500/20 text-slate-400"
-                      }`}
-                    >
-                      <Power className="w-3 h-3" />
-                      {smtpInt.enabled ? "Enabled" : "Disabled"}
-                    </button>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 text-xs mb-6 font-sans">
-                  <div>
-                    <span className="text-slate-500 block mb-0.5 text-[10px]">SMTP Host Address</span>
-                    <strong className={isLight ? "text-slate-800" : "text-white"}>Configured</strong>
-                  </div>
-                  <div>
-                    <span className="text-slate-500 block mb-0.5 text-[10px]">Authorized User</span>
-                    <strong className={isLight ? "text-slate-800" : "text-white"}>Configured</strong>
-                  </div>
-                  <div>
-                    <span className="text-slate-500 block mb-0.5 text-[10px]">Encryption Port</span>
-                    <strong className={isLight ? "text-slate-800" : "text-white"}>Configured</strong>
-                  </div>
-                  <div>
-                    <span className="text-slate-500 block mb-0.5 text-[10px]">Last dispatched</span>
-                    <strong className={isLight ? "text-slate-800" : "text-white"}>
-                      {smtpInt.lastUsedAt ? new Date(smtpInt.lastUsedAt).toLocaleString() : "Never"}
-                    </strong>
-                  </div>
-                </div>
-
-                <div className="flex gap-2.5 border-t border-slate-200/20 pt-4">
-                  <button
-                    onClick={loadSMTPForEditing}
-                    className={`px-3.5 py-2 text-xs font-semibold rounded-lg border transition-all cursor-pointer flex items-center gap-1.5 ${
-                      isLight 
-                        ? "border-slate-200 text-slate-600 hover:bg-slate-50" 
-                        : "border-slate-800 text-slate-300 hover:bg-slate-850"
-                    }`}
-                  >
-                    <Edit2 className="w-3.5 h-3.5 text-indigo-400" />
-                    Edit Settings
-                  </button>
-                  <button
-                    onClick={() => {
-                      setSmtpForm({
-                        host: "temp",
-                        port: "587",
-                        secure: false,
-                        user: "temp",
-                        password: "••••••••",
-                        fromEmail: "temp",
-                        fromName: "",
-                        label: ""
-                      });
-                      testSMTP();
-                    }}
-                    disabled={testing}
-                    className={`px-3.5 py-2 text-xs font-semibold rounded-lg border transition-all cursor-pointer flex items-center gap-1.5 ${
-                      isLight 
-                        ? "border-slate-200 text-slate-600 hover:bg-slate-50" 
-                        : "border-slate-800 text-slate-300 hover:bg-slate-850"
-                    }`}
-                  >
-                    {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5 text-emerald-500" />}
-                    Test Connection
-                  </button>
-                  <button
-                    onClick={() => deleteIntegration(smtpInt.id, "smtp")}
-                    className="ml-auto px-3.5 py-2 text-xs font-semibold rounded-lg bg-rose-600/10 hover:bg-rose-600/20 text-rose-400 border border-rose-500/25 transition-all cursor-pointer flex items-center gap-1.5"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    Delete Config
-                  </button>
-                </div>
-              </div>
-            ) : (
-              /* SMTP Edit/Add form */
-              <div className={`border rounded-xl p-4 sm:p-4.5 space-y-3.5 ${
-                isLight 
-                  ? !smtpInt ? "bg-white border-rose-300 shadow-xs" : "bg-white border-slate-200" 
-                  : !smtpInt ? "bg-[#090d16] border-rose-500/25" : "bg-[#090d16] border-[#1e293b]"
-              }`}>
-                <div className={`pb-2.5 border-b flex items-center justify-between ${
-                  isLight ? (!smtpInt ? "border-rose-100" : "border-slate-200/60") : "border-slate-200/20"
-                }`}>
-                  <h3 className={`text-xs font-bold flex items-center gap-2 ${
-                    !smtpInt 
-                      ? isLight ? "text-rose-800" : "text-rose-300"
-                      : isLight ? "text-slate-800" : "text-white"
-                  }`}>
-                    <Key className={`w-3.5 h-3.5 ${
-                      !smtpInt ? (isLight ? "text-rose-600" : "text-rose-400") : "text-indigo-400"
-                    }`} />
-                    {isEditingSmtp ? "Modify SMTP Settings" : "Configure SMTP Gateway"}
-                  </h3>
-                  {!smtpInt && (
-                    <span className={`text-[10px] px-2 py-0.5 rounded font-semibold flex items-center gap-1.5 ${
-                      isLight
-                        ? "bg-rose-100 border border-rose-300 text-rose-800"
-                        : "bg-rose-500/10 border border-rose-500/20 text-rose-300"
-                    }`}>
-                      <span className={`w-1.5 h-1.5 rounded-full ${isLight ? "bg-rose-600" : "bg-rose-500"} animate-pulse`} />
-                      Not Connected
-                    </span>
-                  )}
-                </div>
-
-                <div className="space-y-3 text-xs">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">SMTP Host</label>
-                      <input
-                        type="text"
-                        value={smtpForm.host}
-                        onChange={(e) => setSmtpForm({ ...smtpForm, host: e.target.value })}
-                        placeholder="smtp.gmail.com"
-                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
-                          isLight
-                            ? "bg-white border-slate-200 text-slate-900"
-                            : "bg-[#030712] border-slate-700 text-white"
-                        }`}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">Port</label>
-                      <input
-                        type="number"
-                        value={smtpForm.port}
-                        onChange={(e) => setSmtpForm({ ...smtpForm, port: e.target.value })}
-                        placeholder="587"
-                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
-                          isLight
-                            ? "bg-white border-slate-200 text-slate-900"
-                            : "bg-[#030712] border-slate-700 text-white"
-                        }`}
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="flex items-center gap-2 py-0.5 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={smtpForm.secure}
-                        onChange={(e) => setSmtpForm({ ...smtpForm, secure: e.target.checked })}
-                        className="rounded accent-indigo-600"
-                      />
-                      <span className={`text-xs font-semibold ${isLight ? "text-slate-700" : "text-slate-300"}`}>
-                        Use SSL/TLS (Secure Connection on Port 465)
-                      </span>
-                    </label>
-                  </div>
-
-                  <div>
-                    <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">Username / Email</label>
-                    <input
-                      type="text"
-                      value={smtpForm.user}
-                      onChange={(e) => setSmtpForm({ ...smtpForm, user: e.target.value })}
-                      placeholder="yourname@gmail.com"
-                      className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
+                  {configured === 0 && (
+                    <div
+                      className={`p-4 rounded-xl border flex items-start gap-3 ${
                         isLight
-                          ? "bg-white border-slate-200 text-slate-900"
-                          : "bg-[#030712] border-slate-700 text-white"
+                          ? "bg-rose-50 border-rose-300 text-rose-900 shadow-xs"
+                          : "bg-rose-500/10 border-rose-500/20 text-rose-300"
                       }`}
+                    >
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${
+                        isLight
+                          ? "bg-rose-200/80 border border-rose-300 text-rose-700"
+                          : "bg-rose-500/15 border border-rose-500/25 text-rose-400"
+                      }`}>
+                        <AlertTriangle className="w-4 h-4" />
+                      </div>
+                      <div className="flex-1 space-y-1">
+                        <div className="flex items-center gap-2">
+                          <h4 className={`font-bold text-xs ${isLight ? "text-rose-900" : "text-rose-300"}`}>
+                            No SMTP Account Connected
+                          </h4>
+                          <span className={`text-[9.5px] px-1.5 py-0.2 rounded font-bold uppercase tracking-wider ${
+                            isLight
+                              ? "bg-rose-200/90 border border-rose-300 text-rose-800"
+                              : "bg-rose-500/20 border border-rose-500/30 text-rose-300"
+                          }`}>
+                            Action Required
+                          </span>
+                        </div>
+                        <p className={`text-[11.5px] leading-relaxed ${isLight ? "text-rose-800" : "text-rose-300/90"}`}>
+                          Email outreach campaigns cannot dispatch until at least one SMTP account is added below.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {slots.map(({ slot, sender }) => (
+                    <SmtpSenderCard
+                      key={slot}
+                      isLight={isLight}
+                      slot={slot}
+                      sender={sender}
+                      busy={smtpBusySlot === slot}
+                      onAdd={openAddSmtp}
+                      onEdit={(s) => void openEditSmtp(s)}
+                      onTest={(s) => void testSavedSender(s)}
+                      onSendTestEmail={(s) => setTestEmailSender(s)}
+                      onToggle={(s) => void toggleSender(s)}
+                      onDelete={(s) => void deleteSender(s)}
                     />
-                  </div>
+                  ))}
 
-                  <div>
-                    <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">Password / App Password</label>
-                    <div className="relative">
-                      <input
-                        type={showPassword ? "text" : "password"}
-                        value={smtpForm.password}
-                        onChange={(e) => setSmtpForm({ ...smtpForm, password: e.target.value })}
-                        placeholder="••••••••••••"
-                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 pr-9 ${
-                          isLight
-                            ? "bg-white border-slate-200 text-slate-900"
-                            : "bg-[#030712] border-slate-700 text-white"
-                        }`}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowPassword(!showPassword)}
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                      >
-                        {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                      </button>
-                    </div>
-                  </div>
+                  {testEmailSender && (
+                    <SmtpTestEmailModal
+                      isLight={isLight}
+                      slot={testEmailSender.slot}
+                      label={testEmailSender.label}
+                      isSending={smtpBusySlot === testEmailSender.slot}
+                      onCancel={() => setTestEmailSender(null)}
+                      onSend={sendTestEmail}
+                    />
+                  )}
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">From Email</label>
-                      <input
-                        type="email"
-                        value={smtpForm.fromEmail}
-                        onChange={(e) => setSmtpForm({ ...smtpForm, fromEmail: e.target.value })}
-                        placeholder="noreply@domain.com"
-                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
-                          isLight
-                            ? "bg-white border-slate-200 text-slate-900"
-                            : "bg-[#030712] border-slate-700 text-white"
-                        }`}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">From Name</label>
-                      <input
-                        type="text"
-                        value={smtpForm.fromName}
-                        onChange={(e) => setSmtpForm({ ...smtpForm, fromName: e.target.value })}
-                        placeholder="e.g. Sales Team"
-                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
-                          isLight
-                            ? "bg-white border-slate-200 text-slate-900"
-                            : "bg-[#030712] border-slate-700 text-white"
-                        }`}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 gap-3">
-                    <div>
-                      <label className="block text-[9.5px] font-bold text-slate-400 tracking-wider uppercase mb-1">Custom Label</label>
-                      <input
-                        type="text"
-                        value={smtpForm.label}
-                        onChange={(e) => setSmtpForm({ ...smtpForm, label: e.target.value })}
-                        placeholder="e.g. Gmail SMTP Gateway"
-                        className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none focus:border-indigo-500 ${
-                          isLight
-                            ? "bg-white border-slate-200 text-slate-900"
-                            : "bg-[#030712] border-slate-700 text-white"
-                        }`}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex gap-2 pt-3 border-t border-slate-200/20">
-                    <button
-                      type="button"
-                      onClick={testSMTP}
-                      disabled={testing || !smtpForm.host || !smtpForm.user || !smtpForm.password}
-                      className="px-3 py-1.5 bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-300 text-xs font-bold rounded-lg cursor-pointer flex items-center gap-1.5 transition-all disabled:opacity-50"
-                    >
-                      {testing ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
-                      Test Connection
-                    </button>
-                    <button
-                      type="button"
-                      onClick={saveSMTP}
-                      disabled={saving || !smtpForm.host || !smtpForm.user || !smtpForm.password || !smtpForm.fromEmail}
-                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer flex items-center gap-1.5 transition-all disabled:opacity-50"
-                    >
-                      {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-                      Save Configuration
-                    </button>
-                    {isEditingSmtp && (
-                      <button
-                        type="button"
-                        onClick={() => setIsEditingSmtp(false)}
-                        className={`ml-auto px-3 py-1.5 border rounded-lg text-xs font-semibold cursor-pointer transition-all ${
-                          isLight ? "border-slate-200 text-slate-600 hover:bg-slate-50" : "border-slate-800 text-slate-400 hover:bg-slate-850"
-                        }`}
-                      >
-                        Cancel
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
+                  {smtpModal && (
+                    <SmtpSenderModal
+                      isLight={isLight}
+                      slot={smtpModal.slot}
+                      mode={smtpModal.mode}
+                      initial={smtpModal.mode === "edit" ? smtpModal.initial : undefined}
+                      busy={smtpBusySlot === smtpModal.slot}
+                      onCancel={() => setSmtpModal(null)}
+                      onSubmit={submitSmtpSender}
+                      onTestDraft={testSmtpDraft}
+                    />
+                  )}
+                </>
+              );
+            })()}
           </div>
 
           <div className="lg:col-span-4 space-y-4">
@@ -1677,604 +2365,61 @@ function doGet(e) {
               </div>
             ) : (
             <>
-              {/* Provider selector: which transport actually sends outreach */}
-              <div className={`border rounded-xl p-4 sm:p-4.5 ${
-                isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
-              }`}>
-                <h3 className={`text-xs font-semibold mb-1 ${isLight ? "text-slate-800" : "text-white"}`}>
-                  Sending Method
-                </h3>
-                <p className="text-[11px] text-slate-500 mb-4 leading-relaxed">
-                  Choose how outreach messages leave the platform. The official API is stable and compliant but
-                  requires cold outreach to use pre-approved templates.
-                </p>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <button
-                    onClick={() => switchProvider("web")}
-                    disabled={switchingProvider}
-                    className={`text-left p-4 rounded-xl border transition-all cursor-pointer disabled:opacity-60 ${
-                      waProvider === "web"
-                        ? "border-indigo-500/60 bg-indigo-500/5 ring-1 ring-indigo-500/30"
-                        : isLight
-                          ? "border-slate-200 hover:border-slate-300"
-                          : "border-[#1e293b] hover:border-slate-700"
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 mb-1.5">
-                      <Smartphone className="w-4 h-4 text-indigo-400" />
-                      <span className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
-                        WhatsApp Web (QR)
-                      </span>
-                      {waProvider === "web" && (
-                        <span className="ml-auto text-[9px] font-bold px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400">
-                          ACTIVE
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[10px] text-slate-500 leading-relaxed">
-                      Links your personal number by QR scan. Fast to set up, no approval needed, but unofficial
-                      and can be rate limited or blocked by WhatsApp.
-                    </p>
-                  </button>
-
-                  <button
-                    onClick={() => switchProvider("cloud")}
-                    disabled={switchingProvider}
-                    className={`text-left p-4 rounded-xl border transition-all cursor-pointer disabled:opacity-60 ${
-                      waProvider === "cloud"
-                        ? "border-emerald-500/60 bg-emerald-500/5 ring-1 ring-emerald-500/30"
-                        : isLight
-                          ? "border-slate-200 hover:border-slate-300"
-                          : "border-[#1e293b] hover:border-slate-700"
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 mb-1.5">
-                      <WhatsAppLogo className="w-4 h-4 fill-emerald-500 text-emerald-500" />
-                      <span className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
-                        Official API (Meta Cloud)
-                      </span>
-                      {waProvider === "cloud" && (
-                        <span className="ml-auto text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">
-                          ACTIVE
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[10px] text-slate-500 leading-relaxed">
-                      Your WhatsApp Business account via Meta. Reliable delivery and no session drops. Cold
-                      outreach must use an approved template.
-                    </p>
-                  </button>
-                </div>
-              </div>
-
-              {waProvider === "web" ? (
-              <div className={`border rounded-xl p-4 sm:p-4.5 space-y-3.5 ${
-                isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
-              }`}>
-                <div className={`flex items-center justify-between pb-2.5 border-b ${
-                  isLight ? "border-slate-200" : "border-[#1e293b]/60"
-                }`}>
-                  <div className="flex items-center gap-2">
-                    <Smartphone className="h-4 w-4 text-indigo-400" />
-                    <h3 className={`text-xs font-bold ${isLight ? "text-slate-800" : "text-white"}`}>
-                      WhatsApp Gateway Session
-                    </h3>
-                  </div>
-
-                  {whatsappStatus.status === "CONNECTED" && (
-                    <div className="flex items-center gap-2">
-                      <button 
-                        onClick={onSendWhatsAppTest}
-                        disabled={isSendingTestMsg}
-                        className="px-3 py-1 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 border border-indigo-500/25 font-bold text-[9.5px] rounded-lg cursor-pointer transition-all disabled:opacity-50"
-                      >
-                        {isSendingTestMsg ? "Sending Test..." : "Send Test Message"}
-                      </button>
-                      <button 
-                        onClick={onDisconnectWhatsApp}
-                        disabled={isDisconnectingWa}
-                        className="px-3 py-1 bg-rose-600/10 hover:bg-rose-600/20 text-rose-400 border border-rose-500/25 font-bold text-[9.5px] rounded-lg cursor-pointer transition-all disabled:opacity-50"
-                      >
-                        {isDisconnectingWa ? "Disconnecting..." : "Disconnect WhatsApp"}
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex flex-col md:flex-row items-center gap-6 py-1">
-                  <div className="flex-1 space-y-3 font-sans">
-                    <p className={`text-xs leading-relaxed ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                      Authenticates a virtual headless browser with WhatsApp Web. Once authenticated, outreach campaigns can dispatch customized messages directly to business lines.
-                    </p>
-
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2 text-xs">
-                        <span className="text-slate-400">Connection state:</span>
-                        <span className={`font-bold px-2 py-0.5 rounded text-[9.5px] tracking-wide ${
-                          whatsappStatus.status === "CONNECTED" ? "bg-emerald-500/10 text-emerald-400" :
-                          whatsappStatus.status === "CONNECTING" ? "bg-indigo-500/10 text-indigo-400 animate-pulse" :
-                          whatsappStatus.status === "QR_READY" ? "bg-amber-500/10 text-amber-400" :
-                          "bg-slate-500/10 text-slate-400"
-                        }`}>
-                          {whatsappStatus.status === "CONNECTED" ? "ACTIVE" : whatsappStatus.status}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="pt-1 flex gap-2">
-                      {whatsappStatus.status === "DISCONNECTED" && (
-                        <button
-                          onClick={onInitializeWhatsApp}
-                          className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer transition-all shadow-xs shadow-indigo-600/20"
-                        >
-                          Initialize WhatsApp Gateway
-                        </button>
-                      )}
-
-                      {whatsappStatus.status === "QR_READY" && (
-                        <button
-                          onClick={onInitializeWhatsApp}
-                          className="px-3.5 py-1.5 bg-amber-600/10 hover:bg-amber-600/20 text-amber-400 border border-amber-500/20 text-xs font-bold rounded-lg cursor-pointer transition-all"
-                        >
-                          Regenerate QR Code
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* QR view */}
-                  {whatsappStatus.status !== "CONNECTED" && (
-                    <div className="shrink-0 flex items-center justify-center p-3 bg-white rounded-xl border border-slate-200 w-44 h-44 shadow-md relative">
-                      {whatsappStatus.qr ? (
-                        <img 
-                          src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(whatsappStatus.qr)}`} 
-                          alt="WhatsApp Scan QR" 
-                          className="w-36 h-36"
-                        />
-                      ) : (
-                        <div className="text-slate-400 text-center text-[10px] font-sans">
-                          {whatsappStatus.status === "CONNECTING" ? (
-                            <div className="space-y-2 flex flex-col items-center">
-                              <Loader2 className="h-5 w-5 text-indigo-600 animate-spin" />
-                              <span className="leading-normal">{isDisconnectingWa ? "Disconnecting Gateway..." : "Launching headless client..."}</span>
-                            </div>
-                          ) : (
-                            "Gateway connection is inactive. Press button to initialize."
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {whatsappStatus.status === "CONNECTED" && (
-                    <div className={`shrink-0 flex flex-col items-center justify-center p-4 border border-emerald-500/20 rounded-xl w-44 h-44 text-emerald-400 text-xs ${
-                      isLight ? "bg-emerald-50" : "bg-slate-900/50"
-                    }`}>
-                      <CheckCircle2 className="h-10 w-10 text-emerald-400 mb-2 animate-bounce" />
-                      <span className="font-bold text-center">Session Verified</span>
-                      <span className="text-[9.5px] text-slate-500 mt-0.5">Active Gateway</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-              ) : (
-              /* ── Official Meta WhatsApp Business Cloud API ── */
-              <div className="space-y-5">
-                {/* Live connection state */}
-                <div className={`border rounded-xl p-4 sm:p-4.5 ${
-                  isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
-                }`}>
-                  <div className="flex items-start justify-between gap-3 flex-wrap">
-                    <div className="flex items-center gap-3">
-                      <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${
-                        cloudStatus?.connected ? "bg-emerald-500/10" : "bg-slate-500/10"
+              {(() => {
+                // Build the list of 5 slots. Prefer the per-slot `whatsappSessions`
+                // feed; fall back to the single `whatsappStatus` as slot 1 (plus
+                // empty slots 2-5) so the UI still works before the backend
+                // multi-session feed is wired in.
+                const sessions: WhatsAppSessionStatus[] = Array.from({ length: MAX_WHATSAPP_SLOTS }, (_, i) => {
+                  const slot = i + 1;
+                  const fromFeed = whatsappSessions?.find((s) => s.slot === slot);
+                  if (fromFeed) return fromFeed;
+                  if (slot === 1) return { slot: 1, status: whatsappStatus.status, qr: whatsappStatus.qr, qrDataUrl: whatsappStatus.qrDataUrl, error: whatsappStatus.error };
+                  return { slot, status: "DISCONNECTED", qr: "" };
+                });
+                const connectedCount = sessions.filter((s) => s.status === "CONNECTED").length;
+                return (
+                  <>
+                    <div className="flex items-center justify-between px-1">
+                      <p className={`text-[11px] font-sans leading-relaxed ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                        Link up to <strong className={isLight ? "text-slate-800" : "text-white"}>{MAX_WHATSAPP_SLOTS} WhatsApp accounts</strong>. Campaigns rotate messages across every connected account with anti-block delays.
+                      </p>
+                      <span className={`shrink-0 ml-3 font-bold px-2 py-0.5 rounded text-[9.5px] tracking-wide ${
+                        connectedCount > 0 ? "bg-emerald-500/10 text-emerald-400" : "bg-slate-500/10 text-slate-400"
                       }`}>
-                        <WhatsAppLogo className={`w-4 h-4 ${
-                          cloudStatus?.connected ? "fill-emerald-500 text-emerald-500" : "fill-slate-500 text-slate-500"
-                        }`} />
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h4 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
-                            {cloudStatus?.connected ? "Connected" : "Not Connected"}
-                          </h4>
-                          {cloudStatusLoading && <Loader2 className="w-3 h-3 animate-spin text-slate-500" />}
-                          {cloudStatus?.qualityRating && (
-                            <span className={`text-[8.5px] font-bold px-1.5 py-0.2 rounded ${
-                              cloudStatus.qualityRating === "GREEN"
-                                ? "bg-emerald-500/15 text-emerald-400"
-                                : cloudStatus.qualityRating === "YELLOW"
-                                  ? "bg-amber-500/15 text-amber-400"
-                                  : "bg-rose-500/15 text-rose-400"
-                            }`}>
-                              QUALITY: {cloudStatus.qualityRating}
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[10px] text-slate-500 mt-0.5 leading-relaxed">
-                          {cloudStatus?.connected
-                            ? `${cloudStatus.verifiedName || "Business account"} · ${cloudStatus.displayPhoneNumber || ""}`
-                            : "Configure your Meta API credentials below to connect your WhatsApp Business account."}
-                        </p>
-                      </div>
+                        {connectedCount}/{MAX_WHATSAPP_SLOTS} LINKED
+                      </span>
                     </div>
-
-                    <div className="flex items-center gap-2">
-                      {cloudConfigured && (
-                        <button
-                          onClick={() => refreshCloudStatus(true)}
-                          disabled={cloudStatusLoading}
-                          className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all cursor-pointer disabled:opacity-50 flex items-center gap-1.5 ${
-                            isLight
-                              ? "border-slate-200 text-slate-600 hover:bg-slate-50"
-                              : "border-slate-800 text-slate-300 hover:bg-slate-850"
-                          }`}
-                        >
-                          {cloudStatusLoading
-                            ? <Loader2 className="w-3 h-3 animate-spin" />
-                            : <Check className="w-3 h-3 text-emerald-500" />}
-                          Refresh Status
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  {cloudStatus?.error && !cloudStatus.connected && (
-                    <div className="mt-3 p-2.5 rounded-lg bg-rose-500/5 border border-rose-500/20 flex items-start gap-2">
-                      <AlertTriangle className="w-3.5 h-3.5 text-rose-400 mt-0.5 shrink-0" />
-                      <span className="text-[10px] text-rose-400 leading-relaxed">{cloudStatus.error}</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Credentials */}
-                <div className={`border rounded-xl p-4 sm:p-4.5 space-y-3.5 ${
-                  isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
-                }`}>
-                  <div className={`pb-2.5 border-b ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
-                    <div className="flex items-center gap-2">
-                      <Key className="h-3.5 w-3.5 text-indigo-400" />
-                      <h3 className={`text-xs font-bold ${isLight ? "text-slate-800" : "text-white"}`}>
-                        API Credentials
-                      </h3>
-                    </div>
-                    <p className="text-[10px] text-slate-500 mt-1 leading-relaxed">
-                      Enter your Meta WhatsApp Business API credentials. Find these under your app's WhatsApp
-                      section in the{" "}
-                      <a
-                        href="https://developers.facebook.com/apps"
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-indigo-400 hover:text-indigo-300 inline-flex items-center gap-0.5"
-                      >
-                        Meta App Dashboard <ExternalLink className="w-2.5 h-2.5" />
-                      </a>
-                      .
-                    </p>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-[10px] font-bold text-slate-500 mb-1.5 uppercase tracking-wide">
-                        Phone Number ID <span className="text-rose-400">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        value={cloudForm.phoneNumberId}
-                        onChange={(e) => setCloudForm({ ...cloudForm, phoneNumberId: e.target.value })}
-                        placeholder="e.g. 123456789012345"
-                        className={`w-full px-3 py-2 text-xs rounded-lg border outline-none transition-all focus:border-indigo-500 ${
-                          isLight
-                            ? "bg-white border-slate-200 text-slate-900 placeholder-slate-400"
-                            : "bg-slate-900/60 border-slate-800 text-white placeholder-slate-600"
-                        }`}
+                    {sessions.map((session) => (
+                      <WhatsAppSessionCard
+                        key={session.slot}
+                        isLight={isLight}
+                        session={session}
+                        onInitialize={(slot) => onInitializeWhatsApp(slot)}
+                        onDisconnect={(slot) => onDisconnectWhatsApp(slot)}
+                        onSendTest={(slot) => setTestModalSlot(slot)}
+                        isSendingTestMsg={isSendingTestMsg}
+                        isDisconnecting={isDisconnectingWa && (disconnectingSlot == null || disconnectingSlot === session.slot)}
                       />
-                      <p className="text-[9px] text-slate-500 mt-1">
-                        The numeric ID of your sending number, not the number itself.
-                      </p>
-                    </div>
+                    ))}
 
-                    <div>
-                      <label className="block text-[10px] font-bold text-slate-500 mb-1.5 uppercase tracking-wide">
-                        WhatsApp Business Account ID
-                      </label>
-                      <input
-                        type="text"
-                        value={cloudForm.wabaId}
-                        onChange={(e) => setCloudForm({ ...cloudForm, wabaId: e.target.value })}
-                        placeholder="e.g. 987654321098765"
-                        className={`w-full px-3 py-2 text-xs rounded-lg border outline-none transition-all focus:border-indigo-500 ${
-                          isLight
-                            ? "bg-white border-slate-200 text-slate-900 placeholder-slate-400"
-                            : "bg-slate-900/60 border-slate-800 text-white placeholder-slate-600"
-                        }`}
+                    {testModalSlot !== null && (
+                      <WhatsAppTestModal
+                        isLight={isLight}
+                        slot={testModalSlot}
+                        fromNumber={sessions.find((s) => s.slot === testModalSlot)?.phoneNumber}
+                        isSending={isSendingTestMsg}
+                        onCancel={() => setTestModalSlot(null)}
+                        onSend={onSendWhatsAppTest}
                       />
-                      <p className="text-[9px] text-slate-500 mt-1">Optional. Enables template listing.</p>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-1.5 uppercase tracking-wide">
-                      Permanent Access Token <span className="text-rose-400">*</span>
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showAccessToken ? "text" : "password"}
-                        value={cloudForm.accessToken}
-                        onChange={(e) => setCloudForm({ ...cloudForm, accessToken: e.target.value })}
-                        placeholder="EAAG..."
-                        className={`w-full px-3 py-2 pr-10 text-xs rounded-lg border outline-none transition-all focus:border-indigo-500 font-mono ${
-                          isLight
-                            ? "bg-white border-slate-200 text-slate-900 placeholder-slate-400"
-                            : "bg-slate-900/60 border-slate-800 text-white placeholder-slate-600"
-                        }`}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowAccessToken(!showAccessToken)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 cursor-pointer"
-                      >
-                        {showAccessToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                      </button>
-                    </div>
-                    <p className="text-[9px] text-slate-500 mt-1">
-                      Use a System User token from Business Settings. Temporary tokens expire in 24 hours.
-                    </p>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-[10px] font-bold text-slate-500 mb-1.5 uppercase tracking-wide">
-                        Webhook Verify Token <span className="text-rose-400">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        value={cloudForm.verifyToken}
-                        onChange={(e) => setCloudForm({ ...cloudForm, verifyToken: e.target.value })}
-                        placeholder="any-secret-string-you-choose"
-                        className={`w-full px-3 py-2 text-xs rounded-lg border outline-none transition-all focus:border-indigo-500 ${
-                          isLight
-                            ? "bg-white border-slate-200 text-slate-900 placeholder-slate-400"
-                            : "bg-slate-900/60 border-slate-800 text-white placeholder-slate-600"
-                        }`}
-                      />
-                      <p className="text-[9px] text-slate-500 mt-1">
-                        A custom string you create. Must match the token you set in Meta webhook settings.
-                      </p>
-                    </div>
-
-                    <div>
-                      <label className="block text-[10px] font-bold text-slate-500 mb-1.5 uppercase tracking-wide">
-                        App Secret
-                      </label>
-                      <div className="relative">
-                        <input
-                          type={showAppSecret ? "text" : "password"}
-                          value={cloudForm.appSecret}
-                          onChange={(e) => setCloudForm({ ...cloudForm, appSecret: e.target.value })}
-                          placeholder="Enables webhook signature checks"
-                          className={`w-full px-3 py-2 pr-10 text-xs rounded-lg border outline-none transition-all focus:border-indigo-500 font-mono ${
-                            isLight
-                              ? "bg-white border-slate-200 text-slate-900 placeholder-slate-400"
-                              : "bg-slate-900/60 border-slate-800 text-white placeholder-slate-600"
-                          }`}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowAppSecret(!showAppSecret)}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 cursor-pointer"
-                        >
-                          {showAppSecret ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                        </button>
-                      </div>
-                      <p className="text-[9px] text-slate-500 mt-1">
-                        Recommended. Lets us verify inbound webhooks really came from Meta.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide">
-                          Default Template
-                        </label>
-                        <button
-                          type="button"
-                          onClick={loadCloudTemplates}
-                          disabled={loadingTemplates || !cloudConfigured}
-                          className="text-[9px] font-bold text-indigo-400 hover:text-indigo-300 cursor-pointer disabled:opacity-40 flex items-center gap-1"
-                        >
-                          {loadingTemplates ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <Plus className="w-2.5 h-2.5" />}
-                          {cloudTemplates ? "Reload" : "Load from Meta"}
-                        </button>
-                      </div>
-
-                      {cloudTemplates && cloudTemplates.length > 0 ? (
-                        <select
-                          value={cloudForm.defaultTemplateName}
-                          onChange={(e) => {
-                            const picked = cloudTemplates.find((t) => t.name === e.target.value);
-                            setCloudForm({
-                              ...cloudForm,
-                              defaultTemplateName: e.target.value,
-                              // Keep the language in step with the chosen template,
-                              // since a mismatch is rejected by Meta at send time.
-                              defaultTemplateLang: picked?.language || cloudForm.defaultTemplateLang,
-                            });
-                          }}
-                          className={`w-full px-3 py-2 text-xs rounded-lg border outline-none transition-all focus:border-indigo-500 cursor-pointer ${
-                            isLight
-                              ? "bg-white border-slate-200 text-slate-900"
-                              : "bg-slate-900/60 border-slate-800 text-white"
-                          }`}
-                        >
-                          <option value="">No template selected</option>
-                          {cloudTemplates.map((t) => (
-                            <option key={`${t.name}-${t.language}`} value={t.name} disabled={t.status !== "APPROVED"}>
-                              {t.name} ({t.language}){t.status !== "APPROVED" ? ` — ${t.status}` : ""}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <input
-                          type="text"
-                          value={cloudForm.defaultTemplateName}
-                          onChange={(e) => setCloudForm({ ...cloudForm, defaultTemplateName: e.target.value })}
-                          placeholder="e.g. lead_intro"
-                          className={`w-full px-3 py-2 text-xs rounded-lg border outline-none transition-all focus:border-indigo-500 ${
-                            isLight
-                              ? "bg-white border-slate-200 text-slate-900 placeholder-slate-400"
-                              : "bg-slate-900/60 border-slate-800 text-white placeholder-slate-600"
-                          }`}
-                        />
-                      )}
-                      <p className="text-[9px] text-slate-500 mt-1">
-                        Used for cold outreach when the 24-hour reply window is closed.
-                        {!cloudForm.defaultTemplateName && (
-                          <span className="text-amber-400"> Without one, cold campaigns cannot send.</span>
-                        )}
-                      </p>
-                    </div>
-
-                    <div>
-                      <label className="block text-[10px] font-bold text-slate-500 mb-1.5 uppercase tracking-wide">
-                        Template Language
-                      </label>
-                      <input
-                        type="text"
-                        value={cloudForm.defaultTemplateLang}
-                        onChange={(e) => setCloudForm({ ...cloudForm, defaultTemplateLang: e.target.value })}
-                        placeholder="en_US"
-                        className={`w-full px-3 py-2 text-xs rounded-lg border outline-none transition-all focus:border-indigo-500 ${
-                          isLight
-                            ? "bg-white border-slate-200 text-slate-900 placeholder-slate-400"
-                            : "bg-slate-900/60 border-slate-800 text-white placeholder-slate-600"
-                        }`}
-                      />
-                      <p className="text-[9px] text-slate-500 mt-1">Must match the approved template locale.</p>
-                    </div>
-                  </div>
-
-                  <div className={`flex flex-wrap gap-2.5 border-t pt-4 ${
-                    isLight ? "border-slate-200" : "border-[#1e293b]/60"
-                  }`}>
-                    <button
-                      onClick={saveCloudConfig}
-                      disabled={cloudSaving}
-                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer transition-all shadow-md shadow-indigo-600/10 disabled:opacity-50 flex items-center gap-1.5"
-                    >
-                      {cloudSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-                      {cloudSaving ? "Saving..." : "Save & Connect"}
-                    </button>
-                    <button
-                      onClick={testCloudConnection}
-                      disabled={cloudTesting}
-                      className={`px-4 py-2 text-xs font-semibold rounded-lg border transition-all cursor-pointer disabled:opacity-50 flex items-center gap-1.5 ${
-                        isLight
-                          ? "border-slate-200 text-slate-600 hover:bg-slate-50"
-                          : "border-slate-800 text-slate-300 hover:bg-slate-850"
-                      }`}
-                    >
-                      {cloudTesting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5 text-emerald-500" />}
-                      Test Connection
-                    </button>
-                  </div>
-                </div>
-
-                {/* Webhook configuration */}
-                <div className={`border rounded-xl p-4 sm:p-4.5 space-y-3.5 ${
-                  isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
-                }`}>
-                  <div className={`pb-2.5 border-b ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
-                    <div className="flex items-center gap-2">
-                      <FileCode className="h-3.5 w-3.5 text-indigo-400" />
-                      <h3 className={`text-xs font-bold ${isLight ? "text-slate-800" : "text-white"}`}>
-                        Webhook Configuration
-                      </h3>
-                    </div>
-                    <p className="text-[10px] text-slate-500 mt-1 leading-relaxed">
-                      Use this URL as your webhook callback in the Meta App Dashboard. It receives lead replies and
-                      delivery receipts, which is what powers the Conversations inbox.
-                    </p>
-                  </div>
-
-                  <div>
-                    <label className="block text-[9.5px] font-bold text-slate-500 mb-1 uppercase tracking-wide">
-                      Callback URL
-                    </label>
-                    <div className="flex gap-2">
-                      <input
-                        readOnly
-                        value={webhookUrl}
-                        className={`flex-1 px-2.5 py-1.5 text-xs rounded-lg border outline-none font-mono ${
-                          isLight
-                            ? "bg-slate-50 border-slate-200 text-slate-700"
-                            : "bg-slate-900/60 border-slate-800 text-slate-300"
-                        }`}
-                      />
-                      <button
-                        onClick={copyWebhookUrl}
-                        className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all cursor-pointer shrink-0 flex items-center gap-1.5 ${
-                          isLight
-                            ? "border-slate-200 text-slate-600 hover:bg-slate-50"
-                            : "border-slate-800 text-slate-300 hover:bg-slate-850"
-                        }`}
-                      >
-                        {copiedWebhook ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <FileCode className="w-3.5 h-3.5" />}
-                        {copiedWebhook ? "Copied" : "Copy"}
-                      </button>
-                    </div>
-                    {webhookUrl.startsWith("http://") && (
-                      <p className="text-[9px] text-amber-400 mt-1 flex items-center gap-1">
-                        <AlertTriangle className="w-2.5 h-2.5" />
-                        Meta requires HTTPS. Set PUBLIC_BASE_URL to your public HTTPS domain.
-                      </p>
                     )}
-                    <p className="text-[9px] text-slate-500 mt-1">
-                      Subscribe to the <strong className={isLight ? "text-slate-700" : "text-slate-300"}>messages</strong> field
-                      so replies reach your inbox.
-                    </p>
-                  </div>
-
-                  {/* End-to-end delivery test */}
-                  <div className={`border-t pt-3 ${isLight ? "border-slate-200" : "border-[#1e293b]/60"}`}>
-                    <label className="block text-[9.5px] font-bold text-slate-500 mb-1 uppercase tracking-wide">
-                      Send a Test Message
-                    </label>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={cloudTestPhone}
-                        onChange={(e) => setCloudTestPhone(e.target.value)}
-                        placeholder="Recipient number with country code"
-                        className={`flex-1 px-2.5 py-1.5 text-xs rounded-lg border outline-none transition-all focus:border-indigo-500 ${
-                          isLight
-                            ? "bg-white border-slate-200 text-slate-900 placeholder-slate-400"
-                            : "bg-slate-900/60 border-slate-800 text-white placeholder-slate-600"
-                        }`}
-                      />
-                      <button
-                        onClick={sendCloudTestMessage}
-                        disabled={sendingCloudTest || !cloudConfigured}
-                        className="px-3 py-1.5 bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-400 border border-emerald-500/25 text-xs font-bold rounded-lg cursor-pointer transition-all disabled:opacity-50 shrink-0 flex items-center gap-1.5"
-                      >
-                        {sendingCloudTest ? <Loader2 className="w-3 h-3 animate-spin" /> : <MessageCircle className="w-3 h-3" />}
-                        {sendingCloudTest ? "Sending..." : "Send Test"}
-                      </button>
-                    </div>
-                    <p className="text-[9px] text-slate-500 mt-1">
-                      A plain text test only works if that number messaged your business in the last 24 hours.
-                      Otherwise WhatsApp requires an approved template.
-                    </p>
-                  </div>
-                </div>
-              </div>
-              )}
+                  </>
+                );
+              })()}
             </>
             )}
           </div>
+
 
           <div className="lg:col-span-4 space-y-4">
             <div className={`p-4 rounded-xl border font-sans space-y-2.5 ${
@@ -2282,34 +2427,6 @@ function doGet(e) {
                 ? "bg-indigo-50/50 border-indigo-200 text-indigo-950" 
                 : "bg-indigo-500/5 border-indigo-500/15 text-indigo-400"
             }`}>
-              {waProvider === "cloud" ? (
-                <>
-                  <div className="flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-indigo-500" />
-                    <h4 className="font-bold text-xs">Official API Setup Guide</h4>
-                  </div>
-                  <p className="text-[11px] leading-relaxed">
-                    Connect the WhatsApp Business account you already own through Meta.
-                  </p>
-                  <ol className="text-[10px] space-y-1.5 list-decimal pl-4 leading-relaxed text-slate-400">
-                    <li>In the <strong className={isLight ? "text-slate-800" : "text-white"}>Meta App Dashboard</strong>, open your app and go to <strong className={isLight ? "text-slate-800" : "text-white"}>WhatsApp → API Setup</strong>.</li>
-                    <li>Copy the <strong className={isLight ? "text-slate-800" : "text-white"}>Phone Number ID</strong> and <strong className={isLight ? "text-slate-800" : "text-white"}>WhatsApp Business Account ID</strong>.</li>
-                    <li>Create a <strong className={isLight ? "text-slate-800" : "text-white"}>System User</strong> in Business Settings and generate a permanent token with <em>whatsapp_business_messaging</em> permission.</li>
-                    <li>Invent a <strong className={isLight ? "text-slate-800" : "text-white"}>Verify Token</strong> and paste the same string here and in Meta.</li>
-                    <li>Under <strong className={isLight ? "text-slate-800" : "text-white"}>Configuration → Webhook</strong>, paste the callback URL and subscribe to <strong className={isLight ? "text-slate-800" : "text-white"}>messages</strong>.</li>
-                    <li>Save here, then hit <strong className={isLight ? "text-slate-800" : "text-white"}>Test Connection</strong>.</li>
-                  </ol>
-                  <div className="pt-1 border-t border-indigo-500/15">
-                    <p className="text-[10px] leading-relaxed text-amber-400/90 flex items-start gap-1.5">
-                      <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
-                      <span>
-                        WhatsApp only allows free-form text within 24 hours of a lead messaging you. Cold campaigns
-                        need an approved template, so submit one in Meta and set it as your default above.
-                      </span>
-                    </p>
-                  </div>
-                </>
-              ) : (
                 <>
                   <div className="flex items-center gap-2">
                     <Sparkles className="w-4.5 h-4.5 text-indigo-500" />
@@ -2325,7 +2442,6 @@ function doGet(e) {
                     <li>Point your camera at the QR code on the left to scan.</li>
                   </ol>
                 </>
-              )}
             </div>
           </div>
         </div>

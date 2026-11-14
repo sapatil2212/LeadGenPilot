@@ -25,6 +25,12 @@ import { generateOutreachCopy } from "../outreachCopy";
 import { canonicalSuppressionKey, filterSuppressed } from "../compliance/suppressionService";
 import { compileTemplateSubject, compileTemplateText, templateNeedsAiBody } from "../outreachTemplates";
 import { resolveTemplateSelection } from "../templates/templateService";
+import {
+  resolveWhatsAppMessageTemplate,
+  compileMessageTemplateForLead,
+  markMessageTemplateUsed,
+  type ResolvedMessageTemplate,
+} from "../messageTemplates/campaignCompile";
 
 export interface GenerateCampaignRequest {
   name?: string;
@@ -42,6 +48,15 @@ export interface GenerateCampaignRequest {
     whatsapp?: string;
   };
   useAi: boolean;
+  /** Campaign-level throttle settings. Defaults are applied when omitted. */
+  messageDelayMin?: number;   // seconds, default 10
+  messageDelayMax?: number;   // seconds, default 60
+  batchSize?: number;         // messages per batch, default 25
+  batchPauseSeconds?: number; // pause between batches in seconds, default 60
+  /** Anti-block: reword each message's wording at send time. Default false. */
+  shuffleContent?: boolean;
+  /** Time-based pause: pause after this many minutes of sending. 0 = count-based. */
+  pauseEveryMinutes?: number;
 }
 
 export interface CampaignView {
@@ -93,11 +108,26 @@ export async function generateCampaign(
     throw new Error("At least one channel (email or whatsapp) must be enabled.");
   }
 
-  const selectedTemplates = await resolveTemplateSelection(ctx, request.templateIds);
+  // A WhatsApp template id may point at either the new component-based
+  // MessageTemplate or the legacy flat OutreachTemplate. Resolve the component
+  // template first; if it matches, we keep the legacy resolver from rejecting
+  // that id (it only knows OutreachTemplate rows) by not forwarding it.
+  const whatsappMessageTemplate: ResolvedMessageTemplate | null = whatsappOn
+    ? await resolveWhatsAppMessageTemplate(ctx, request.templateIds?.whatsapp)
+    : null;
+
+  const legacyTemplateIds = {
+    email: request.templateIds?.email,
+    // Only forward the WhatsApp id to the legacy resolver when it is NOT a
+    // component MessageTemplate, otherwise resolveTemplateSelection throws.
+    whatsapp: whatsappMessageTemplate ? undefined : request.templateIds?.whatsapp,
+  };
+
+  const selectedTemplates = await resolveTemplateSelection(ctx, legacyTemplateIds);
   if (!emailOn && selectedTemplates.email) {
     throw new Error("An email template was selected but the email channel is disabled.");
   }
-  if (!whatsappOn && selectedTemplates.whatsapp) {
+  if (!whatsappOn && (selectedTemplates.whatsapp || whatsappMessageTemplate)) {
     throw new Error("A WhatsApp template was selected but the WhatsApp channel is disabled.");
   }
 
@@ -121,11 +151,22 @@ export async function generateCampaign(
       templates: request.templateIds
         ? JSON.stringify({
             ...(selectedTemplates.email ? { email: selectedTemplates.email.id } : {}),
-            ...(selectedTemplates.whatsapp ? { whatsapp: selectedTemplates.whatsapp.id } : {}),
+            ...(whatsappMessageTemplate
+              ? { whatsapp: whatsappMessageTemplate.id, whatsappKind: "message_template" }
+              : selectedTemplates.whatsapp
+                ? { whatsapp: selectedTemplates.whatsapp.id }
+                : {}),
           })
         : null,
       createdById: ctx.userId,
       totalMessages: 0, // will be updated after message creation
+      // Throttle settings: apply validated values or schema defaults.
+      ...(request.messageDelayMin !== undefined ? { messageDelayMin: Math.max(0, Number(request.messageDelayMin)) } : {}),
+      ...(request.messageDelayMax !== undefined ? { messageDelayMax: Math.max(0, Number(request.messageDelayMax)) } : {}),
+      ...(request.batchSize !== undefined ? { batchSize: Math.max(1, Number(request.batchSize)) } : {}),
+      ...(request.batchPauseSeconds !== undefined ? { batchPauseSeconds: Math.max(0, Number(request.batchPauseSeconds)) } : {}),
+      ...(request.shuffleContent !== undefined ? { shuffleContent: Boolean(request.shuffleContent) } : {}),
+      ...(request.pauseEveryMinutes !== undefined ? { pauseEveryMinutes: Math.max(0, Math.min(720, Number(request.pauseEveryMinutes) || 0)) } : {}),
     },
   });
 
@@ -169,7 +210,9 @@ export async function generateCampaign(
   for (const lead of leads) {
     const emailNeedsGeneratedBody = emailOn &&
       (!selectedTemplates.email || templateNeedsAiBody(selectedTemplates.email));
-    const whatsappNeedsGeneratedBody = whatsappOn &&
+    // A component MessageTemplate always carries its own body, so it never
+    // needs AI/rule copy. Only the legacy path can require generated copy.
+    const whatsappNeedsGeneratedBody = whatsappOn && !whatsappMessageTemplate &&
       (!selectedTemplates.whatsapp || templateNeedsAiBody(selectedTemplates.whatsapp));
     const needsGeneratedCopy = emailNeedsGeneratedBody || whatsappNeedsGeneratedBody;
 
@@ -217,9 +260,12 @@ export async function generateCampaign(
     const emailBody = selectedTemplates.email
       ? compileTemplateText(selectedTemplates.email, lead, copy.emailBody)
       : copy.emailBody;
-    const whatsappBody = selectedTemplates.whatsapp
-      ? compileTemplateText(selectedTemplates.whatsapp, lead, copy.whatsappMessage)
-      : copy.whatsappMessage;
+    // WhatsApp body precedence: component MessageTemplate → legacy OutreachTemplate → generated copy.
+    const whatsappBody = whatsappMessageTemplate
+      ? compileMessageTemplateForLead(whatsappMessageTemplate, lead as any)
+      : selectedTemplates.whatsapp
+        ? compileTemplateText(selectedTemplates.whatsapp, lead, copy.whatsappMessage)
+        : copy.whatsappMessage;
 
     // Email message
     if (emailOn && lead.emails) {
@@ -299,6 +345,11 @@ export async function generateCampaign(
   }
   const warning = warnings.length ? warnings.join(" ") : undefined;
 
+  // Record component-template usage (best-effort; never blocks the campaign).
+  if (whatsappMessageTemplate) {
+    await markMessageTemplateUsed(ctx.tenantId, whatsappMessageTemplate.id);
+  }
+
   logger.info(`Campaign generated: ${messages.length} messages for ${leads.length} leads${suppressedSkips ? `, ${suppressedSkips} suppressed` : ""}.${logContext({ tenant: ctx.tenantId, campaign: campaign.id })}`);
   return { campaignId: campaign.id, messageCount: messages.length, warning };
 }
@@ -369,6 +420,10 @@ export async function listCampaigns(ctx: TenantContext): Promise<CampaignView[]>
     rejectedCount: c.rejectedCount,
     sentCount: c.sentCount,
     failedCount: c.failedCount,
+    messageDelayMin: c.messageDelayMin,
+    messageDelayMax: c.messageDelayMax,
+    batchSize: c.batchSize,
+    batchPauseSeconds: c.batchPauseSeconds,
     createdAt: c.createdAt.toISOString(),
     updatedAt: c.updatedAt.toISOString(),
   }));

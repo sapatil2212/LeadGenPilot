@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import AlertModal from "./AlertModal";
 import WhatsAppLogo from "./WhatsAppLogo";
 import { 
@@ -38,11 +38,22 @@ import {
   AlignCenter,
   AlignRight,
   Image as ImageIcon,
-  X
+  X,
+  File,
+  Download,
+  AlertCircle,
+  Building,
+  Globe,
+  Briefcase,
+  Zap,
+  CheckCircle2,
+  ChevronRight,
+  Wand2
 } from "lucide-react";
 import { api, messageOf } from "./ui/api";
+import { TemplateAttachment, OutreachTemplate } from "./outreachTemplates";
 
-interface EmailTemplate {
+export interface EmailTemplate {
   id: string;
   name: string;
   templateType: "email" | "whatsapp";
@@ -50,29 +61,49 @@ interface EmailTemplate {
   designMode: "builder" | "code";
   htmlCode: string;
   
-  // Wizard settings
+  // Header / Branding
   useLogo: boolean;
   logoType: "text" | "image";
-  logoValue: string; // Title or image url
+  logoValue: string;
+  headerImage?: string;
   textAlign?: "left" | "center" | "right";
   
-  introText: string; // Common welcome message
+  // Message Body
+  introText: string;
+  useAiBody: boolean;
+  customBodyText: string;
   
-  useAiBody: boolean; // Auto-generate body using AI
-  customBodyText: string; // Fallback or override body text
-  
+  // Call to Action
   useCta: boolean;
   ctaText: string;
   ctaUrl: string;
   ctaBgColor: string;
   
+  // Signature / Contact
   useContact: boolean;
   contactText: string;
   
+  // Footer / Compliance
   useFooter: boolean;
   footerText: string;
   
+  // Attachments (PDFs, Docs, etc.)
+  attachments?: TemplateAttachment[];
+  
   createdAt: string;
+}
+
+interface BusinessProfileView {
+  businessName?: string;
+  website?: string;
+  industry?: string;
+  description?: string;
+  targetAudience?: string;
+  brandTone?: string;
+  services?: string[];
+  contactEmail?: string;
+  senderName?: string;
+  phone?: string;
 }
 
 interface GeneratedTemplateResponse {
@@ -92,6 +123,89 @@ interface EmailTemplatesProps {
   workspaceId?: string;
 }
 
+const DYNAMIC_VARIABLES = [
+  { tag: "{{company}}", label: "Company Name", sample: "Apex Solutions" },
+  { tag: "{{name}}", label: "Contact / Owner Name", sample: "Sarah" },
+  { tag: "{{city}}", label: "City", sample: "New York" },
+  { tag: "{{category}}", label: "Industry Category", sample: "Digital Marketing" },
+  { tag: "{{phone}}", label: "Lead Phone", sample: "+1 555-0199" },
+  { tag: "{{website}}", label: "Lead Website", sample: "apexsolutions.com" },
+];
+
+const SUBJECT_SUGGESTIONS = [
+  "Quick question regarding {{company}}",
+  "Growth opportunity for {{company}} in {{city}}",
+  "Complimentary performance audit for {{company}}",
+  "{{category}} partnership inquiry: {{company}}",
+  "Idea for {{company}}'s customer acquisition in {{city}}"
+];
+
+const STARTER_BODY_HOOKS = [
+  {
+    title: "Problem & Solution",
+    badge: "High Converting",
+    subject: "Quick question for {{company}} regarding customer growth in {{city}}",
+    intro: "Hi {{name}},",
+    body: "I came across {{company}} while reviewing leading {{category}} businesses in {{city}}.\n\nMany businesses in your space struggle with inconsistent high-intent leads and rising ad costs. We help teams like {{company}} automate local outreach and capture qualified clients directly.\n\nWe noticed a few quick opportunities where you could capture more market share this quarter."
+  },
+  {
+    title: "Free Audit Offer",
+    badge: "Low Resistance",
+    subject: "Complimentary Performance & Visibility Audit for {{company}}",
+    intro: "Hello {{name}},",
+    body: "We recently analyzed search rankings and local visibility for {{category}} providers across {{city}}.\n\nWe compiled a 3-point performance breakdown specifically for {{company}}, highlighting 2 high-traffic search terms your competitors are winning right now.\n\nWould you like me to send over the 1-page summary?"
+  },
+  {
+    title: "Direct Partnership",
+    badge: "B2B Focus",
+    subject: "{{company}} + partnership inquiry in {{city}}",
+    intro: "Hi {{company}} team,",
+    body: "I've been following {{company}}'s presence in {{city}} and wanted to reach out directly.\n\nWe recently partnered with several {{category}} teams to increase their qualified pipeline by over 40% in under 60 days.\n\nWould you be open to a 5-minute chat this week to explore if a collaboration makes sense?"
+  }
+];
+
+const STARTER_HTML_TEMPLATE = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{company}} Outreach</title>
+  <style>
+    body { margin: 0; padding: 0; background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+    .email-container { max-width: 580px; margin: 24px auto; background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden; }
+    .header { padding: 24px 32px 16px; border-bottom: 1px solid #f1f5f9; }
+    .content { padding: 28px 32px; color: #334155; font-size: 14px; line-height: 1.65; }
+    .cta-btn { display: inline-block; padding: 12px 24px; background: #4f46e5; color: #ffffff; text-decoration: none; border-radius: 8px; font-weight: 600; margin: 20px 0; }
+    .footer { padding: 20px 32px; background: #f8fafc; border-top: 1px solid #f1f5f9; font-size: 11px; color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <div class="email-container">
+    <div class="header">
+      <h2 style="margin: 0; color: #0f172a; font-size: 18px;">Special Invitation for {{company}}</h2>
+    </div>
+    <div class="content">
+      <p>Hi {{name}},</p>
+      <p>We noticed your listing in <strong>{{city}}</strong> and wanted to reach out regarding your current customer acquisition in {{category}}.</p>
+      <p>We recently prepared a customized growth strategy specifically for {{company}} that shows where you can capture more local leads without increasing ad spend.</p>
+      <a href="https://example.com" class="cta-btn">View Strategy & Book 10-Min Demo</a>
+      <p style="margin-top: 24px; color: #64748b; font-size: 13px;">Best regards,<br>The Outreach Team</p>
+    </div>
+    <div class="footer">
+      <p style="margin: 0;">You received this because {{company}} is listed publicly in {{city}}. Reply STOP to unsubscribe.</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+function formatFileSize(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+}
+
 export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesProps) {
   const storageKey = `leadfinder_email_templates_v3:${workspaceId || "default"}`;
   const [templates, setTemplates] = useState<EmailTemplate[]>([]);
@@ -100,66 +214,24 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
   const [activeMode, setActiveMode] = useState<"builder" | "code">("builder");
   const [copiedNotification, setCopiedNotification] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
-  const [currentTab, setCurrentTab] = useState<"email" | "whatsapp">("email");
-  const [generationObjective, setGenerationObjective] = useState(
-    "Introduce our most relevant offering and start a sales conversation."
-  );
-  const [generationTone, setGenerationTone] = useState("");
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [generationError, setGenerationError] = useState("");
+  // This panel is the Email channel only. WhatsApp templates live in the
+  // component-based builder (MessageTemplatePanel), which the /app/templates
+  // channel switcher renders instead of this one. The old in-panel
+  // Email/WhatsApp tab pair duplicated that switcher, so it is gone.
   const [templateError, setTemplateError] = useState("");
   const [isLoadingTemplates, setIsLoadingTemplates] = useState(true);
-  const [legacyTemplates, setLegacyTemplates] = useState<EmailTemplate[]>([]);
-  const [legacyCodeTemplateCount, setLegacyCodeTemplateCount] = useState(0);
-  const [legacyStorageKeys, setLegacyStorageKeys] = useState<string[]>([]);
-  const [isImportingLegacy, setIsImportingLegacy] = useState(false);
-  const [generationResult, setGenerationResult] = useState<GeneratedTemplateResponse | null>(null);
   
-  const logoFileInputRef = React.useRef<HTMLInputElement>(null);
+  // Business Profile integration
+  const [businessProfile, setBusinessProfile] = useState<BusinessProfileView | null>(null);
+  const [isLoadingProfile, setIsLoadingProfile] = useState(false);
+  const [isAutoCreatingPack, setIsAutoCreatingPack] = useState(false);
 
-  const handleLogoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      setTemplateError("Please select a valid image file (PNG, JPG, SVG, WebP).");
-      return;
-    }
-    if (file.size > 2 * 1024 * 1024) {
-      setTemplateError("Logo image size must be under 2MB.");
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const dataUrl = event.target?.result as string;
-      if (dataUrl && selectedTemplate) {
-        setSelectedTemplate({
-          ...selectedTemplate,
-          useLogo: true,
-          logoType: "image",
-          logoValue: dataUrl,
-        });
-      }
-    };
-    reader.readAsDataURL(file);
-    e.target.value = "";
-  };
-  
-  const highlightVariables = (text: string) => {
-    if (!text) return "";
-    const parts = text.split(/(\{\{[^}]+\}\})/g);
-    return parts.map((part, idx) => {
-      if (part.startsWith("{{") && part.endsWith("}}")) {
-        return (
-          <strong key={idx} className="bg-indigo-150/90 dark:bg-indigo-950/70 text-indigo-700 dark:text-indigo-300 px-1 py-0.5 rounded font-bold text-[9px] border border-indigo-250/20 inline-block">
-            {part}
-          </strong>
-        );
-      }
-      return part;
-    });
-  };
-  
-  // AlertModal states
+  // File Upload Refs
+  const logoFileInputRef = useRef<HTMLInputElement>(null);
+  const docFileInputRef = useRef<HTMLInputElement>(null);
+  const activeInputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+
+  // Alert Modal
   const [modalConfig, setModalConfig] = useState<{
     isOpen: boolean;
     type: "success" | "confirm" | "danger" | "warning" | "info";
@@ -177,57 +249,25 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
     onConfirm: () => {}
   });
 
-  // Templates are workspace data: load them through the authenticated API so
-  // teammates, campaigns and other devices all see the same reviewed records.
+  // Load Templates & Business Profile
   useEffect(() => {
     let alive = true;
     setIsLoadingTemplates(true);
     setTemplateError("");
-    api.get<EmailTemplate[]>("/api/templates")
-      .then((rows) => {
-        if (alive) setTemplates(rows);
-      })
-      .catch((error) => {
-        if (alive) setTemplateError(messageOf(error));
-      })
-      .finally(() => {
-        if (alive) setIsLoadingTemplates(false);
-      });
 
-    // Existing browser-only records cannot be assigned silently. Surface an
-    // explicit import action for the currently selected workspace instead.
-    const candidates: EmailTemplate[] = [];
-    const seenIds = new Set<string>();
-    const keys: string[] = [];
-    let codeTemplateCount = 0;
-    for (const key of ["leadfinder_email_templates_v3", storageKey]) {
-      const saved = localStorage.getItem(key);
-      if (!saved) continue;
-      try {
-        const parsed = JSON.parse(saved);
-        if (!Array.isArray(parsed)) continue;
-        const reviewed = parsed.filter(
-          (template: EmailTemplate) =>
-            template && !String(template.id || "").startsWith("sample-")
-        );
-        for (const template of reviewed) {
-          if (template.designMode === "code") {
-            codeTemplateCount++;
-            continue;
-          }
-          const legacyId = String(template.id || "");
-          if (!legacyId || seenIds.has(legacyId)) continue;
-          seenIds.add(legacyId);
-          candidates.push(template);
-        }
-        if (reviewed.length) keys.push(key);
-      } catch {
-        // Leave malformed legacy data untouched; the user can clear it manually.
+    Promise.all([
+      api.get<EmailTemplate[]>("/api/templates").catch((err) => {
+        if (alive) setTemplateError(messageOf(err));
+        return [] as EmailTemplate[];
+      }),
+      api.get<BusinessProfileView>("/api/business/profile").catch(() => null)
+    ]).then(([templateRows, profileData]) => {
+      if (alive) {
+        setTemplates(templateRows || []);
+        if (profileData) setBusinessProfile(profileData);
+        setIsLoadingTemplates(false);
       }
-    }
-    setLegacyTemplates(candidates);
-    setLegacyCodeTemplateCount(codeTemplateCount);
-    setLegacyStorageKeys(keys);
+    });
 
     return () => {
       alive = false;
@@ -236,72 +276,45 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
 
   const upsertTemplate = (saved: EmailTemplate) => {
     setTemplates((current) => {
-      const exists = current.some((template) => template.id === saved.id);
+      const exists = current.some((t) => t.id === saved.id);
       return exists
-        ? current.map((template) => (template.id === saved.id ? saved : template))
+        ? current.map((t) => (t.id === saved.id ? saved : t))
         : [saved, ...current];
     });
   };
 
-  const handleImportLegacy = async () => {
-    if (!legacyTemplates.length) return;
-    setIsImportingLegacy(true);
-    setTemplateError("");
-    try {
-      const result = await api.post<{ templates: EmailTemplate[]; imported: number }>(
-        "/api/templates/import",
-        { templates: legacyTemplates }
-      );
-      setTemplates((current) => [...result.templates, ...current]);
-      const importedIds = new Set(legacyTemplates.map((template) => String(template.id)));
-      for (const key of legacyStorageKeys) {
-        const raw = localStorage.getItem(key);
-        if (!raw) continue;
-        try {
-          const parsed = JSON.parse(raw);
-          if (!Array.isArray(parsed)) continue;
-          const remaining = parsed.filter(
-            (template: EmailTemplate) => !importedIds.has(String(template?.id || ""))
-          );
-          if (remaining.length) localStorage.setItem(key, JSON.stringify(remaining));
-          else localStorage.removeItem(key);
-        } catch {
-          // Never delete a source key we could not safely update.
-        }
-      }
-      setLegacyTemplates([]);
-      setLegacyStorageKeys([]);
-    } catch (error) {
-      setTemplateError(messageOf(error));
-    } finally {
-      setIsImportingLegacy(false);
-    }
-  };
-
   const handleCreateNew = () => {
-    setGenerationResult(null);
+    const defaultSender = businessProfile?.senderName || "Founder";
+    const defaultBiz = businessProfile?.businessName || "";
+    const defaultEmail = businessProfile?.contactEmail || "";
+    const defaultPhone = businessProfile?.phone || "";
+    const defaultWebsite = businessProfile?.website || "";
+
     const newTpl: EmailTemplate = {
       id: `tpl-${Date.now()}`,
-      name: currentTab === "email" ? "Untitled Email Template" : "Untitled WhatsApp Template",
-      templateType: currentTab,
-      subject: "",
+      name: "New Email Outreach Template",
+      templateType: "email",
+      subject: "Quick question for {{company}}",
       designMode: "builder",
-      htmlCode: "",
-      useLogo: true,
-      logoType: "image",
-      logoValue: "/logo.png",
+      htmlCode: STARTER_HTML_TEMPLATE,
+      useLogo: Boolean(defaultBiz),
+      logoType: "text",
+      logoValue: defaultBiz || "/logo.png",
       textAlign: "left",
-      introText: "Hi {{company}} team,",
+      introText: "Hi {{name}},",
       useAiBody: false,
-      customBodyText: "",
-      useCta: false,
-      ctaText: "",
-      ctaUrl: "",
-      ctaBgColor: "#0f172a",
-      useContact: false,
-      contactText: "",
-      useFooter: false,
-      footerText: "",
+      customBodyText: defaultBiz
+        ? `I noticed {{company}} while researching leading {{category}} businesses in {{city}}.\n\nAt ${defaultBiz}, we specialize in helping companies like yours generate consistent high-intent inquiries and scale local market visibility.\n\nWe identified 2 key areas where {{company}} could quickly capture more inbound customers.`
+        : "We noticed your listing in {{city}} and wanted to offer...",
+      useCta: true,
+      ctaText: "Schedule a 10-Min Strategy Call",
+      ctaUrl: defaultWebsite || "https://example.com",
+      ctaBgColor: "#4f46e5",
+      useContact: Boolean(defaultEmail || defaultPhone),
+      contactText: `Best regards,\n${defaultSender}\n${defaultEmail}${defaultPhone ? ` | ${defaultPhone}` : ""}`,
+      useFooter: true,
+      footerText: "You are receiving this because {{company}} is publicly listed in {{city}}. Reply STOP to unsubscribe.",
+      attachments: [],
       createdAt: new Date().toISOString()
     };
     setSelectedTemplate(newTpl);
@@ -309,70 +322,265 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
     setIsEditing(true);
   };
 
-  const handleGenerateWithAi = async () => {
-    setIsGenerating(true);
-    setGenerationError("");
-    setGenerationResult(null);
-    try {
-      const result = await api.post<GeneratedTemplateResponse>("/api/templates/ai-draft", {
-        channel: currentTab,
-        objective: generationObjective,
-        tone: generationTone || undefined,
-      });
-      setGenerationResult(result);
-      setSelectedTemplate(result.draft);
-      setActiveMode("builder");
-      setIsEditing(true);
-    } catch (error) {
-      setGenerationError(messageOf(error));
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  const handleDuplicate = async (tpl: EmailTemplate, e: React.MouseEvent) => {
-    e.stopPropagation();
+  // 1-Click Auto-Create High-Converting Templates from Business Profile
+  const handleAutoCreateFromProfile = async () => {
+    setIsAutoCreatingPack(true);
     setTemplateError("");
     try {
-      const cloned = await api.post<EmailTemplate>("/api/templates", {
-        template: { ...tpl, name: `${tpl.name} (Copy)` },
+      const bizName = businessProfile?.businessName || "Our Company";
+      const bizDesc = businessProfile?.description || "drive consistent qualified inquiries and outperform local competitors";
+      const bizSender = businessProfile?.senderName || "Outreach Director";
+      const bizEmail = businessProfile?.contactEmail || "";
+      const bizPhone = businessProfile?.phone || "";
+      const bizWebsite = businessProfile?.website || "https://example.com";
+
+      const pack: Omit<EmailTemplate, "id" | "createdAt">[] = [
+        {
+          name: `${bizName} - Problem & Solution Pitch`,
+          templateType: "email",
+          subject: "Quick question for {{company}} regarding customer growth in {{city}}",
+          designMode: "builder",
+          htmlCode: "",
+          useLogo: true,
+          logoType: "text",
+          logoValue: bizName,
+          textAlign: "left",
+          introText: "Hi {{name}},",
+          useAiBody: false,
+          customBodyText: `I came across {{company}} while reviewing leading {{category}} businesses in {{city}}.\n\nAt ${bizName}, we help businesses like yours ${bizDesc}.\n\nWe identified 2 key areas where {{company}} could quickly capture more inbound customers this month.`,
+          useCta: true,
+          ctaText: "Schedule a 10-Min Strategy Call",
+          ctaUrl: bizWebsite,
+          ctaBgColor: "#4f46e5",
+          useContact: true,
+          contactText: `Best regards,\n${bizSender}\n${bizEmail}${bizPhone ? ` | ${bizPhone}` : ""}`,
+          useFooter: true,
+          footerText: "You received this because {{company}} is publicly listed in {{city}}. Reply STOP to unsubscribe.",
+          attachments: []
+        },
+        {
+          name: `${bizName} - Complimentary Growth Audit`,
+          templateType: "email",
+          subject: "Complimentary Performance & Visibility Audit for {{company}}",
+          designMode: "builder",
+          htmlCode: "",
+          useLogo: true,
+          logoType: "text",
+          logoValue: bizName,
+          textAlign: "left",
+          introText: "Hello {{name}},",
+          useAiBody: false,
+          customBodyText: `We recently analyzed local search rankings for {{category}} in {{city}} and compiled a 3-point performance audit specifically for {{company}}.\n\nThere are 2 high-traffic search terms your top competitors are capturing right now that could easily be directed to your website.\n\nWould you like me to send over the free 1-page breakdown?`,
+          useCta: true,
+          ctaText: "Claim Your Free Audit",
+          ctaUrl: bizWebsite,
+          ctaBgColor: "#059669",
+          useContact: true,
+          contactText: `Best regards,\n${bizSender}\n${bizEmail}`,
+          useFooter: true,
+          footerText: "Reply STOP to opt out.",
+          attachments: []
+        },
+        // The WhatsApp starter that used to be in this pack is gone: this panel
+        // is email-only now, so it would have created a template the list then
+        // filtered out. WhatsApp starters come from the component-based builder.
+      ];
+
+      const createdList: EmailTemplate[] = [];
+      for (const item of pack) {
+        const res = await api.post<EmailTemplate>("/api/templates", { template: item });
+        createdList.push(res);
+      }
+
+      setTemplates((prev) => [...createdList, ...prev]);
+      setModalConfig({
+        isOpen: true,
+        type: "success",
+        title: "Templates Auto-Created Successfully",
+        message: `Created ${createdList.length} high-converting email templates customized for ${bizName}. You can now use them or customize them anytime.`,
+        confirmLabel: "Awesome",
+        onConfirm: () => setModalConfig((p) => ({ ...p, isOpen: false }))
       });
-      upsertTemplate(cloned);
-    } catch (error) {
-      setTemplateError(messageOf(error));
+    } catch (err) {
+      setTemplateError(messageOf(err));
+    } finally {
+      setIsAutoCreatingPack(false);
     }
   };
 
+  // Populate active template with business profile details
+  const handlePopulateFromProfile = () => {
+    if (!selectedTemplate || !businessProfile) return;
+    const bizName = businessProfile.businessName || "";
+    const bizSender = businessProfile.senderName || "Founder";
+    const bizEmail = businessProfile.contactEmail || "";
+    const bizPhone = businessProfile.phone || "";
+    const bizWebsite = businessProfile.website || "";
+    const bizDesc = businessProfile.description || "scale qualified inquiries and dominate local presence";
+
+    setSelectedTemplate({
+      ...selectedTemplate,
+      useLogo: Boolean(bizName),
+      logoValue: bizName || selectedTemplate.logoValue,
+      customBodyText: selectedTemplate.customBodyText || `At ${bizName || "our firm"}, we help {{category}} companies like {{company}} in {{city}} ${bizDesc}.`,
+      ctaUrl: bizWebsite || selectedTemplate.ctaUrl,
+      useContact: true,
+      contactText: `Best regards,\n${bizSender}\n${bizEmail}${bizPhone ? ` | ${bizPhone}` : ""}`,
+    });
+  };
+
+  // Insert Variable Tag into Active or Focused Field
+  const handleInsertTag = (tag: string) => {
+    if (!selectedTemplate) return;
+    if (activeMode === "code") {
+      setSelectedTemplate({
+        ...selectedTemplate,
+        htmlCode: selectedTemplate.htmlCode ? `${selectedTemplate.htmlCode} ${tag}` : tag
+      });
+      return;
+    }
+
+    // Default to appending to body or subject
+    if (activeInputRef.current) {
+      const el = activeInputRef.current;
+      const start = el.selectionStart || 0;
+      const end = el.selectionEnd || 0;
+      const val = el.value;
+      const next = val.substring(0, start) + tag + val.substring(end);
+      el.value = next;
+      if (el.name === "subject") {
+        setSelectedTemplate({ ...selectedTemplate, subject: next });
+      } else if (el.name === "customBodyText") {
+        setSelectedTemplate({ ...selectedTemplate, customBodyText: next });
+      } else if (el.name === "introText") {
+        setSelectedTemplate({ ...selectedTemplate, introText: next });
+      }
+      setTimeout(() => {
+        el.focus();
+        el.setSelectionRange(start + tag.length, start + tag.length);
+      }, 0);
+    } else {
+      setSelectedTemplate({
+        ...selectedTemplate,
+        customBodyText: selectedTemplate.customBodyText ? `${selectedTemplate.customBodyText} ${tag}` : tag
+      });
+    }
+  };
+
+  // Image Upload Handler
+  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setTemplateError("Please select a valid image file (PNG, JPG, SVG, WebP).");
+      return;
+    }
+    if (file.size > 3 * 1024 * 1024) {
+      setTemplateError("Logo image size must be under 3MB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+      if (dataUrl && selectedTemplate) {
+        setSelectedTemplate({
+          ...selectedTemplate,
+          useLogo: true,
+          logoType: "image",
+          logoValue: dataUrl,
+        });
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
+
+  // Document Attachment Upload Handler (PDF, Word, Excel, etc.)
+  const handleDocUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0 || !selectedTemplate) return;
+
+    const currentAttachments = selectedTemplate.attachments || [];
+    if (currentAttachments.length >= 8) {
+      setTemplateError("Maximum 8 attachments allowed per template.");
+      return;
+    }
+
+    const fileList = Array.from(files) as File[];
+    let processed = 0;
+    const newAttachments: TemplateAttachment[] = [];
+
+    fileList.forEach((file: File) => {
+      if (file.size > 10 * 1024 * 1024) {
+        setTemplateError(`File "${file.name}" exceeds the 10MB limit.`);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const dataUrl = event.target?.result as string;
+        newAttachments.push({
+          id: `att-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+          name: file.name,
+          size: file.size,
+          type: file.type || "application/octet-stream",
+          dataUrl
+        });
+        processed++;
+        if (processed === fileList.length) {
+          setSelectedTemplate({
+            ...selectedTemplate,
+            attachments: [...currentAttachments, ...newAttachments]
+          });
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+
+    e.target.value = "";
+  };
+
+  const handleRemoveAttachment = (id: string) => {
+    if (!selectedTemplate) return;
+    setSelectedTemplate({
+      ...selectedTemplate,
+      attachments: (selectedTemplate.attachments || []).filter((a) => a.id !== id)
+    });
+  };
+
+  // Save Template
   const handleSave = async () => {
     if (!selectedTemplate) return;
     setSaveStatus("saving");
     setTemplateError("");
 
-    const exists = templates.some((template) => template.id === selectedTemplate.id);
+    const payload = {
+      ...selectedTemplate,
+      designMode: activeMode,
+      htmlCode: activeMode === "code" ? selectedTemplate.htmlCode : (selectedTemplate.htmlCode || ""),
+      attachments: selectedTemplate.attachments || []
+    };
+
+    const exists = templates.some((t) => t.id === selectedTemplate.id);
     try {
       const saved = exists
-        ? await api.put<EmailTemplate>(`/api/templates/${selectedTemplate.id}`, {
-            template: { ...selectedTemplate, designMode: "builder", htmlCode: "" },
-          })
-        : await api.post<EmailTemplate>("/api/templates", {
-            template: { ...selectedTemplate, designMode: "builder", htmlCode: "" },
-          });
+        ? await api.put<EmailTemplate>(`/api/templates/${selectedTemplate.id}`, { template: payload })
+        : await api.post<EmailTemplate>("/api/templates", { template: payload });
+
       upsertTemplate(saved);
       setSelectedTemplate(saved);
-      setActiveMode("builder");
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus("idle"), 2000);
       setModalConfig({
         isOpen: true,
         type: "success",
         title: "Template Saved Successfully",
-        message: `"${saved.name}" is now available to this workspace and can be selected when generating a campaign.`,
+        message: `"${saved.name}" has been saved and is ready for use in campaigns and outreach.`,
         confirmLabel: "Done",
-        onConfirm: () => setModalConfig((previous) => ({ ...previous, isOpen: false })),
+        onConfirm: () => setModalConfig((p) => ({ ...p, isOpen: false }))
       });
-    } catch (error) {
+    } catch (err) {
       setSaveStatus("idle");
-      setTemplateError(messageOf(error));
+      setTemplateError(messageOf(err));
     }
   };
 
@@ -382,69 +590,162 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
       isOpen: true,
       type: "danger",
       title: "Delete Outreach Template",
-      message: "Are you sure you want to permanently delete this outreach template shell? This action cannot be undone.",
+      message: "Are you sure you want to delete this template? This action cannot be undone.",
       confirmLabel: "Delete Template",
-      isLoading: false,
       onConfirm: async () => {
-        setModalConfig(prev => ({ ...prev, isLoading: true }));
-        setTemplateError("");
+        setModalConfig((p) => ({ ...p, isLoading: true }));
         try {
           await api.del(`/api/templates/${id}`);
-          setTemplates((current) => current.filter((template) => template.id !== id));
+          setTemplates((cur) => cur.filter((t) => t.id !== id));
           if (selectedTemplate?.id === id) {
             setSelectedTemplate(null);
             setIsEditing(false);
           }
-          setModalConfig({
-            isOpen: true,
-            type: "success",
-            title: "Template Deleted",
-            message: "The outreach template has been removed from this workspace.",
-            confirmLabel: "Done",
-            isLoading: false,
-            onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
-          });
-        } catch (error) {
-          setTemplateError(messageOf(error));
-          setModalConfig((previous) => ({ ...previous, isOpen: false, isLoading: false }));
+          setModalConfig((p) => ({ ...p, isOpen: false, isLoading: false }));
+        } catch (err) {
+          setTemplateError(messageOf(err));
+          setModalConfig((p) => ({ ...p, isOpen: false, isLoading: false }));
         }
       }
     });
   };
 
-  const handleEditClick = (tpl: EmailTemplate) => {
-    setGenerationResult(null);
-    setSelectedTemplate(tpl);
-    setActiveMode(tpl.designMode || "builder");
-    setIsEditing(true);
+  const handleDuplicate = async (tpl: EmailTemplate, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const cloned = await api.post<EmailTemplate>("/api/templates", {
+        template: { ...tpl, name: `${tpl.name} (Copy)` }
+      });
+      upsertTemplate(cloned);
+    } catch (err) {
+      setTemplateError(messageOf(err));
+    }
   };
 
-  // Compile output text for WhatsApp
+  // WhatsApp Compiler
   const generateWhatsappText = (tpl: EmailTemplate): string => {
-    let text = "";
-    if (tpl.introText.trim()) {
-      text += tpl.introText.trim() + "\n\n";
-    }
+    const parts: string[] = [];
+    if (tpl.introText.trim()) parts.push(tpl.introText.trim());
     if (tpl.useAiBody) {
-      text += "[🤖 AI Outreach Agent: A personalized campaign pitch based on prospect's GMB scores, priority tier, and city signals will be automatically generated and injected here during dispatches.]\n\n";
+      parts.push("[🤖 AI Personalization: A tailored pitch based on lead's reviews and category will be injected during campaign dispatch.]");
     } else if (tpl.customBodyText.trim()) {
-      text += tpl.customBodyText.trim() + "\n\n";
+      parts.push(tpl.customBodyText.trim());
     }
     if (tpl.useCta && tpl.ctaText.trim()) {
-      text += tpl.ctaText.trim() + " " + (tpl.ctaUrl || "") + "\n\n";
+      parts.push(`${tpl.ctaText.trim()}${tpl.ctaUrl ? " " + tpl.ctaUrl : ""}`);
     }
     if (tpl.useContact && tpl.contactText.trim()) {
-      text += tpl.contactText.trim() + "\n\n";
+      parts.push(tpl.contactText.trim());
     }
     if (tpl.useFooter && tpl.footerText.trim()) {
-      text += tpl.footerText.trim();
+      parts.push(tpl.footerText.trim());
     }
-    return text.trim();
+    return parts.join("\n\n").trim();
   };
 
-  // HTML compiler based on wizard schema (Email only)
+  // Modern HTML Email Compiler
   const generateHtml = (tpl: EmailTemplate): string => {
-    let html = `<!DOCTYPE html>
+    const align = tpl.textAlign || "left";
+    const textAlignCss = `text-align: ${align};`;
+    const marginCss = align === "center" ? "0 auto" : align === "right" ? "0 0 0 auto" : "0";
+
+    let logoHtml = "";
+    if (tpl.useLogo) {
+      const logoSrc = tpl.logoValue && tpl.logoValue.trim() ? tpl.logoValue.trim() : "/logo.png";
+      if (tpl.logoType === "image" || logoSrc.startsWith("data:") || logoSrc.startsWith("http") || logoSrc.startsWith("/")) {
+        logoHtml = `
+          <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 24px; border-bottom: 1px solid #f1f5f9; padding-bottom: 20px;">
+            <tr>
+              <td align="${align}">
+                <img src="${logoSrc}" alt="Logo" style="max-height: 48px; height: auto; max-width: 220px; object-fit: contain; margin: ${marginCss}; display: inline-block; border: 0;" />
+              </td>
+            </tr>
+          </table>`;
+      } else {
+        logoHtml = `
+          <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 24px; border-bottom: 1px solid #f1f5f9; padding-bottom: 20px;">
+            <tr>
+              <td align="${align}">
+                <span style="font-size: 20px; font-weight: 700; color: #0f172a; letter-spacing: -0.3px; font-family: 'Inter', sans-serif;">${logoSrc}</span>
+              </td>
+            </tr>
+          </table>`;
+      }
+    }
+
+    let greetingHtml = "";
+    if (tpl.introText.trim()) {
+      greetingHtml = `
+        <div style="font-size: 15px; color: #1e293b; font-weight: 600; margin-bottom: 16px; ${textAlignCss}">
+          ${tpl.introText.replace(/\n/g, "<br/>")}
+        </div>`;
+    }
+
+    let bodyHtml = "";
+    if (tpl.useAiBody) {
+      bodyHtml = `
+        <div style="padding: 16px 20px; background-color: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 10px; font-size: 13.5px; color: #475569; line-height: 1.6; margin-bottom: 20px; ${textAlignCss}">
+          <div style="font-weight: 600; color: #4f46e5; margin-bottom: 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;">✨ AI Dynamic Body (Tailored per lead during send)</div>
+          ${tpl.customBodyText.trim() ? tpl.customBodyText.replace(/\n/g, "<br/>") : "Our AI engine will analyze {{company}}'s digital presence, category, and city to write a completely tailored pitch."}
+        </div>`;
+    } else if (tpl.customBodyText.trim()) {
+      bodyHtml = `
+        <div style="font-size: 14px; color: #334155; line-height: 1.68; margin-bottom: 20px; white-space: pre-line; ${textAlignCss}">
+          ${tpl.customBodyText}
+        </div>`;
+    }
+
+    let ctaHtml = "";
+    if (tpl.useCta && tpl.ctaText.trim()) {
+      ctaHtml = `
+        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin: 26px 0;">
+          <tr>
+            <td align="${align}">
+              <table border="0" cellpadding="0" cellspacing="0" style="margin: ${marginCss};">
+                <tr>
+                  <td align="center" style="border-radius: 8px; background-color: ${tpl.ctaBgColor || "#4f46e5"};">
+                    <a href="${tpl.ctaUrl || "#"}" target="_blank" style="display: inline-block; padding: 12px 26px; font-size: 14px; font-weight: 600; color: #ffffff; text-decoration: none; border-radius: 8px; font-family: 'Inter', sans-serif;">
+                      ${tpl.ctaText}
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>`;
+    }
+
+    let attachmentsHtml = "";
+    if (tpl.attachments && tpl.attachments.length > 0) {
+      const attPills = tpl.attachments.map((a) => `
+        <span style="display: inline-block; padding: 6px 12px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 11.5px; color: #334155; margin: 4px 6px 4px 0;">
+          📎 <strong>${a.name}</strong> <span style="color: #64748b;">(${formatFileSize(a.size)})</span>
+        </span>
+      `).join("");
+      attachmentsHtml = `
+        <div style="margin: 24px 0 16px; padding: 14px 18px; background-color: #fafbfc; border-radius: 8px; border: 1px solid #e2e8f0;">
+          <div style="font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">Attached Documents (${tpl.attachments.length})</div>
+          <div>${attPills}</div>
+        </div>`;
+    }
+
+    let contactHtml = "";
+    if (tpl.useContact && tpl.contactText.trim()) {
+      contactHtml = `
+        <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #f1f5f9; font-size: 12.5px; color: #64748b; line-height: 1.6; white-space: pre-line; ${textAlignCss}">
+          ${tpl.contactText}
+        </div>`;
+    }
+
+    let footerHtml = "";
+    if (tpl.useFooter && tpl.footerText.trim()) {
+      footerHtml = `
+        <div style="margin-top: 16px; font-size: 11px; color: #94a3b8; line-height: 1.5; white-space: pre-line; ${textAlignCss}">
+          ${tpl.footerText}
+        </div>`;
+    }
+
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -454,154 +755,41 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
-<body style="margin: 0; padding: 0; background-color: #f8fafc; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased;">
-  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #f8fafc; padding: 24px 16px;">
+<body style="margin: 0; padding: 0; background-color: #f8fafc; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; -webkit-font-smoothing: antialiased;">
+  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #f8fafc; padding: 28px 16px;">
     <tr>
       <td align="center">
-        <!--[if mso]>
-        <table align="center" border="0" cellspacing="0" cellpadding="0" width="520" style="width: 520px;">
-        <tr>
-        <td align="center" valign="top" width="520">
-        <![endif]-->
-        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 520px; background-color: #ffffff; border-radius: 12px; overflow: hidden; border: 1px solid #e2e8f0;">
+        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 560px; background-color: #ffffff; border-radius: 14px; overflow: hidden; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
           <tr>
-            <td style="padding: 24px 28px 24px 28px;">`;
-
-    const align = tpl.textAlign || "left";
-    const textAlignCss = `text-align: ${align};`;
-    const marginCss = align === "center" ? "0 auto" : align === "right" ? "0 0 0 auto" : "0";
-
-    // 1. Logo Section
-    if (tpl.useLogo) {
-      const logoSrc = tpl.logoValue && tpl.logoValue.trim() ? tpl.logoValue.trim() : "/logo.png";
-      if (tpl.logoType === "image" || !tpl.logoValue.trim()) {
-        html += `
-              <!-- LOGO BANNER IMAGE -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 20px; border-bottom: 1px solid #f1f5f9; padding-bottom: 18px;">
-                <tr>
-                  <td align="${align}" style="${textAlignCss}">
-                    <img src="${logoSrc}" alt="Logo" style="max-height: 44px; height: auto; max-width: 190px; object-fit: contain; margin: ${marginCss}; display: inline-block; border: 0;" />
-                  </td>
-                </tr>
-              </table>`;
-      } else {
-        html += `
-              <!-- LOGO BANNER TEXT -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 20px; border-bottom: 1px solid #f1f5f9; padding-bottom: 18px;">
-                <tr>
-                  <td align="${align}" style="${textAlignCss}">
-                    <span style="font-size: 18px; font-weight: 600; color: #0f172a; letter-spacing: -0.2px; font-family: 'Inter', sans-serif; display: block; ${textAlignCss}">${tpl.logoValue}</span>
-                  </td>
-                </tr>
-              </table>`;
-      }
-    }
-
-    // 2. Greeting/Common message
-    if (tpl.introText.trim()) {
-      html += `
-              <!-- WELCOME / COMMON GREETING -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 14px;">
-                <tr>
-                  <td align="${align}" style="font-size: 13px; color: #334155; line-height: 1.6; white-space: pre-line; font-family: 'Inter', sans-serif; ${textAlignCss}">${tpl.introText}</td>
-                </tr>
-              </table>`;
-    }
-
-    // 3. Body Section
-    if (tpl.useAiBody) {
-      html += `
-              <!-- AI GENERATED OUTREACH BODY PLACEHOLDER -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 16px;">
-                <tr>
-                  <td align="${align}" style="padding: 14px 16px; background-color: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 8px; font-size: 13px; color: #475569; line-height: 1.6; font-family: 'Inter', sans-serif; ${textAlignCss}">
-                    <div style="font-weight: 600; color: #4f46e5; margin-bottom: 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;">✨ Dynamic AI Body (Tailored per lead during campaign send)</div>
-                    ${tpl.customBodyText?.trim() ? tpl.customBodyText : "Our AI Outreach Agent will automatically analyze {{company}}'s digital presence, GMB metrics, category and city signals to write a tailored pitch for every lead."}
-                  </td>
-                </tr>
-              </table>`;
-    } else if (tpl.customBodyText.trim()) {
-      html += `
-              <!-- CUSTOM OUTREACH BODY -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 16px;">
-                <tr>
-                  <td align="${align}" style="font-size: 13px; color: #334155; line-height: 1.6; white-space: pre-line; font-family: 'Inter', sans-serif; ${textAlignCss}">${tpl.customBodyText}</td>
-                </tr>
-              </table>`;
-    }
-
-    // 4. CTA Button Section
-    if (tpl.useCta && tpl.ctaText.trim()) {
-      html += `
-              <!-- CTA OUTREACH BUTTON -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin: 22px 0;">
-                <tr>
-                  <td align="${align}" style="${textAlignCss}">
-                    <table border="0" cellpadding="0" cellspacing="0" align="${align}" style="border-collapse: separate; margin: ${marginCss};">
-                      <tr>
-                        <td align="center" style="border-radius: 8px; background-color: ${tpl.ctaBgColor || "#0f172a"};">
-                          <a href="${tpl.ctaUrl || "#"}" target="_blank" style="display: inline-block; padding: 9px 20px; font-size: 13px; font-weight: 500; color: #ffffff; text-decoration: none; border-radius: 8px; font-family: 'Inter', sans-serif;">
-                            ${tpl.ctaText}
-                          </a>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>`;
-    }
-
-    // 5. Contact details Section
-    if (tpl.useContact && tpl.contactText.trim()) {
-      html += `
-              <!-- CONTACT OUTLET DETAILS -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-top: 20px; border-top: 1px solid #f1f5f9; padding-top: 12px; margin-bottom: 6px;">
-                <tr>
-                  <td align="${align}" style="font-size: 11px; color: #64748b; line-height: 1.5; white-space: pre-line; font-family: 'Inter', sans-serif; ${textAlignCss}">${tpl.contactText}</td>
-                </tr>
-              </table>`;
-    }
-
-    // 6. Footer Section
-    if (tpl.useFooter && tpl.footerText.trim()) {
-      html += `
-              <!-- OUTREACH FOOTER / DISCLAIMER -->
-              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-top: 6px;">
-                <tr>
-                  <td align="${align}" style="font-size: 10px; color: #94a3b8; line-height: 1.4; white-space: pre-line; font-family: 'Inter', sans-serif; ${textAlignCss}">${tpl.footerText}</td>
-                </tr>
-              </table>`;
-    }
-
-    html += `
+            <td style="padding: 28px 32px;">
+              ${logoHtml}
+              ${greetingHtml}
+              ${bodyHtml}
+              ${ctaHtml}
+              ${attachmentsHtml}
+              ${contactHtml}
+              ${footerHtml}
             </td>
           </tr>
         </table>
-        <!--[if mso]>
-        </td>
-        </tr>
-        </table>
-        <![endif]-->
       </td>
     </tr>
   </table>
 </body>
 </html>`;
-    return html;
   };
 
-  const handleCopyHtml = () => {
+  const handleCopyCode = () => {
     if (!selectedTemplate) return;
-    const codeToCopy = selectedTemplate.templateType === "email"
+    const text = selectedTemplate.templateType === "email"
       ? (activeMode === "code" ? selectedTemplate.htmlCode : generateHtml(selectedTemplate))
       : (activeMode === "code" ? selectedTemplate.htmlCode : generateWhatsappText(selectedTemplate));
 
-    navigator.clipboard.writeText(codeToCopy);
+    navigator.clipboard.writeText(text);
     setCopiedNotification(true);
     setTimeout(() => setCopiedNotification(false), 2000);
   };
 
-  // Compile live preview outputs
   const previewHtml = selectedTemplate && selectedTemplate.templateType === "email"
     ? (activeMode === "code" ? selectedTemplate.htmlCode : generateHtml(selectedTemplate))
     : "";
@@ -610,306 +798,264 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
     ? (activeMode === "code" ? selectedTemplate.htmlCode : generateWhatsappText(selectedTemplate))
     : "";
 
-  // Filter templates list based on active dashboard tab
-  const filteredTemplates = templates.filter(t => t.templateType === currentTab);
+  const highlightVariables = (text: string) => {
+    if (!text) return "";
+    const parts = text.split(/(\{\{[^}]+\}\})/g);
+    return parts.map((part, idx) => {
+      if (part.startsWith("{{") && part.endsWith("}}")) {
+        return (
+          <strong key={idx} className="bg-indigo-150/90 dark:bg-indigo-950/70 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded font-mono font-bold text-[10px] border border-indigo-250/20 inline-block mx-0.5">
+            {part}
+          </strong>
+        );
+      }
+      return part;
+    });
+  };
+
+  const filteredTemplates = templates.filter((t) => t.templateType === "email");
 
   return (
     <div className="space-y-6">
       {/* ── VIEW 1: TEMPLATE CARDS DASHBOARD GRID ── */}
       {!isEditing ? (
         <div className="space-y-6 animate-fadeIn">
-          {/* AI generation starts from the tenant's uploaded business knowledge. */}
-          <div className={`relative overflow-hidden rounded-xl border p-3.5 sm:p-4 transition-all ${
-            isLight
-              ? "border-indigo-200/90 bg-gradient-to-br from-indigo-50/70 to-white shadow-xs"
-              : "border-indigo-500/20 bg-gradient-to-br from-indigo-500/10 to-[#090d16] shadow-md"
+          {/* Business Profile Status Banner */}
+          <div className={`p-4 rounded-2xl border flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all ${
+            isLight ? "bg-gradient-to-r from-indigo-50/70 via-white to-indigo-50/40 border-indigo-100" : "bg-gradient-to-r from-indigo-950/20 via-[#090d16] to-indigo-950/10 border-indigo-900/30"
           }`}>
-            <div className="absolute -right-12 -top-12 h-32 w-32 rounded-full bg-indigo-500/10 blur-2xl pointer-events-none" />
-            <div className="relative grid gap-3 lg:grid-cols-[1fr_200px_auto] lg:items-end">
+            <div className="flex items-start md:items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-indigo-600/10 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                <Building className="h-5 w-5" />
+              </div>
               <div>
-                <div className="mb-1 flex items-center gap-1.5">
-                  <div className="p-1 rounded-md bg-indigo-500/10 text-indigo-500">
-                    <Sparkles className="h-3.5 w-3.5" />
-                  </div>
-                  <h3 className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
-                    AI Campaign Copy Generator
-                  </h3>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-900 dark:text-white">
+                    {businessProfile?.businessName ? businessProfile.businessName : "Business Profile"}
+                  </span>
+                  <span className={`text-[9.5px] font-bold px-2 py-0.5 rounded-full ${
+                    businessProfile?.businessName 
+                      ? "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20" 
+                      : "bg-amber-500/10 text-amber-500 border border-amber-500/20"
+                  }`}>
+                    {businessProfile?.businessName ? "Profile Linked" : "Setup Recommended"}
+                  </span>
                 </div>
-                <p className="mb-2 text-[10px] leading-relaxed text-slate-500">
-                  Gemini drafts hyper-relevant copy synthesized from your Company Profile, Products, and knowledge docs.
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
+                  {businessProfile?.businessName
+                    ? `${businessProfile.industry || "General Business"} • ${businessProfile.services?.length || 0} services configured. 1-click tailored templates ready.`
+                    : "Add your business info in Business Settings to auto-generate personalized outreach templates."}
                 </p>
-                <label className="mb-1 block text-[9px] font-bold uppercase tracking-wider text-slate-400">
-                  Campaign Objective
-                </label>
-                <textarea
-                  value={generationObjective}
-                  onChange={(event) => setGenerationObjective(event.target.value)}
-                  rows={2}
-                  maxLength={500}
-                  className={`w-full resize-none rounded-lg border px-2.5 py-1.5 text-xs outline-none transition-all focus:ring-2 focus:ring-indigo-500/15 ${
-                    isLight
-                      ? "border-slate-200 bg-white text-slate-800 focus:border-indigo-500"
-                      : "border-[#1e293b] bg-[#030712] text-white focus:border-indigo-500/60"
-                  }`}
-                />
               </div>
-              <div>
-                <label className="mb-1 block text-[9px] font-bold uppercase tracking-wider text-slate-400">
-                  Tone of Voice (Optional)
-                </label>
-                <input
-                  value={generationTone}
-                  onChange={(event) => setGenerationTone(event.target.value)}
-                  maxLength={120}
-                  placeholder="e.g. Consultative, direct"
-                  className={`w-full rounded-lg border px-2.5 py-2 text-xs outline-none transition-all focus:ring-2 focus:ring-indigo-500/15 ${
-                    isLight
-                      ? "border-slate-200 bg-white text-slate-800 focus:border-indigo-500"
-                      : "border-[#1e293b] bg-[#030712] text-white focus:border-indigo-500/60"
-                  }`}
-                />
-              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
               <button
-                onClick={handleGenerateWithAi}
-                disabled={isGenerating || !generationObjective.trim()}
-                className="btn-interactive flex items-center justify-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-600 via-indigo-500 to-violet-600 px-4 py-2 text-xs font-bold text-white shadow-xs shadow-indigo-600/20 transition-all hover:from-indigo-500 hover:to-violet-500 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+                onClick={handleAutoCreateFromProfile}
+                disabled={isAutoCreatingPack}
+                className="btn-interactive px-3.5 py-2 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 disabled:opacity-50 cursor-pointer transition-all"
+                title="Automatically creates high-converting email templates based on your business profile"
               >
-                {isGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                {isGenerating ? "Synthesizing…" : `Generate ${currentTab === "email" ? "Email" : "WhatsApp"}`}
+                {isAutoCreatingPack ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Wand2 className="h-3.5 w-3.5" />
+                )}
+                <span>{isAutoCreatingPack ? "Synthesizing..." : "Auto-Generate Templates"}</span>
               </button>
             </div>
-            {generationError && (
-              <div className="relative mt-2.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs text-rose-700">
-                {generationError}
-              </div>
-            )}
           </div>
 
-          {legacyTemplates.length > 0 && (
-            <div className={`flex flex-col gap-3 rounded-xl border px-4 py-3 sm:flex-row sm:items-center sm:justify-between ${
-              isLight
-                ? "border-amber-200 bg-amber-50 text-amber-900"
-                : "border-amber-500/20 bg-amber-500/10 text-amber-200"
-            }`}>
-              <div>
-                <div className="text-xs font-bold">Existing browser templates found</div>
-                <p className="mt-0.5 text-[10px] leading-relaxed opacity-80">
-                  Import {legacyTemplates.length} reviewed template{legacyTemplates.length === 1 ? "" : "s"} into this workspace so your team and Campaigns can use them.
-                </p>
-              </div>
-              <button
-                onClick={handleImportLegacy}
-                disabled={isImportingLegacy}
-                className="shrink-0 rounded-lg bg-amber-600 px-3 py-2 text-[10px] font-bold text-white hover:bg-amber-500 disabled:opacity-50"
-              >
-                {isImportingLegacy ? "Importing…" : "Import into this workspace"}
-              </button>
-            </div>
-          )}
-
-          {legacyCodeTemplateCount > 0 && (
-            <div className={`rounded-xl border px-4 py-3 ${
-              isLight
-                ? "border-slate-200 bg-slate-50 text-slate-700"
-                : "border-slate-700 bg-slate-900 text-slate-300"
-            }`}>
-              <div className="text-xs font-bold">
-                {legacyCodeTemplateCount} legacy code template{legacyCodeTemplateCount === 1 ? "" : "s"} kept in browser storage
-              </div>
-              <p className="mt-1 text-[10px] leading-relaxed opacity-75">
-                Arbitrary HTML or raw-code templates cannot be imported safely. They were not deleted; recreate their content with the safe builder or Generate with AI.
-              </p>
-            </div>
-          )}
-
           {templateError && (
-            <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700">
-              {templateError}
+            <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700 flex items-center justify-between">
+              <span>{templateError}</span>
+              <button onClick={() => setTemplateError("")} className="text-rose-500 hover:text-rose-700">
+                <X className="h-4 w-4" />
+              </button>
             </div>
           )}
 
-          {/* Header Channel selector & Add Action */}
+          {/* Tab Selector & New Template Action */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/60 dark:border-slate-800/60 pb-3">
-            {/* Tabs for Email vs WhatsApp */}
-            <div className={`inline-flex p-0.5 rounded-xl border transition-all ${
-              isLight ? "bg-slate-100/80 border-slate-200/80" : "bg-black/30 border-[#1e293b]"
-            }`}>
-              <button
-                onClick={() => setCurrentTab("email")}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                  currentTab === "email"
-                    ? "bg-indigo-600 text-white shadow-xs shadow-indigo-600/30"
-                    : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-white"
+            <div
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-bold transition-all ${
+                isLight
+                  ? "bg-slate-100/80 border-slate-200/80 text-slate-700"
+                  : "bg-black/30 border-[#1e293b] text-slate-300"
+              }`}
+            >
+              <Mail className="h-3.5 w-3.5 text-indigo-500" />
+              <span>Email Templates</span>
+              <span
+                className={`text-[9.5px] px-1.5 py-0.2 rounded-full font-bold tabular-nums ${
+                  isLight ? "bg-slate-200 text-slate-700" : "bg-slate-800 text-slate-300"
                 }`}
               >
-                <Mail className="h-3.5 w-3.5" /> 
-                <span>Email Templates</span>
-                <span className={`text-[9.5px] px-1.5 py-0.2 rounded-full font-bold tabular-nums ${
-                  currentTab === "email" ? "bg-white/20 text-white" : isLight ? "bg-slate-200 text-slate-700" : "bg-slate-800 text-slate-300"
-                }`}>
-                  {templates.filter(t => t.templateType === "email").length}
-                </span>
-              </button>
-              <button
-                onClick={() => setCurrentTab("whatsapp")}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                  currentTab === "whatsapp"
-                    ? "bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-xs shadow-emerald-600/30"
-                    : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-white"
-                }`}
-              >
-                <WhatsAppLogo className="h-3.5 w-3.5 fill-current" /> 
-                <span>WhatsApp Templates</span>
-                <span className={`text-[9.5px] px-1.5 py-0.2 rounded-full font-bold tabular-nums ${
-                  currentTab === "whatsapp" ? "bg-white/20 text-white" : isLight ? "bg-slate-200 text-slate-700" : "bg-slate-800 text-slate-300"
-                }`}>
-                  {templates.filter(t => t.templateType === "whatsapp").length}
-                </span>
-              </button>
+                {filteredTemplates.length}
+              </span>
             </div>
 
             <button
               onClick={handleCreateNew}
-              className={`btn-interactive px-3 py-1.5 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 shadow-xs cursor-pointer transition-all ${
-                currentTab === "whatsapp"
-                  ? "bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 shadow-emerald-600/20"
-                  : "bg-gradient-to-r from-indigo-600 via-indigo-500 to-violet-600 hover:from-indigo-500 hover:to-violet-500 shadow-indigo-600/20"
-              }`}
+              className="btn-interactive px-3.5 py-1.5 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 shadow-xs cursor-pointer transition-all bg-gradient-to-r from-indigo-600 via-indigo-500 to-violet-600 hover:from-indigo-500 hover:to-violet-500"
             >
               <PlusCircle className="h-3.5 w-3.5" />
-              <span>New {currentTab === "email" ? "Email" : "WhatsApp"} Template</span>
+              <span>Create New Email Template</span>
             </button>
           </div>
 
           {/* Cards Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {isLoadingTemplates && (
-              <div className={`col-span-full rounded-xl border p-8 text-center text-xs ${
+              <div className={`col-span-full rounded-2xl border p-12 text-center text-xs ${
                 isLight ? "border-slate-200 bg-white text-slate-500" : "border-[#1e293b] bg-[#090d16] text-slate-400"
               }`}>
-                <Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin text-indigo-500" />
-                Loading workspace templates…
+                <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-indigo-500" />
+                Loading templates…
               </div>
             )}
-            {!isLoadingTemplates && filteredTemplates.length === 0 && (
-              <div className={`col-span-full rounded-xl border border-dashed p-8 text-center relative overflow-hidden ${
-                isLight ? "border-indigo-200/90 bg-indigo-50/30" : "border-indigo-500/25 bg-indigo-500/5"
-              }`}>
-                <div className="w-10 h-10 rounded-xl bg-indigo-500/10 flex items-center justify-center mx-auto mb-2.5 text-indigo-500">
-                  <Sparkles className="h-5 w-5" />
-                </div>
-                <div className={`text-xs font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
-                  No {currentTab} templates yet
-                </div>
-                <p className="mx-auto mt-1 max-w-md text-[11px] leading-relaxed text-slate-500">
-                  Use the AI composer above to let Gemini create high-converting outreach copy based on your business signals.
-                </p>
-              </div>
-            )}
-            {filteredTemplates.map(tpl => {
-              const activeFeatures = [
-                tpl.useLogo && "Logo",
-                tpl.useAiBody ? "AI Body" : "Custom Body",
-                tpl.useCta && (tpl.templateType === "email" ? "CTA Button" : "CTA Link"),
-                tpl.useContact && "Contact",
-                tpl.useFooter && "Footer"
-              ].filter(Boolean);
 
+            {!isLoadingTemplates && filteredTemplates.length === 0 && (
+              <div className={`col-span-full rounded-2xl border border-dashed p-10 text-center ${
+                isLight ? "border-indigo-200/90 bg-indigo-50/20" : "border-indigo-500/20 bg-indigo-500/5"
+              }`}>
+                <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 flex items-center justify-center mx-auto mb-3 text-indigo-500">
+                  <Sparkles className="h-6 w-6" />
+                </div>
+                <div className={`text-sm font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                  No email templates yet
+                </div>
+                <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-slate-500">
+                  Click <strong>Auto-Generate Templates</strong> to create a ready-to-use template pack from your business details, or create one manually with custom hooks and attachments.
+                </p>
+                <div className="mt-4 flex items-center justify-center gap-3">
+                  <button
+                    onClick={handleAutoCreateFromProfile}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition-all shadow-sm cursor-pointer"
+                  >
+                    ✨ Auto-Generate Templates Pack
+                  </button>
+                  <button
+                    onClick={handleCreateNew}
+                    className={`px-4 py-2 border rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                      isLight ? "border-slate-300 hover:bg-slate-100 text-slate-700" : "border-slate-700 hover:bg-slate-800 text-slate-300"
+                    }`}
+                  >
+                    + Create Blank
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {filteredTemplates.map((tpl) => {
+              const attCount = tpl.attachments?.length || 0;
               return (
                 <div
                   key={tpl.id}
-                  className={`border rounded-xl p-3.5 flex flex-col justify-between h-42 transition-all duration-200 hover:-translate-y-1 hover:shadow-md cursor-pointer group ${
+                  className={`border rounded-2xl p-4 flex flex-col justify-between h-48 transition-all duration-200 hover:-translate-y-1 hover:shadow-md cursor-pointer group ${
                     isLight 
                       ? "bg-white border-slate-200 hover:border-indigo-300" 
                       : "bg-[#090d16] border-[#1e293b] hover:border-indigo-500/40"
                   }`}
-                  onClick={() => handleEditClick(tpl)}
+                  onClick={() => {
+                    setSelectedTemplate(tpl);
+                    setActiveMode(tpl.designMode || "builder");
+                    setIsEditing(true);
+                  }}
                 >
-                  <div className="space-y-2 flex-grow min-w-0">
-                    <div className="flex items-center justify-between">
+                  <div className="space-y-2.5 flex-grow min-w-0">
+                    <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2 min-w-0">
-                        <div className={`p-1.5 rounded-lg shrink-0 ${
+                        <div className={`p-2 rounded-xl shrink-0 ${
                           tpl.templateType === "email"
                             ? (isLight ? "bg-indigo-50 text-indigo-600" : "bg-indigo-950/40 text-indigo-400")
                             : (isLight ? "bg-emerald-50 text-emerald-600" : "bg-emerald-950/40 text-emerald-400")
                         }`}>
-                          {tpl.templateType === "email" ? <Mail className="h-3.5 w-3.5" /> : <WhatsAppLogo className="h-3.5 w-3.5 fill-emerald-500 text-emerald-500" />}
+                          {tpl.templateType === "email" ? <Mail className="h-4 w-4" /> : <WhatsAppLogo className="h-4 w-4 fill-emerald-500" />}
                         </div>
-                        <h4 className={`text-xs font-bold leading-tight truncate max-w-[150px] ${isLight ? "text-slate-900" : "text-white"}`}>
+                        <h4 className={`text-xs font-bold leading-tight truncate ${isLight ? "text-slate-900" : "text-white"}`}>
                           {tpl.name}
                         </h4>
                       </div>
-                      <span className={`text-[8.5px] font-bold px-1.5 py-0.2 rounded-full border uppercase shrink-0 ${
+                      <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full border uppercase shrink-0 ${
                         tpl.designMode === "code"
                           ? "bg-amber-500/10 border-amber-500/20 text-amber-400"
                           : "bg-indigo-500/10 border-indigo-500/20 text-indigo-400"
                       }`}>
-                        {tpl.designMode === "code" ? (tpl.templateType === "email" ? "HTML" : "TEXT") : "Wizard"}
+                        {tpl.designMode === "code" ? "Custom HTML" : "Visual"}
                       </span>
                     </div>
 
                     <div className="space-y-1">
                       {tpl.templateType === "email" ? (
-                        <div className="text-[10px] text-slate-400 font-medium truncate">
-                          <strong>Subject:</strong> {tpl.subject || "(No Subject)"}
+                        <div className="text-[11px] text-slate-500 truncate">
+                          <span className="font-semibold text-slate-400">Subject:</span> {tpl.subject || "(No Subject)"}
                         </div>
                       ) : (
-                        <p className="text-[10px] text-slate-400 line-clamp-2 italic leading-relaxed">
+                        <p className="text-[11px] text-slate-500 line-clamp-2 italic leading-relaxed">
                           {tpl.introText || tpl.customBodyText || "No text preview defined..."}
                         </p>
                       )}
-                      
-                      <div className="flex flex-wrap gap-1 mt-1">
-                        {activeFeatures.map((feat, idx) => (
-                          <span 
-                            key={idx} 
-                            className={`text-[8.5px] px-1.5 py-0.2 rounded font-medium ${
-                              feat === "AI Body"
-                                ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/15"
-                                : isLight ? "bg-slate-100 text-slate-600" : "bg-slate-900 text-slate-400"
-                            }`}
-                          >
-                            {feat}
+
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        {tpl.useLogo && (
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${isLight ? "bg-slate-100 text-slate-600" : "bg-slate-900 text-slate-400"}`}>
+                            Logo
                           </span>
-                        ))}
+                        )}
+                        {tpl.useCta && (
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${isLight ? "bg-slate-100 text-slate-600" : "bg-slate-900 text-slate-400"}`}>
+                            CTA Button
+                          </span>
+                        )}
+                        {attCount > 0 && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20 flex items-center gap-1">
+                            <Paperclip className="h-2.5 w-2.5" />
+                            {attCount} {attCount === 1 ? "file" : "files"}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
 
-                  <div className={`pt-2 border-t flex items-center justify-between text-[10px] ${
+                  <div className={`pt-2.5 border-t flex items-center justify-between text-[11px] ${
                     isLight ? "border-slate-100" : "border-[#1e293b]/60"
                   }`}>
-                    <span className="text-slate-500 flex items-center gap-1 text-[9.5px]">
-                      <Clock className="h-2.5 w-2.5" />
+                    <span className="text-slate-400 flex items-center gap-1 text-[10px]">
+                      <Clock className="h-3 w-3" />
                       {new Date(tpl.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                     </span>
 
-                    <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
                       <button
                         onClick={(e) => handleDuplicate(tpl, e)}
-                        className={`p-1 rounded-md border hover:scale-105 transition-all cursor-pointer ${
+                        className={`p-1.5 rounded-lg border hover:scale-105 transition-all cursor-pointer ${
                           isLight 
                             ? "border-slate-200 bg-white hover:bg-slate-50 text-slate-500" 
                             : "border-slate-800 bg-[#0c111d] hover:bg-slate-800 text-slate-400"
                         }`}
-                        title="Duplicate Template"
+                        title="Duplicate"
                       >
-                        <Copy className="h-3 w-3" />
+                        <Copy className="h-3.5 w-3.5" />
                       </button>
                       <button
                         onClick={(e) => handleDelete(tpl.id, e)}
-                        className={`p-1 rounded-md border hover:scale-105 hover:text-rose-500 hover:border-rose-500/30 transition-all cursor-pointer ${
+                        className={`p-1.5 rounded-lg border hover:scale-105 hover:text-rose-500 hover:border-rose-500/30 transition-all cursor-pointer ${
                           isLight 
                             ? "border-slate-200 bg-white hover:bg-slate-50 text-slate-500" 
                             : "border-slate-800 bg-[#0c111d] hover:bg-slate-800 text-slate-400"
                         }`}
-                        title="Delete Template"
+                        title="Delete"
                       >
-                        <Trash2 className="h-3 w-3" />
+                        <Trash2 className="h-3.5 w-3.5" />
                       </button>
                       <button
-                        onClick={() => handleEditClick(tpl)}
-                        className="px-2 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold transition-all cursor-pointer shadow-2xs"
+                        onClick={() => {
+                          setSelectedTemplate(tpl);
+                          setActiveMode(tpl.designMode || "builder");
+                          setIsEditing(true);
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold transition-all cursor-pointer shadow-xs"
                       >
                         Edit
                       </button>
@@ -919,733 +1065,921 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
               );
             })}
 
-            {/* Create Card placeholder */}
+            {/* Create Blank Card */}
             <div
               onClick={handleCreateNew}
-              className={`border border-dashed rounded-xl flex flex-col items-center justify-center h-42 transition-all hover:border-indigo-500/50 cursor-pointer group ${
-                isLight ? "bg-slate-50/30 border-slate-300" : "bg-slate-900/10 border-slate-800"
+              className={`border border-dashed rounded-2xl flex flex-col items-center justify-center h-48 transition-all hover:border-indigo-500/60 cursor-pointer group ${
+                isLight ? "bg-slate-50/40 border-slate-300" : "bg-slate-900/10 border-slate-800"
               }`}
             >
-              <div className={`p-2.5 rounded-xl mb-2 transition-all group-hover:scale-110 ${
-                isLight ? "bg-slate-100 text-slate-500" : "bg-slate-800/40 text-slate-400"
+              <div className={`p-3 rounded-2xl mb-2 transition-all group-hover:scale-110 ${
+                isLight ? "bg-slate-100 text-slate-600" : "bg-slate-800/50 text-slate-300"
               }`}>
-                <PlusCircle className="h-4 w-4" />
+                <PlusCircle className="h-5 w-5" />
               </div>
-              <span className={`text-xs font-bold ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+              <span className={`text-xs font-bold ${isLight ? "text-slate-800" : "text-slate-200"}`}>
                 Create Blank Template
               </span>
-              <span className="text-[10px] text-slate-500 mt-0.5">
-                Design custom blocks from scratch
+              <span className="text-[10px] text-slate-400 mt-0.5">
+                Design custom email or paste HTML code
               </span>
             </div>
           </div>
         </div>
       ) : (
-        /* ── VIEW 2: TEMPLATE EDITOR / WIZARD WORKSPACE ── */
-        <div className="space-y-6 animate-fadeIn">
-          {/* Back button row */}
-          <div className="flex items-center justify-between">
-            <button
-              onClick={() => setIsEditing(false)}
-              className={`px-3 py-1.5 border rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                isLight 
-                  ? "border-slate-200 hover:bg-slate-50 text-slate-600" 
-                  : "border-[#1e293b] hover:bg-slate-800 text-slate-350"
-              }`}
-            >
-              <ArrowLeft className="h-3.5 w-3.5" />
-              <span>Back to Templates</span>
-            </button>
+        /* ── VIEW 2: SIMPLIFIED TEMPLATE EDITOR WORKSPACE ── */
+        <div className="space-y-5 animate-fadeIn">
+          {/* Top Bar: Back, Name, Channel, Mode Toggle, Save */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                onClick={() => setIsEditing(false)}
+                className={`px-3 py-1.5 border rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shrink-0 ${
+                  isLight 
+                    ? "border-slate-200 hover:bg-slate-50 text-slate-600" 
+                    : "border-[#1e293b] hover:bg-slate-800 text-slate-300"
+                }`}
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                <span>Back</span>
+              </button>
 
-            <span className={`text-[10px] font-bold uppercase tracking-wider px-3 py-1 rounded-lg flex items-center gap-1.5 ${
-              selectedTemplate?.templateType === "email"
-                ? "bg-indigo-500/10 text-indigo-400"
-                : "bg-emerald-500/10 text-emerald-455"
-            }`}>
-              {selectedTemplate?.templateType === "email" ? (
-                <><Mail className="h-3.5 w-3.5" /> Email outreach channel</>
-              ) : (
-                <><WhatsAppLogo className="h-3.5 w-3.5 fill-emerald-500 text-emerald-500" /> WhatsApp outreach channel</>
+              <div className="min-w-0 flex items-center gap-2">
+                <input
+                  type="text"
+                  value={selectedTemplate?.name || ""}
+                  onChange={(e) => selectedTemplate && setSelectedTemplate({ ...selectedTemplate, name: e.target.value })}
+                  placeholder="Template Name..."
+                  className={`text-sm font-bold bg-transparent outline-none border-b border-transparent focus:border-indigo-500 px-1 py-0.5 transition-colors max-w-[280px] md:max-w-[360px] truncate ${
+                    isLight ? "text-slate-900" : "text-white"
+                  }`}
+                />
+                <span className={`text-[9.5px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full shrink-0 ${
+                  selectedTemplate?.templateType === "email"
+                    ? "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20"
+                    : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                }`}>
+                  {selectedTemplate?.templateType === "email" ? "Email" : "WhatsApp"}
+                </span>
+              </div>
+            </div>
+
+            {/* Actions: Visual Builder / Custom HTML Toggle, Copy, Save */}
+            <div className="flex items-center gap-2 shrink-0">
+              {selectedTemplate?.templateType === "email" && (
+                <div className={`p-0.5 rounded-xl border flex items-center ${
+                  isLight ? "bg-slate-100 border-slate-200" : "bg-black/30 border-slate-800"
+                }`}>
+                  <button
+                    onClick={() => setActiveMode("builder")}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                      activeMode === "builder"
+                        ? "bg-indigo-600 text-white shadow-xs"
+                        : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    <LayoutIcon className="h-3 w-3" />
+                    <span>Visual Builder</span>
+                  </button>
+                  <button
+                    onClick={() => setActiveMode("code")}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                      activeMode === "code"
+                        ? "bg-indigo-600 text-white shadow-xs"
+                        : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    <Code className="h-3 w-3" />
+                    <span>Custom HTML Code</span>
+                  </button>
+                </div>
               )}
-            </span>
+
+              <button
+                onClick={handleCopyCode}
+                className={`p-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                  isLight 
+                    ? "border-slate-200 hover:bg-slate-50 text-slate-600" 
+                    : "border-[#1e293b] hover:bg-slate-800 text-slate-300"
+                }`}
+                title="Copy code or outreach text"
+              >
+                {copiedNotification ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+                <span className="hidden sm:inline">{copiedNotification ? "Copied!" : "Copy"}</span>
+              </button>
+
+              <button
+                onClick={handleSave}
+                disabled={saveStatus === "saving"}
+                className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm cursor-pointer transition-all disabled:opacity-50"
+              >
+                {saveStatus === "saving" ? (
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                ) : saveStatus === "saved" ? (
+                  <Check className="h-3.5 w-3.5 text-white" />
+                ) : (
+                  <Save className="h-3.5 w-3.5" />
+                )}
+                <span>{saveStatus === "saving" ? "Saving..." : saveStatus === "saved" ? "Saved" : "Save Template"}</span>
+              </button>
+            </div>
           </div>
 
-          {generationResult && (
-            <div className={`rounded-xl border px-4 py-3 text-xs ${
-              isLight
-                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-                : "border-emerald-500/20 bg-emerald-500/10 text-emerald-200"
-            }`}>
-              <div className="flex items-start gap-2">
-                <Sparkles className="mt-0.5 h-4 w-4 shrink-0" />
-                <div className="min-w-0">
-                  <div className="font-bold">
-                    AI draft ready — review and edit before saving
-                  </div>
-                  {generationResult.rationale && (
-                    <p className="mt-1 leading-relaxed">{generationResult.rationale}</p>
-                  )}
-                  <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[10px] opacity-75">
-                    <span>Confidence {Math.round(generationResult.confidence * 100)}%</span>
-                    <span>{generationResult.provider} / {generationResult.model}</span>
-                    <span>
-                      {generationResult.sources.length
-                        ? `${generationResult.sources.length} uploaded source${generationResult.sources.length === 1 ? "" : "s"}`
-                        : "Profile and catalogue context"}
-                    </span>
-                  </div>
-                  {generationResult.missingInformation.length > 0 && (
-                    <p className="mt-2 text-[10px] leading-relaxed">
-                      Could be improved with: {generationResult.missingInformation.join(" • ")}
-                    </p>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
           {templateError && (
-            <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700">
-              {templateError}
+            <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-xs text-rose-700 flex items-center justify-between">
+              <span>{templateError}</span>
+              <button onClick={() => setTemplateError("")} className="text-rose-500 hover:text-rose-700">
+                <X className="h-4 w-4" />
+              </button>
             </div>
           )}
 
-          {/* Top Metadata row */}
-          {selectedTemplate && (
-            <div className={`border rounded-2xl p-4.5 space-y-4 ${
-              isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
-            }`}>
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                <div className="flex-1 space-y-1.5">
-                  <input
-                    type="text"
-                    value={selectedTemplate.name}
-                    onChange={(e) => setSelectedTemplate({ ...selectedTemplate, name: e.target.value })}
-                    placeholder="Template Name"
-                    className={`w-full bg-transparent border-b text-sm font-bold pb-1 outline-none ${
-                      isLight 
-                        ? "border-slate-200 text-slate-900 focus:border-indigo-500" 
-                        : "border-slate-800 text-white focus:border-indigo-400"
-                    }`}
-                  />
-                  {selectedTemplate.templateType === "email" && (
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase">Email Subject:</span>
-                      <input
-                        type="text"
-                        value={selectedTemplate.subject}
-                        onChange={(e) => setSelectedTemplate({ ...selectedTemplate, subject: e.target.value })}
-                        placeholder="Enter email campaign subject line"
-                        className={`flex-1 bg-transparent text-xs outline-none ${
-                          isLight ? "text-slate-700" : "text-slate-350"
-                        }`}
-                      />
-                    </div>
-                  )}
-                </div>
-
-                {/* Mode switch and actions */}
-                <div className="flex items-center gap-2">
-                  <div className={`flex items-center rounded-lg border px-3 py-1.5 text-[10px] font-bold uppercase ${
-                    isLight ? "border-slate-200 bg-slate-50 text-slate-600" : "border-[#1e293b] bg-slate-950/40 text-slate-300"
-                  }`}>
-                    <LayoutIcon className="mr-1.5 h-3.5 w-3.5" /> Safe builder
-                  </div>
-
-                  <button
-                    onClick={handleCopyHtml}
-                    className={`p-2 rounded-lg border text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                      isLight 
-                        ? "border-slate-200 hover:bg-slate-50 text-slate-600" 
-                        : "border-[#1e293b] hover:bg-slate-800 text-slate-300"
-                    }`}
-                    title={selectedTemplate.templateType === "email" ? "Copy generated HTML" : "Copy outreach text"}
-                  >
-                    {copiedNotification ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Code className="h-3.5 w-3.5" />}
-                    <span className="hidden md:inline">{copiedNotification ? "Copied" : (selectedTemplate.templateType === "email" ? "Copy HTML" : "Copy Text")}</span>
-                  </button>
-
-                  <button
-                    onClick={handleSave}
-                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 shadow-md shadow-indigo-600/10 cursor-pointer transition-all hover:scale-[1.02]"
-                  >
-                    {saveStatus === "saving" ? (
-                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                    ) : saveStatus === "saved" ? (
-                      <Check className="h-3.5 w-3.5 text-white" />
-                    ) : (
-                      <Save className="h-3.5 w-3.5" />
-                    )}
-                    <span>{saveStatus === "saving" ? "Saving..." : saveStatus === "saved" ? "Saved" : "Save"}</span>
-                  </button>
-                </div>
-              </div>
+          {/* Quick Dynamic Variable Tag Bar */}
+          <div className={`p-3 rounded-2xl border flex flex-col md:flex-row md:items-center justify-between gap-2.5 ${
+            isLight ? "bg-white border-slate-200/90" : "bg-[#090d16] border-[#1e293b]"
+          }`}>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">
+                Insert Lead Variables:
+              </span>
+              <span className="text-[10px] text-slate-500 hidden lg:inline">
+                (Click any variable to insert)
+              </span>
             </div>
-          )}
+            <div className="flex flex-wrap items-center gap-1.5">
+              {DYNAMIC_VARIABLES.map((v) => (
+                <button
+                  key={v.tag}
+                  type="button"
+                  onClick={() => handleInsertTag(v.tag)}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold transition-all cursor-pointer border hover:scale-105 active:scale-95 ${
+                    isLight 
+                      ? "bg-slate-50 hover:bg-indigo-50 hover:border-indigo-300 text-slate-700 border-slate-200" 
+                      : "bg-slate-900/60 hover:bg-indigo-950/60 hover:border-indigo-500/40 text-slate-300 border-slate-800"
+                  }`}
+                  title={`${v.label} (e.g. ${v.sample})`}
+                >
+                  + {v.tag}
+                </button>
+              ))}
 
-          {/* Form and Preview Splits */}
+              {businessProfile?.businessName && (
+                <button
+                  type="button"
+                  onClick={handlePopulateFromProfile}
+                  className="px-2.5 py-1 rounded-lg text-[10px] font-bold text-indigo-500 hover:text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10 transition-all cursor-pointer flex items-center gap-1 ml-1"
+                  title="Auto-fill with company name, sender, services and website from business profile"
+                >
+                  <Sparkles className="h-3 w-3" />
+                  <span>Use Business Info</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Split Work Area: Left Form/Code Editor - Right Live Preview */}
           {selectedTemplate && (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
-              {/* Left Column: Form Builder wizard */}
-              <div className={`border rounded-2xl flex flex-col justify-between overflow-hidden ${
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+              {/* Left Column: Form or Code */}
+              <div className={`border rounded-2xl p-5 space-y-5 ${
                 isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
               }`}>
                 {activeMode === "builder" ? (
-                  /* STRUCTURED OUTREACH WIZARD FORM */
-                  <div className="p-4 space-y-4 overflow-y-auto max-h-[560px] pr-1">
-                    <div className="flex items-center justify-between pb-1.5 border-b border-slate-800/10">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                        {selectedTemplate.templateType === "email" ? "Email Layout Shell Wizard" : "WhatsApp Outreach Wizard"}
-                      </span>
-                      {selectedTemplate.templateType === "email" && (
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-[10px] font-semibold text-slate-400">Align:</span>
-                          <div className={`flex items-center rounded-lg p-0.5 border ${
-                            isLight ? "bg-slate-100 border-slate-200" : "bg-slate-900 border-slate-800"
-                          }`}>
-                            <button
-                              type="button"
-                              onClick={() => setSelectedTemplate({ ...selectedTemplate, textAlign: "left" })}
-                              title="Align Left (Recommended for business emails)"
-                              className={`px-2 py-0.5 rounded text-xs transition-colors flex items-center gap-1 cursor-pointer ${
-                                (selectedTemplate.textAlign || "left") === "left"
-                                  ? "bg-indigo-600 text-white font-medium shadow-sm"
-                                  : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-slate-200"
-                              }`}
-                            >
-                              <AlignLeft className="h-3 w-3" />
-                              <span className="text-[10px]">Left</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setSelectedTemplate({ ...selectedTemplate, textAlign: "center" })}
-                              title="Align Center"
-                              className={`px-2 py-0.5 rounded text-xs transition-colors flex items-center gap-1 cursor-pointer ${
-                                selectedTemplate.textAlign === "center"
-                                  ? "bg-indigo-600 text-white font-medium shadow-sm"
-                                  : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-slate-200"
-                              }`}
-                            >
-                              <AlignCenter className="h-3 w-3" />
-                              <span className="text-[10px]">Center</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setSelectedTemplate({ ...selectedTemplate, textAlign: "right" })}
-                              title="Align Right"
-                              className={`px-2 py-0.5 rounded text-xs transition-colors flex items-center gap-1 cursor-pointer ${
-                                selectedTemplate.textAlign === "right"
-                                  ? "bg-indigo-600 text-white font-medium shadow-sm"
-                                  : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-slate-200"
-                              }`}
-                            >
-                              <AlignRight className="h-3 w-3" />
-                              <span className="text-[10px]">Right</span>
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* 1. Logo Section (Only Email) */}
+                  /* ── VISUAL BUILDER MODE ── */
+                  <div className="space-y-5">
+                    {/* 1. Subject Line (Email Only) with Quick Suggestions */}
                     {selectedTemplate.templateType === "email" && (
-                      <div className={`border rounded-xl p-3 space-y-3 ${isLight ? "bg-slate-50/50 border-slate-100" : "bg-slate-900/30 border-slate-800/60"}`}>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold flex items-center justify-between text-slate-700 dark:text-slate-200">
+                          <span className="flex items-center gap-1.5">
+                            <Mail className="h-3.5 w-3.5 text-indigo-500" />
+                            Email Campaign Subject Line
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-normal">Supports dynamic tags</span>
+                        </label>
+                        <input
+                          ref={(el) => { if (el) el.name = "subject"; }}
+                          onFocus={(e) => { activeInputRef.current = e.target; }}
+                          type="text"
+                          value={selectedTemplate.subject}
+                          onChange={(e) => setSelectedTemplate({ ...selectedTemplate, subject: e.target.value })}
+                          placeholder="e.g. Quick question regarding {{company}} in {{city}}"
+                          className={`w-full p-2.5 text-xs rounded-xl border outline-none font-medium transition-all focus:border-indigo-500 ${
+                            isLight ? "bg-slate-50/50 border-slate-200 text-slate-900" : "bg-slate-950/60 border-slate-800 text-slate-100"
+                          }`}
+                        />
+
+                        {/* Subject Suggestions */}
+                        <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                          <span className="text-[9.5px] font-bold text-slate-400 mr-1">Suggestions:</span>
+                          {SUBJECT_SUGGESTIONS.map((subj, idx) => (
+                            <button
+                              key={idx}
+                              type="button"
+                              onClick={() => setSelectedTemplate({ ...selectedTemplate, subject: subj })}
+                              className={`text-[9.5px] px-2 py-0.5 rounded-md border transition-all cursor-pointer truncate max-w-[220px] ${
+                                isLight 
+                                  ? "bg-slate-100 hover:bg-indigo-50 hover:border-indigo-200 text-slate-600" 
+                                  : "bg-slate-900/60 hover:bg-slate-850 hover:border-slate-700 text-slate-400"
+                              }`}
+                              title={subj}
+                            >
+                              {subj}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 2. Brand Header / Logo Section (Email only) */}
+                    {selectedTemplate.templateType === "email" && (
+                      <div className={`p-4 rounded-xl border space-y-3 ${
+                        isLight ? "bg-slate-50/60 border-slate-200/80" : "bg-slate-950/40 border-slate-800/80"
+                      }`}>
                         <div className="flex items-center justify-between">
-                          <label className="flex items-center gap-2 text-xs font-semibold select-none cursor-pointer">
+                          <label className="flex items-center gap-2 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer">
                             <input
                               type="checkbox"
                               checked={selectedTemplate.useLogo}
                               onChange={(e) => setSelectedTemplate({ ...selectedTemplate, useLogo: e.target.checked })}
                               className="rounded text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
                             />
-                            <span>1. Add Brand Logo Banner</span>
+                            <span>Include Brand Header / Logo</span>
                           </label>
+
+                          {selectedTemplate.useLogo && (
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedTemplate({ ...selectedTemplate, textAlign: "left" })}
+                                className={`p-1 rounded-md border ${
+                                  (selectedTemplate.textAlign || "left") === "left"
+                                    ? "bg-indigo-600 text-white border-indigo-600"
+                                    : isLight ? "border-slate-200 text-slate-600" : "border-slate-800 text-slate-400"
+                                }`}
+                                title="Align Left"
+                              >
+                                <AlignLeft className="h-3 w-3" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedTemplate({ ...selectedTemplate, textAlign: "center" })}
+                                className={`p-1 rounded-md border ${
+                                  selectedTemplate.textAlign === "center"
+                                    ? "bg-indigo-600 text-white border-indigo-600"
+                                    : isLight ? "border-slate-200 text-slate-600" : "border-slate-800 text-slate-400"
+                                }`}
+                                title="Align Center"
+                              >
+                                <AlignCenter className="h-3 w-3" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedTemplate({ ...selectedTemplate, textAlign: "right" })}
+                                className={`p-1 rounded-md border ${
+                                  selectedTemplate.textAlign === "right"
+                                    ? "bg-indigo-600 text-white border-indigo-600"
+                                    : isLight ? "border-slate-200 text-slate-600" : "border-slate-800 text-slate-400"
+                                }`}
+                                title="Align Right"
+                              >
+                                <AlignRight className="h-3 w-3" />
+                              </button>
+                            </div>
+                          )}
                         </div>
 
                         {selectedTemplate.useLogo && (
-                          <div className="grid grid-cols-1 gap-2.5 pl-5.5 animate-fadeIn">
-                            <div className="flex items-center gap-3 text-[10px]">
-                              <label className="flex items-center gap-1 cursor-pointer">
-                                <input
-                                  type="radio"
-                                  name="logoType"
-                                  checked={selectedTemplate.logoType === "image"}
-                                  onChange={() => setSelectedTemplate({ ...selectedTemplate, logoType: "image" })}
-                                  className="text-indigo-600 focus:ring-indigo-500"
-                                />
-                                <span className="font-medium">Logo Image</span>
-                              </label>
-                              <label className="flex items-center gap-1 cursor-pointer">
-                                <input
-                                  type="radio"
-                                  name="logoType"
-                                  checked={selectedTemplate.logoType === "text"}
-                                  onChange={() => setSelectedTemplate({ ...selectedTemplate, logoType: "text" })}
-                                  className="text-indigo-600 focus:ring-indigo-500"
-                                />
-                                <span>Text Logo</span>
-                              </label>
-                            </div>
+                          <div className="space-y-3 pt-1">
+                            <input
+                              type="file"
+                              ref={logoFileInputRef}
+                              accept="image/png,image/jpeg,image/svg+xml,image/webp"
+                              onChange={handleLogoUpload}
+                              className="hidden"
+                            />
 
-                            {selectedTemplate.logoType === "image" ? (
-                              <div className="space-y-2">
-                                <input
-                                  type="file"
-                                  ref={logoFileInputRef}
-                                  accept="image/png,image/jpeg,image/svg+xml,image/webp"
-                                  onChange={handleLogoFileUpload}
-                                  className="hidden"
-                                />
-                                
-                                {selectedTemplate.logoValue && selectedTemplate.logoValue.trim() ? (
-                                  <div className={`p-2.5 rounded-lg border flex items-center justify-between gap-3 ${
-                                    isLight ? "bg-white border-slate-200" : "bg-slate-950 border-slate-800"
+                            {selectedTemplate.logoValue && (selectedTemplate.logoValue.startsWith("data:") || selectedTemplate.logoValue.startsWith("http") || selectedTemplate.logoValue.startsWith("/")) ? (
+                              <div className={`p-3 rounded-xl border flex items-center justify-between gap-3 ${
+                                isLight ? "bg-white border-slate-200" : "bg-slate-900 border-slate-800"
+                              }`}>
+                                <div className="flex items-center gap-3 min-w-0">
+                                  <div className={`h-12 w-20 rounded-lg border flex items-center justify-center p-1 shrink-0 overflow-hidden ${
+                                    isLight ? "bg-slate-50 border-slate-200" : "bg-slate-950 border-slate-800"
                                   }`}>
-                                    <div className="flex items-center gap-2.5 min-w-0">
-                                      <div className={`h-10 w-16 rounded border flex items-center justify-center p-1 shrink-0 overflow-hidden ${
-                                        isLight ? "bg-slate-100 border-slate-200" : "bg-slate-900 border-slate-800"
-                                      }`}>
-                                        <img
-                                          src={selectedTemplate.logoValue}
-                                          alt="Logo preview"
-                                          className="max-h-full max-w-full object-contain"
-                                          onError={(e) => {
-                                            (e.target as HTMLElement).style.display = 'none';
-                                          }}
-                                        />
-                                      </div>
-                                      <div className="min-w-0">
-                                        <div className="text-[11px] font-semibold truncate text-slate-300">
-                                          {selectedTemplate.logoValue.startsWith("data:") ? "Uploaded logo from device" : selectedTemplate.logoValue}
-                                        </div>
-                                        <div className="text-[9.5px] text-slate-500">
-                                          {selectedTemplate.logoValue.startsWith("data:") ? "Base64 image ready" : "Image URL source"}
-                                        </div>
-                                      </div>
-                                    </div>
-
-                                    <div className="flex items-center gap-1.5 shrink-0">
-                                      <button
-                                        type="button"
-                                        onClick={() => logoFileInputRef.current?.click()}
-                                        className="px-2 py-1 text-[10px] font-semibold rounded border border-indigo-500/40 text-indigo-400 hover:bg-indigo-500/10 transition-colors cursor-pointer flex items-center gap-1"
-                                      >
-                                        <Upload className="h-3 w-3" />
-                                        <span>Replace</span>
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setSelectedTemplate({ ...selectedTemplate, logoValue: "" })}
-                                        className="p-1 text-slate-400 hover:text-rose-400 transition-colors rounded hover:bg-rose-500/10 cursor-pointer"
-                                        title="Remove logo"
-                                      >
-                                        <X className="h-3.5 w-3.5" />
-                                      </button>
-                                    </div>
+                                    <img
+                                      src={selectedTemplate.logoValue}
+                                      alt="Logo preview"
+                                      className="max-h-full max-w-full object-contain"
+                                      onError={(e) => {
+                                        (e.target as HTMLElement).style.display = "none";
+                                      }}
+                                    />
                                   </div>
-                                ) : (
-                                  <div
+                                  <div className="min-w-0">
+                                    <div className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate">
+                                      {selectedTemplate.logoValue.startsWith("data:") ? "Uploaded Image Ready" : selectedTemplate.logoValue}
+                                    </div>
+                                    <div className="text-[10px] text-slate-400">Brand Header Image</div>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
                                     onClick={() => logoFileInputRef.current?.click()}
-                                    className={`border-2 border-dashed rounded-xl p-3.5 text-center cursor-pointer transition-all hover:border-indigo-500/80 ${
-                                      isLight
-                                        ? "border-slate-300 bg-slate-50/50 hover:bg-indigo-50/30"
-                                        : "border-slate-800 bg-slate-950/60 hover:bg-indigo-950/20"
-                                    }`}
+                                    className="px-2.5 py-1 text-[10px] font-bold rounded-lg border border-indigo-500/40 text-indigo-400 hover:bg-indigo-500/10 cursor-pointer flex items-center gap-1"
                                   >
-                                    <div className="w-8 h-8 rounded-lg bg-indigo-500/10 text-indigo-400 flex items-center justify-center mx-auto mb-1.5">
-                                      <Upload className="h-4 w-4" />
-                                    </div>
-                                    <div className="text-xs font-semibold text-slate-200">
-                                      Upload logo from local machine
-                                    </div>
-                                    <div className="text-[10px] text-slate-400 mt-0.5">
-                                      Click to select PNG, JPG, SVG or WebP from your computer (max 2MB)
-                                    </div>
-                                  </div>
-                                )}
+                                    <Upload className="h-3 w-3" />
+                                    <span>Replace</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedTemplate({ ...selectedTemplate, logoValue: "" })}
+                                    className="p-1 text-slate-400 hover:text-rose-500 rounded-lg cursor-pointer"
+                                    title="Remove"
+                                  >
+                                    <X className="h-3.5 w-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                <div
+                                  onClick={() => logoFileInputRef.current?.click()}
+                                  className={`border-2 border-dashed rounded-xl p-3 text-center cursor-pointer transition-all hover:border-indigo-500 ${
+                                    isLight ? "border-slate-300 bg-white hover:bg-indigo-50/20" : "border-slate-800 bg-slate-900/40 hover:bg-indigo-950/20"
+                                  }`}
+                                >
+                                  <Upload className="h-4 w-4 text-indigo-500 mx-auto mb-1" />
+                                  <div className="text-xs font-bold text-slate-800 dark:text-slate-200">Upload Image</div>
+                                  <div className="text-[9.5px] text-slate-400">PNG, JPG, SVG up to 3MB</div>
+                                </div>
 
-                                <div className="flex items-center gap-2 pt-0.5">
-                                  <span className="text-[10px] text-slate-500 font-medium">Or URL:</span>
+                                <div className="space-y-1">
                                   <input
                                     type="text"
-                                    value={selectedTemplate.logoValue.startsWith("data:") ? "" : selectedTemplate.logoValue}
+                                    value={selectedTemplate.logoValue}
                                     onChange={(e) => setSelectedTemplate({ ...selectedTemplate, logoValue: e.target.value })}
-                                    placeholder="https://example.com/logo.png or /logo.png"
-                                    className={`flex-1 p-1.5 text-[11px] rounded-lg border outline-none ${
-                                      isLight ? "bg-white border-slate-200 text-slate-850" : "bg-slate-950 border-slate-850 text-slate-200"
+                                    placeholder="Or Image URL / Business Name"
+                                    className={`w-full p-2.5 text-xs rounded-xl border outline-none font-medium h-full ${
+                                      isLight ? "bg-white border-slate-200 text-slate-800" : "bg-slate-900 border-slate-800 text-slate-200"
                                     }`}
                                   />
                                 </div>
                               </div>
-                            ) : (
-                              <input
-                                type="text"
-                                value={selectedTemplate.logoValue}
-                                onChange={(e) => setSelectedTemplate({ ...selectedTemplate, logoValue: e.target.value })}
-                                placeholder="Enter business name (e.g. Vantara Network Solutions)"
-                                className={`w-full p-2 text-xs rounded-lg border outline-none ${
-                                  isLight ? "bg-white border-slate-200 text-slate-850" : "bg-slate-950 border-slate-850 text-slate-200"
-                                }`}
-                              />
                             )}
                           </div>
                         )}
                       </div>
                     )}
 
-                    {/* 2. Common Greeting message */}
-                    <div className={`border rounded-xl p-3 space-y-2 ${isLight ? "bg-slate-50/50 border-slate-100" : "bg-slate-900/30 border-slate-800/60"}`}>
-                      <label className="text-xs font-semibold block">
-                        {selectedTemplate.templateType === "email" ? "2. Common Message / Greeting" : "1. Common Intro Greeting"}
-                      </label>
-                      <p className="text-[10px] text-slate-450 leading-snug">Welcome/thank-you line placed at the start of outreach message:</p>
-                      <textarea
+                    {/* 3. Greeting / Opening Hook */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-bold text-slate-700 dark:text-slate-200">
+                          Opening Greeting Hook
+                        </label>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedTemplate({ ...selectedTemplate, introText: "Hi {{name}}," })}
+                            className="text-[9.5px] text-indigo-500 hover:underline cursor-pointer"
+                          >
+                            "Hi &#123;&#123;name&#125;&#125;,"
+                          </button>
+                          <span className="text-slate-400 text-[10px]">•</span>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedTemplate({ ...selectedTemplate, introText: "Hi {{company}} team," })}
+                            className="text-[9.5px] text-indigo-500 hover:underline cursor-pointer"
+                          >
+                            "Hi &#123;&#123;company&#125;&#125; team,"
+                          </button>
+                        </div>
+                      </div>
+                      <input
+                        ref={(el) => { if (el) el.name = "introText"; }}
+                        onFocus={(e) => { activeInputRef.current = e.target; }}
+                        type="text"
                         value={selectedTemplate.introText}
                         onChange={(e) => setSelectedTemplate({ ...selectedTemplate, introText: e.target.value })}
-                        placeholder={selectedTemplate.templateType === "email" ? "Hi {{name}},&#10;&#10;Welcome / Thank you for connecting with us..." : "Hi {{name}},\n\nI noticed your listing..."}
-                        rows={3}
-                        className={`w-full p-2 text-xs rounded-lg border outline-none resize-none focus:border-indigo-500/60 font-sans ${
-                          isLight ? "bg-white border-slate-200 text-slate-855" : "bg-slate-955 border-slate-855 text-slate-200"
+                        placeholder="Hi {{name}},"
+                        className={`w-full p-2.5 text-xs rounded-xl border outline-none font-medium ${
+                          isLight ? "bg-slate-50/50 border-slate-200 text-slate-900" : "bg-slate-950/60 border-slate-800 text-slate-100"
                         }`}
                       />
                     </div>
 
-                    {/* 3. AI Generated vs Custom Body */}
-                    <div className={`border rounded-xl p-3 space-y-3 ${isLight ? "bg-slate-50/50 border-slate-100" : "bg-slate-900/30 border-slate-800/60"}`}>
+                    {/* 4. Message Body with Starter Hooks */}
+                    <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold flex items-center gap-1">
-                          <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
-                          {selectedTemplate.templateType === "email" ? "3. Email Body Outreach Creator" : "2. WhatsApp Outreach Body"}
-                        </span>
-                      </div>
-
-                      <div className="space-y-2 pl-1.5">
-                        <label className="flex items-center gap-2 text-xs select-none cursor-pointer">
-                          <input
-                            type="radio"
-                            name="useAiBody"
-                            checked={selectedTemplate.useAiBody}
-                            onChange={() => setSelectedTemplate({ ...selectedTemplate, useAiBody: true })}
-                            className="text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
-                          />
-                          <span className="font-medium text-slate-200">Let AI auto-generate body based on Lead details (Recommended)</span>
+                        <label className="text-xs font-bold flex items-center gap-1.5 text-slate-700 dark:text-slate-200">
+                          <FileText className="h-3.5 w-3.5 text-indigo-500" />
+                          Message Outreach Body
                         </label>
-                        <label className="flex items-center gap-2 text-xs select-none cursor-pointer">
-                          <input
-                            type="radio"
-                            name="useAiBody"
-                            checked={!selectedTemplate.useAiBody}
-                            onChange={() => setSelectedTemplate({ ...selectedTemplate, useAiBody: false })}
-                            className="text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
-                          />
-                          <span className="font-medium text-slate-200">Write custom outreach body message manually</span>
-                        </label>
-                      </div>
 
-                      {selectedTemplate.useAiBody ? (
-                        <div className={`pl-5.5 p-3 rounded-lg border text-[11px] leading-relaxed flex items-start gap-2 ${
-                          isLight ? "bg-indigo-50/40 border-indigo-100 text-slate-650" : "bg-indigo-950/20 border-indigo-900/40 text-indigo-200/90"
-                        }`}>
-                          <Info className="h-4 w-4 shrink-0 text-indigo-400 mt-0.5" />
-                          <span>
-                            <strong>AI Personalized Outlets</strong>: Our AI Outreach Agent will automatically analyze prospect digital signals, GMB metrics, and prioritized categories to write a completely tailored pitch. No manual writing needed.
-                          </span>
+                        <div className="flex items-center gap-2">
+                          <label className="flex items-center gap-1.5 text-[10px] cursor-pointer text-slate-500">
+                            <input
+                              type="checkbox"
+                              checked={selectedTemplate.useAiBody}
+                              onChange={(e) => setSelectedTemplate({ ...selectedTemplate, useAiBody: e.target.checked })}
+                              className="rounded text-indigo-600 focus:ring-indigo-500 h-3 w-3"
+                            />
+                            <span>AI Dynamic Pitch per lead</span>
+                          </label>
                         </div>
-                      ) : (
-                        <div className="pl-5.5 space-y-1.5 animate-fadeIn">
-                          <p className="text-[10px] text-slate-450 leading-snug">Enter your manually-defined outreach message body:</p>
-                          <textarea
-                            value={selectedTemplate.customBodyText}
-                            onChange={(e) => setSelectedTemplate({ ...selectedTemplate, customBodyText: e.target.value })}
-                            placeholder="We noticed your listing in {{city}} and wanted to offer..."
-                            rows={4}
-                            className={`w-full p-2 text-xs rounded-lg border outline-none resize-none focus:border-indigo-500/60 font-sans ${
-                              isLight ? "bg-white border-slate-200 text-slate-855" : "bg-slate-955 border-slate-855 text-slate-200"
+                      </div>
+
+                      {/* Quick Content Starters */}
+                      <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+                        <span className="text-[9.5px] font-bold text-slate-400 shrink-0">Starters:</span>
+                        {STARTER_BODY_HOOKS.map((hook, idx) => (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => {
+                              setSelectedTemplate({
+                                ...selectedTemplate,
+                                subject: hook.subject,
+                                introText: hook.intro,
+                                customBodyText: hook.body
+                              });
+                            }}
+                            className={`text-[9.5px] px-2.5 py-1 rounded-lg border font-medium shrink-0 transition-all cursor-pointer flex items-center gap-1 ${
+                              isLight 
+                                ? "bg-slate-50 hover:bg-indigo-50 hover:border-indigo-200 text-slate-700 border-slate-200" 
+                                : "bg-slate-900/60 hover:bg-indigo-950/50 hover:border-indigo-500/30 text-slate-300 border-slate-800"
                             }`}
-                          />
-                        </div>
-                      )}
+                          >
+                            <Sparkles className="h-2.5 w-2.5 text-indigo-500" />
+                            <span>{hook.title}</span>
+                          </button>
+                        ))}
+                      </div>
+
+                      <textarea
+                        ref={(el) => { if (el) el.name = "customBodyText"; }}
+                        onFocus={(e) => { activeInputRef.current = e.target; }}
+                        value={selectedTemplate.customBodyText}
+                        onChange={(e) => setSelectedTemplate({ ...selectedTemplate, customBodyText: e.target.value })}
+                        placeholder="Write your value pitch here... e.g. We noticed your listing in {{city}} and wanted to share 2 key insights..."
+                        rows={5}
+                        className={`w-full p-3 text-xs rounded-xl border outline-none resize-y leading-relaxed font-sans ${
+                          isLight ? "bg-slate-50/50 border-slate-200 text-slate-900" : "bg-slate-950/60 border-slate-800 text-slate-100"
+                        }`}
+                      />
                     </div>
 
-                    {/* 4. CTA Buttons Section */}
-                    <div className={`border rounded-xl p-3 space-y-3 ${isLight ? "bg-slate-50/50 border-slate-100" : "bg-slate-900/30 border-slate-800/60"}`}>
-                      <label className="flex items-center gap-2 text-xs font-semibold select-none cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={selectedTemplate.useCta}
-                          onChange={(e) => setSelectedTemplate({ ...selectedTemplate, useCta: e.target.checked })}
-                          className="rounded text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
-                        />
-                        <span>{selectedTemplate.templateType === "email" ? "4. Add Call-to-Action (CTA) Button" : "3. Add Link Call-to-Action"}</span>
-                      </label>
+                    {/* 5. Call to Action (CTA) Button */}
+                    <div className={`p-4 rounded-xl border space-y-3 ${
+                      isLight ? "bg-slate-50/60 border-slate-200/80" : "bg-slate-950/40 border-slate-800/80"
+                    }`}>
+                      <div className="flex items-center justify-between">
+                        <label className="flex items-center gap-2 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedTemplate.useCta}
+                            onChange={(e) => setSelectedTemplate({ ...selectedTemplate, useCta: e.target.checked })}
+                            className="rounded text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
+                          />
+                          <span>{selectedTemplate.templateType === "email" ? "Add Call-to-Action (CTA) Button" : "Add CTA Link"}</span>
+                        </label>
+                      </div>
 
                       {selectedTemplate.useCta && (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pl-5.5 animate-fadeIn">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
                           <div>
-                            <label className="text-[10px] text-slate-400 font-bold block mb-1">
-                              {selectedTemplate.templateType === "email" ? "Button Text" : "CTA Message Prefix"}
-                            </label>
+                            <label className="text-[10px] font-bold text-slate-400 block mb-1">Button Text</label>
                             <input
                               type="text"
                               value={selectedTemplate.ctaText}
                               onChange={(e) => setSelectedTemplate({ ...selectedTemplate, ctaText: e.target.value })}
-                              placeholder={selectedTemplate.templateType === "email" ? "Book a Session" : "Book demo here:"}
-                              className={`w-full p-2 text-xs rounded-lg border outline-none ${
-                                isLight ? "bg-white border-slate-200 text-slate-850" : "bg-slate-955 border-slate-855 text-slate-200"
+                              placeholder="e.g. Schedule a 10-Min Demo"
+                              className={`w-full p-2.5 text-xs rounded-xl border outline-none font-medium ${
+                                isLight ? "bg-white border-slate-200 text-slate-800" : "bg-slate-900 border-slate-800 text-slate-200"
                               }`}
                             />
                           </div>
+
                           <div>
-                            <label className="text-[10px] text-slate-400 font-bold block mb-1">Destination URL Link</label>
+                            <label className="text-[10px] font-bold text-slate-400 block mb-1">Destination URL</label>
                             <input
                               type="text"
                               value={selectedTemplate.ctaUrl}
                               onChange={(e) => setSelectedTemplate({ ...selectedTemplate, ctaUrl: e.target.value })}
-                              placeholder="https://cal.com/..."
-                              className={`w-full p-2 text-xs rounded-lg border outline-none ${
-                                isLight ? "bg-white border-slate-200 text-slate-850" : "bg-slate-955 border-slate-855 text-slate-200"
+                              placeholder="https://cal.com/your-team"
+                              className={`w-full p-2.5 text-xs rounded-xl border outline-none font-medium ${
+                                isLight ? "bg-white border-slate-200 text-slate-800" : "bg-slate-900 border-slate-800 text-slate-200"
                               }`}
                             />
                           </div>
+
                           {selectedTemplate.templateType === "email" && (
-                            <div className="md:col-span-2 flex items-center gap-2">
-                              <span className="text-[10px] text-slate-400 font-bold">Button Color:</span>
-                              <input
-                                type="color"
-                                value={selectedTemplate.ctaBgColor}
-                                onChange={(e) => setSelectedTemplate({ ...selectedTemplate, ctaBgColor: e.target.value })}
-                                className="w-5 h-5 rounded cursor-pointer border-0 p-0"
-                              />
-                              <span className="text-[10px] text-slate-500 font-mono">{selectedTemplate.ctaBgColor}</span>
+                            <div className="md:col-span-2 flex items-center gap-3 pt-1">
+                              <span className="text-[10px] font-bold text-slate-400">Button Color:</span>
+                              <div className="flex items-center gap-2">
+                                {["#4f46e5", "#0f172a", "#059669", "#7c3aed", "#2563eb", "#d97706"].map((color) => (
+                                  <button
+                                    key={color}
+                                    type="button"
+                                    onClick={() => setSelectedTemplate({ ...selectedTemplate, ctaBgColor: color })}
+                                    style={{ backgroundColor: color }}
+                                    className={`w-5 h-5 rounded-full transition-all cursor-pointer ${
+                                      selectedTemplate.ctaBgColor === color ? "ring-2 ring-offset-2 ring-indigo-500 scale-110" : "opacity-80 hover:opacity-100"
+                                    }`}
+                                  />
+                                ))}
+                                <input
+                                  type="color"
+                                  value={selectedTemplate.ctaBgColor || "#4f46e5"}
+                                  onChange={(e) => setSelectedTemplate({ ...selectedTemplate, ctaBgColor: e.target.value })}
+                                  className="w-6 h-6 rounded-lg cursor-pointer border-0 bg-transparent"
+                                  title="Custom color picker"
+                                />
+                              </div>
                             </div>
                           )}
                         </div>
                       )}
                     </div>
 
-                    {/* 5. Contact Details Section */}
-                    <div className={`border rounded-xl p-3 space-y-2 ${isLight ? "bg-slate-50/50 border-slate-100" : "bg-slate-900/30 border-slate-800/60"}`}>
-                      <label className="flex items-center gap-2 text-xs font-semibold select-none cursor-pointer">
+                    {/* 6. Document & PDF Attachments (NEW) */}
+                    <div className={`p-4 rounded-xl border space-y-3 ${
+                      isLight ? "bg-slate-50/60 border-slate-200/80" : "bg-slate-950/40 border-slate-800/80"
+                    }`}>
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <label className="text-xs font-bold flex items-center gap-1.5 text-slate-700 dark:text-slate-200">
+                            <Paperclip className="h-3.5 w-3.5 text-indigo-500" />
+                            Email Attachments (PDFs & Documents)
+                          </label>
+                          <p className="text-[10px] text-slate-400 mt-0.5">
+                            Attach pitch decks, PDF brochures, case studies, or audit reports (max 10MB each)
+                          </p>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => docFileInputRef.current?.click()}
+                          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1 shadow-xs"
+                        >
+                          <Plus className="h-3 w-3" />
+                          <span>Attach File</span>
+                        </button>
+                      </div>
+
+                      <input
+                        type="file"
+                        ref={docFileInputRef}
+                        multiple
+                        accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv"
+                        onChange={handleDocUpload}
+                        className="hidden"
+                      />
+
+                      {selectedTemplate.attachments && selectedTemplate.attachments.length > 0 ? (
+                        <div className="space-y-1.5 pt-1">
+                          {selectedTemplate.attachments.map((att) => (
+                            <div
+                              key={att.id}
+                              className={`p-2.5 rounded-xl border flex items-center justify-between gap-3 ${
+                                isLight ? "bg-white border-slate-200" : "bg-slate-900 border-slate-800"
+                              }`}
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-8 h-8 rounded-lg bg-indigo-500/10 text-indigo-500 flex items-center justify-center shrink-0">
+                                  <FileText className="h-4 w-4" />
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate">
+                                    {att.name}
+                                  </div>
+                                  <div className="text-[10px] text-slate-400">
+                                    {formatFileSize(att.size)}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveAttachment(att.id)}
+                                className="p-1 text-slate-400 hover:text-rose-500 rounded-lg cursor-pointer transition-colors"
+                                title="Remove attachment"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div
+                          onClick={() => docFileInputRef.current?.click()}
+                          className={`border-2 border-dashed rounded-xl p-4 text-center cursor-pointer transition-all hover:border-indigo-500 ${
+                            isLight ? "border-slate-300 bg-white hover:bg-indigo-50/20" : "border-slate-800 bg-slate-900/40 hover:bg-indigo-950/20"
+                          }`}
+                        >
+                          <Paperclip className="h-4 w-4 text-slate-400 mx-auto mb-1" />
+                          <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                            Click to attach PDF, Word, Excel, or presentation documents
+                          </div>
+                          <div className="text-[10px] text-slate-400 mt-0.5">
+                            Files are included automatically when campaigns or outreach emails are sent
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 7. Signature & Contact Line */}
+                    <div className={`p-4 rounded-xl border space-y-3 ${
+                      isLight ? "bg-slate-50/60 border-slate-200/80" : "bg-slate-950/40 border-slate-800/80"
+                    }`}>
+                      <label className="flex items-center gap-2 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer">
                         <input
                           type="checkbox"
                           checked={selectedTemplate.useContact}
                           onChange={(e) => setSelectedTemplate({ ...selectedTemplate, useContact: e.target.checked })}
                           className="rounded text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
                         />
-                        <span>{selectedTemplate.templateType === "email" ? "5. Add Contact Details Section" : "4. Add Contact Text Line"}</span>
+                        <span>Sender Signature & Contact Information</span>
                       </label>
 
                       {selectedTemplate.useContact && (
-                        <div className="pl-5.5 space-y-1 animate-fadeIn">
-                          <textarea
-                            value={selectedTemplate.contactText}
-                            onChange={(e) => setSelectedTemplate({ ...selectedTemplate, contactText: e.target.value })}
-                            placeholder="Phone: +91 8830553868 | Email: chatnexgen@gmail.com"
-                            rows={2}
-                            className={`w-full p-2 text-xs rounded-lg border outline-none resize-none focus:border-indigo-500/60 font-sans ${
-                              isLight ? "bg-white border-slate-200 text-slate-855" : "bg-slate-955 border-slate-855 text-slate-200"
-                            }`}
-                          />
-                        </div>
+                        <textarea
+                          value={selectedTemplate.contactText}
+                          onChange={(e) => setSelectedTemplate({ ...selectedTemplate, contactText: e.target.value })}
+                          placeholder="Best regards,&#10;Founder / Outreach Director&#10;team@example.com | +1 555-0199"
+                          rows={2}
+                          className={`w-full p-2.5 text-xs rounded-xl border outline-none resize-none ${
+                            isLight ? "bg-white border-slate-200 text-slate-800" : "bg-slate-900 border-slate-800 text-slate-200"
+                          }`}
+                        />
                       )}
                     </div>
 
-                    {/* 6. Footer Common Messages Section */}
-                    <div className={`border rounded-xl p-3 space-y-2 ${isLight ? "bg-slate-50/50 border-slate-100" : "bg-slate-900/30 border-slate-800/60"}`}>
-                      <label className="flex items-center gap-2 text-xs font-semibold select-none cursor-pointer">
+                    {/* 8. Footer / Unsubscribe */}
+                    <div className={`p-4 rounded-xl border space-y-3 ${
+                      isLight ? "bg-slate-50/60 border-slate-200/80" : "bg-slate-950/40 border-slate-800/80"
+                    }`}>
+                      <label className="flex items-center gap-2 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer">
                         <input
                           type="checkbox"
                           checked={selectedTemplate.useFooter}
                           onChange={(e) => setSelectedTemplate({ ...selectedTemplate, useFooter: e.target.checked })}
                           className="rounded text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
                         />
-                        <span>{selectedTemplate.templateType === "email" ? "6. Add Footer Common Message" : "5. Add Opt-Out Sign-off text"}</span>
+                        <span>Footer Opt-Out / Compliance Line</span>
                       </label>
 
                       {selectedTemplate.useFooter && (
-                        <div className="pl-5.5 space-y-1 animate-fadeIn">
-                          <textarea
-                            value={selectedTemplate.footerText}
-                            onChange={(e) => setSelectedTemplate({ ...selectedTemplate, footerText: e.target.value })}
-                            placeholder={selectedTemplate.templateType === "email" ? "You are receiving this because you listing was discovered via Maps geo-outreach." : "Reply STOP to unsubscribe."}
-                            rows={2}
-                            className={`w-full p-2 text-xs rounded-lg border outline-none resize-none focus:border-indigo-500/60 font-sans ${
-                              isLight ? "bg-white border-slate-200 text-slate-855" : "bg-slate-955 border-slate-855 text-slate-200"
-                            }`}
-                          />
-                        </div>
+                        <textarea
+                          value={selectedTemplate.footerText}
+                          onChange={(e) => setSelectedTemplate({ ...selectedTemplate, footerText: e.target.value })}
+                          placeholder="You received this because {{company}} is listed publicly in {{city}}. Reply STOP to unsubscribe."
+                          rows={2}
+                          className={`w-full p-2.5 text-xs rounded-xl border outline-none resize-none ${
+                            isLight ? "bg-white border-slate-200 text-slate-800" : "bg-slate-900 border-slate-800 text-slate-200"
+                          }`}
+                        />
                       )}
                     </div>
-
                   </div>
                 ) : (
-                  /* RAW CODE EDITOR PANEL */
-                  <div className="p-4 flex flex-col h-full justify-between gap-4">
-                    <div className="flex items-center justify-between pb-2 border-b border-slate-800/20">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                        {selectedTemplate.templateType === "email" ? "Paste HTML Source Code" : "Outreach Text Message Script"}
-                      </span>
-                      <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-widest flex items-center gap-1">
-                        <Code className="h-3.5 w-3.5" /> Source Code Mode
-                      </span>
+                  /* ── CUSTOM HTML CODE MODE ── */
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between pb-1">
+                      <div>
+                        <div className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                          <Code className="h-4 w-4 text-indigo-500" />
+                          <span>Paste Raw HTML Template Code</span>
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-0.5">
+                          Paste responsive HTML code from BeeFree, Stripo, Figma, Mailchimp, or your custom email coder.
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setSelectedTemplate({ ...selectedTemplate, htmlCode: STARTER_HTML_TEMPLATE })}
+                        className="text-[10px] font-bold text-indigo-500 hover:text-indigo-400 border border-indigo-500/30 px-2 py-1 rounded-lg cursor-pointer"
+                      >
+                        Insert Starter HTML
+                      </button>
                     </div>
-                    <textarea
-                      value={selectedTemplate.htmlCode}
-                      onChange={(e) => setSelectedTemplate({ ...selectedTemplate, htmlCode: e.target.value })}
-                      placeholder={selectedTemplate.templateType === "email" 
-                        ? "<!-- Paste your HTML Email Template here -->&#10;<!DOCTYPE html>&#10;<html>&#10;..."
-                        : "Write or paste the exact outreach message you want to dispatch here..."}
-                      className="flex-1 w-full p-3 font-mono text-[11px] leading-relaxed rounded-xl border outline-none min-h-[490px] focus:border-indigo-500/60 bg-slate-955 text-slate-300 border-slate-850"
-                    />
+
+                    {/* Email Subject for Code Mode */}
+                    {selectedTemplate.templateType === "email" && (
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-400">Subject Line:</label>
+                        <input
+                          type="text"
+                          value={selectedTemplate.subject}
+                          onChange={(e) => setSelectedTemplate({ ...selectedTemplate, subject: e.target.value })}
+                          placeholder="e.g. Special invitation for {{company}}"
+                          className={`w-full p-2 text-xs rounded-xl border outline-none ${
+                            isLight ? "bg-slate-50 border-slate-200 text-slate-900" : "bg-slate-950 border-slate-800 text-slate-100"
+                          }`}
+                        />
+                      </div>
+                    )}
+
+                    <div className="relative">
+                      <textarea
+                        value={selectedTemplate.htmlCode}
+                        onChange={(e) => setSelectedTemplate({ ...selectedTemplate, htmlCode: e.target.value })}
+                        placeholder="<!-- Paste your full HTML email code here -->&#10;<!DOCTYPE html>&#10;<html>&#10;..."
+                        rows={22}
+                        className="w-full p-3 font-mono text-[11px] leading-relaxed rounded-xl border outline-none min-h-[460px] focus:border-indigo-500 bg-slate-950 text-slate-200 border-slate-800 resize-y"
+                      />
+                    </div>
                   </div>
                 )}
               </div>
 
-              {/* Right Column: Live compiled preview */}
-              <div className={`border rounded-2xl flex flex-col justify-between overflow-hidden ${
+              {/* Right Column: Interactive Live Compiled Preview */}
+              <div className={`border rounded-2xl p-5 space-y-4 sticky top-6 ${
                 isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
               }`}>
+                <div className="flex items-center justify-between pb-2 border-b border-slate-200/60 dark:border-slate-800/60">
+                  <span className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                    <Eye className="h-4 w-4 text-emerald-500" />
+                    <span>Live Interactive Preview</span>
+                  </span>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                    Real-Time Render
+                  </span>
+                </div>
+
                 {selectedTemplate.templateType === "email" ? (
-                  /* EMAIL LAYOUT IFRAME PREVIEW */
-                  <div className="p-4 flex flex-col h-full gap-4">
-                    <div className="flex items-center justify-between pb-2 border-b border-slate-800/20">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Live Campaign Preview</span>
-                      <span className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest flex items-center gap-1">
-                        <Eye className="h-3.5 w-3.5" /> Interactive
-                      </span>
+                  /* DESKTOP EMAIL CLIENT MOCKUP */
+                  <div className={`rounded-xl border overflow-hidden flex flex-col shadow-sm ${
+                    isLight ? "bg-slate-100 border-slate-200" : "bg-slate-950 border-slate-800"
+                  }`}>
+                    {/* Fake Email Client Chrome */}
+                    <div className={`px-4 py-3 border-b flex items-center justify-between text-[11px] ${
+                      isLight ? "bg-slate-50 border-slate-200" : "bg-slate-900/60 border-slate-800"
+                    }`}>
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-full bg-rose-500 inline-block opacity-80"></span>
+                        <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block opacity-80"></span>
+                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block opacity-80"></span>
+                        <span className="ml-2 font-bold text-slate-600 dark:text-slate-300 truncate max-w-[240px]">
+                          {selectedTemplate.subject || "(No Subject)"}
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-slate-400">Mail Preview</span>
                     </div>
 
-                    <div className={`flex-1 rounded-xl overflow-hidden border min-h-[490px] flex flex-col ${
-                      isLight ? "border-slate-100 bg-slate-50" : "border-slate-800/60 bg-slate-955"
+                    {/* Email Headers (From, To) */}
+                    <div className={`px-4 py-2.5 border-b text-[10.5px] space-y-1 ${
+                      isLight ? "bg-white border-slate-200 text-slate-600" : "bg-[#090d16] border-slate-850 text-slate-300"
                     }`}>
+                      <div>
+                        <strong className="text-slate-400">From:</strong>{" "}
+                        <span>{businessProfile?.senderName || "Outreach Team"} &lt;{businessProfile?.contactEmail || "outreach@company.com"}&gt;</span>
+                      </div>
+                      <div>
+                        <strong className="text-slate-400">To:</strong>{" "}
+                        <span>Sarah &lt;contact@apexsolutions.com&gt;</span>
+                      </div>
+                    </div>
+
+                    {/* Email Body Iframe */}
+                    <div className="min-h-[440px] bg-white">
                       {previewHtml ? (
                         <iframe
                           srcDoc={previewHtml}
-                          title="Email live compile preview"
-                          className="w-full h-full border-0 flex-1 bg-white"
+                          title="Email Preview"
+                          className="w-full min-h-[440px] border-0 bg-white"
                           sandbox="allow-popups allow-popups-to-escape-sandbox"
                         />
                       ) : (
-                        <div className="m-auto text-center space-y-1.5 p-6">
-                          <FileText className="h-8 w-8 text-slate-500 mx-auto" />
-                          <div className="text-xs text-slate-450">Waiting for template elements to compile...</div>
+                        <div className="p-12 text-center text-slate-400 text-xs">
+                          Waiting for template elements to compile...
                         </div>
                       )}
                     </div>
+
+                    {/* Attachments Footer Tray (if any attachments exist) */}
+                    {selectedTemplate.attachments && selectedTemplate.attachments.length > 0 && (
+                      <div className={`p-3 border-t flex flex-wrap items-center gap-2 ${
+                        isLight ? "bg-slate-50 border-slate-200" : "bg-slate-900 border-slate-800"
+                      }`}>
+                        <div className="w-full text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                          <Paperclip className="h-3 w-3" />
+                          <span>Attachments ({selectedTemplate.attachments.length} files)</span>
+                        </div>
+                        {selectedTemplate.attachments.map((att) => (
+                          <div
+                            key={att.id}
+                            className={`px-2.5 py-1.5 rounded-lg border flex items-center gap-2 text-[11px] ${
+                              isLight ? "bg-white border-slate-200 text-slate-700" : "bg-slate-950 border-slate-800 text-slate-300"
+                            }`}
+                          >
+                            <FileText className="h-3.5 w-3.5 text-indigo-500 shrink-0" />
+                            <span className="font-semibold truncate max-w-[160px]">{att.name}</span>
+                            <span className="text-[9.5px] text-slate-400 shrink-0">({formatFileSize(att.size)})</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ) : (
-                  /* WHATSAPP INTERACTIVE CHAT PREVIEW MOCKUP */
-                  <div className="p-4 flex flex-col h-full gap-4">
-                    <div className="flex items-center justify-between pb-2 border-b border-slate-800/20">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">WhatsApp Device Preview</span>
-                      <span className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest flex items-center gap-1">
-                        <WhatsAppLogo className="h-3.5 w-3.5 fill-emerald-500 text-emerald-500" /> Live Render
-                      </span>
-                    </div>
+                  /* WHATSAPP SMARTPHONE PREVIEW */
+                  <div className="flex items-center justify-center p-2 min-h-[490px]">
+                    <div className="w-[305px] h-[490px] border-[8px] border-slate-850 rounded-[36px] overflow-hidden shadow-2xl bg-[#efeae2] flex flex-col font-sans relative ring-4 ring-slate-800/25">
+                      {/* Notch */}
+                      <div className="w-24 h-4.5 bg-black rounded-full absolute top-1.5 left-1/2 -translate-x-1/2 z-50 flex items-center justify-center">
+                        <div className="w-2.5 h-2.5 rounded-full bg-slate-900 absolute left-4 border border-slate-800/30"></div>
+                      </div>
 
-                    <div className="flex-1 flex items-center justify-center p-2 min-h-[490px]">
-                      {/* Simulated Smartphone */}
-                      <div className="w-[305px] h-[490px] border-[8px] border-slate-850 rounded-[36px] overflow-hidden shadow-2xl bg-[#efeae2] flex flex-col font-sans relative ring-4 ring-slate-800/25">
-                        {/* Hardware notch / Dynamic Island */}
-                        <div className="w-24 h-4.5 bg-black rounded-full absolute top-1.5 left-1/2 -translate-x-1/2 z-50 flex items-center justify-center">
-                          <div className="w-2.5 h-2.5 rounded-full bg-slate-900 absolute left-4 border border-slate-800/30"></div>
+                      {/* Top Bar */}
+                      <div className="h-6.5 bg-[#075e54] text-white px-5 pt-1.5 flex items-center justify-between text-[8px] font-bold tracking-wider shrink-0 z-40 select-none">
+                        <span>9:41</span>
+                        <div className="flex items-center gap-1.5">
+                          <span>5G</span>
+                          <span className="h-2 w-3.5 border border-white/60 rounded-xs relative flex items-center p-[1px]"><span className="h-full w-2 bg-white rounded-3xs"></span></span>
+                        </div>
+                      </div>
+
+                      {/* Header */}
+                      <div className="bg-[#075e54] text-white px-3.5 py-3 flex items-center gap-2 shrink-0 z-40 relative shadow-md">
+                        <ChevronLeft className="h-4 w-4 text-white -ml-1.5 shrink-0" />
+                        <div className="h-8 w-8 rounded-full bg-teal-700 text-white flex items-center justify-center text-[10px] font-bold shrink-0 relative border border-teal-500/20">
+                          OA
+                          <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-emerald-500 border-2 border-[#075e54]"></span>
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[10px] font-bold leading-tight truncate">Outreach Agent</div>
+                          <div className="text-[7.5px] text-teal-200">Online</div>
+                        </div>
+                        <div className="flex items-center gap-3.5 text-white/90 ml-auto shrink-0">
+                          <Video className="h-3.5 w-3.5" />
+                          <Phone className="h-3.5 w-3.5" />
+                          <MoreVertical className="h-3.5 w-3.5" />
+                        </div>
+                      </div>
+
+                      {/* Chat Messages */}
+                      <div 
+                        className="flex-1 p-3 overflow-y-auto space-y-2 relative flex flex-col justify-start z-30"
+                        style={{ 
+                          backgroundColor: "#efeae2",
+                          backgroundImage: "radial-gradient(#dfdcd6 1px, transparent 1px)",
+                          backgroundSize: "16px 16px"
+                        }}
+                      >
+                        <div className="mx-auto text-[8px] bg-slate-250/60 dark:bg-slate-900/60 text-slate-500 dark:text-slate-400 px-2 py-0.5 rounded-md shadow-sm mb-3.5 text-center max-w-[85%] uppercase font-bold tracking-wider select-none">
+                          🔒 Messages are end-to-end encrypted
                         </div>
 
-                        {/* Phone Top Status Bar */}
-                        <div className="h-6.5 bg-[#075e54] text-white px-5 pt-1.5 flex items-center justify-between text-[8px] font-bold tracking-wider shrink-0 z-40 select-none">
-                          <span>9:41</span>
-                          <div className="flex items-center gap-1.5">
-                            <span>5G</span>
-                            <span className="h-2 w-3.5 border border-white/60 rounded-xs relative flex items-center p-[1px]"><span className="h-full w-2 bg-white rounded-3xs"></span></span>
-                          </div>
-                        </div>
-
-                        {/* WhatsApp Top Profile Header Bar */}
-                        <div className="bg-[#075e54] text-white px-3.5 py-3 flex items-center gap-2 shrink-0 z-40 relative shadow-md">
-                          <ChevronLeft className="h-4 w-4 text-white -ml-1.5 shrink-0 cursor-pointer" />
-                          <div className="h-8 w-8 rounded-full bg-teal-700 text-white flex items-center justify-center text-[10px] font-bold shrink-0 relative border border-teal-500/20">
-                            OA
-                            <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-emerald-500 border-2 border-[#075e54]"></span>
-                          </div>
-                          <div className="min-w-0">
-                            <div className="text-[10px] font-bold leading-tight truncate">Outreach Agent</div>
-                            <div className="text-[7.5px] text-teal-200">Online</div>
-                          </div>
-                          
-                          {/* Top Header Mock Action Icons */}
-                          <div className="flex items-center gap-3.5 text-white/90 ml-auto shrink-0">
-                            <Video className="h-3.5 w-3.5 cursor-pointer hover:text-white" />
-                            <Phone className="h-3.5 w-3.5 cursor-pointer hover:text-white" />
-                            <MoreVertical className="h-3.5 w-3.5 cursor-pointer hover:text-white" />
-                          </div>
-                        </div>
-
-                        {/* WhatsApp Chat Body Window */}
-                        <div 
-                          className="flex-1 p-3 overflow-y-auto space-y-2 relative flex flex-col justify-start z-30"
-                          style={{ 
-                            backgroundColor: '#efeae2',
-                            backgroundImage: 'radial-gradient(#dfdcd6 1px, transparent 1px)',
-                            backgroundSize: '16px 16px'
-                          }}
-                        >
-                          <div className="mx-auto text-[8px] bg-slate-250/60 dark:bg-slate-900/60 text-slate-500 dark:text-slate-400 px-2 py-0.5 rounded-md shadow-sm mb-3.5 text-center max-w-[85%] uppercase font-bold tracking-wider select-none">
-                            🔒 Messages are end-to-end encrypted
-                          </div>
-
-                          {previewWhatsappText ? (
-                            <div className="bg-[#dcf8c6] text-slate-800 text-[10.5px] p-2.5 rounded-2xl rounded-tr-none shadow-sm max-w-[85%] self-end relative leading-relaxed whitespace-pre-wrap border border-[#c1e8a4] animate-scaleUp">
-                              {/* Bubble Tail */}
-                              <div 
-                                className="whatsapp-bubble-tail absolute top-0 -right-2 w-3.5 h-3.5 bg-[#dcf8c6]" 
-                                style={{ clipPath: 'polygon(0 0, 100% 0, 0 100%)' }}
-                              ></div>
-                              {highlightVariables(previewWhatsappText)}
-                              <div className="text-[7.5px] text-slate-500 text-right mt-1.5 flex items-center justify-end gap-0.5">
-                                <span>{new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>
-                                <span className="text-[#34b7f1] font-bold text-[8.5px] leading-none shrink-0">✓✓</span>
-                              </div>
+                        {previewWhatsappText ? (
+                          <div className="bg-[#dcf8c6] text-slate-800 text-[10.5px] p-2.5 rounded-2xl rounded-tr-none shadow-sm max-w-[85%] self-end relative leading-relaxed whitespace-pre-wrap border border-[#c1e8a4] animate-scaleUp">
+                            <div 
+                              className="whatsapp-bubble-tail absolute top-0 -right-2 w-3.5 h-3.5 bg-[#dcf8c6]" 
+                              style={{ clipPath: "polygon(0 0, 100% 0, 0 100%)" }}
+                            ></div>
+                            {highlightVariables(previewWhatsappText)}
+                            <div className="text-[7.5px] text-slate-500 text-right mt-1.5 flex items-center justify-end gap-0.5">
+                              <span>{new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>
+                              <span className="text-[#34b7f1] font-bold text-[8.5px] leading-none shrink-0">✓✓</span>
                             </div>
-                          ) : (
-                            <div className="m-auto text-center space-y-1 text-slate-450 p-4">
-                              <MessageCircle className="h-6 w-6 text-slate-450 mx-auto opacity-60" />
-                              <div className="text-[9px]">Enter wizard inputs to generate WhatsApp chat preview...</div>
-                            </div>
-                          )}
-                        </div>
-
-                        {/* WhatsApp Keyboard Input Footer */}
-                        <div className="bg-[#f0f0f0] p-2 flex items-center gap-1.5 shrink-0 z-40 select-none border-t border-slate-200">
-                          <div className="flex-1 bg-white rounded-full px-3 py-1.5 text-[9px] text-slate-400 border border-slate-200 flex items-center justify-between shadow-sm">
-                            <span className="flex items-center gap-1.5">
-                              <Smile className="h-4 w-4 text-slate-400 shrink-0" />
-                              <span>Type a message</span>
-                            </span>
-                            <span className="flex items-center gap-1.5">
-                              <Paperclip className="h-3.5 w-3.5 text-slate-450 shrink-0" />
-                              <Camera className="h-4 w-4 text-slate-450 shrink-0" />
-                            </span>
                           </div>
-                          <div className="h-7 w-7 rounded-full bg-[#00a884] flex items-center justify-center text-white text-xs shadow-md shadow-[#00a884]/20 cursor-pointer hover:bg-[#008f72] shrink-0">
-                            <Mic className="h-4 w-4" />
+                        ) : (
+                          <div className="m-auto text-center space-y-1 text-slate-450 p-4">
+                            <MessageCircle className="h-6 w-6 text-slate-400 mx-auto opacity-60" />
+                            <div className="text-[9px] text-slate-500">Enter template details to see WhatsApp preview...</div>
                           </div>
-                        </div>
+                        )}
+                      </div>
 
-                        {/* Screen Bottom Home Indicator Bar */}
-                        <div className="h-4.5 bg-[#f0f0f0] w-full shrink-0 relative z-40 select-none">
-                          <div className="w-24 h-1 bg-slate-400 rounded-full absolute bottom-1.5 left-1/2 -translate-x-1/2"></div>
+                      {/* Keyboard Input Footer */}
+                      <div className="bg-[#f0f0f0] p-2 flex items-center gap-1.5 shrink-0 z-40 select-none border-t border-slate-200">
+                        <div className="flex-1 bg-white rounded-full px-3 py-1.5 text-[9px] text-slate-400 border border-slate-200 flex items-center justify-between shadow-sm">
+                          <span className="flex items-center gap-1.5">
+                            <Smile className="h-4 w-4 text-slate-400 shrink-0" />
+                            <span>Type a message</span>
+                          </span>
+                          <span className="flex items-center gap-1.5">
+                            <Paperclip className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                            <Camera className="h-4 w-4 text-slate-400 shrink-0" />
+                          </span>
+                        </div>
+                        <div className="h-7 w-7 rounded-full bg-[#00a884] flex items-center justify-center text-white text-xs shadow-md shrink-0">
+                          <Mic className="h-4 w-4" />
                         </div>
                       </div>
                     </div>
                   </div>
                 )}
               </div>
-
             </div>
           )}
         </div>
       )}
 
+      {/* Alert Modal */}
       <AlertModal
         isOpen={modalConfig.isOpen}
         type={modalConfig.type}
@@ -1653,7 +1987,7 @@ export default function EmailTemplates({ isLight, workspaceId }: EmailTemplatesP
         message={modalConfig.message}
         confirmLabel={modalConfig.confirmLabel}
         onConfirm={modalConfig.onConfirm}
-        onCancel={() => setModalConfig(prev => ({ ...prev, isOpen: false }))}
+        onCancel={() => setModalConfig((p) => ({ ...p, isOpen: false }))}
         isLight={isLight}
         isLoading={modalConfig.isLoading}
       />

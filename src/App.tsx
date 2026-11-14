@@ -106,6 +106,7 @@ import AlertModal, { AlertModalType } from "./AlertModal";
  */
 const IntegrationSettings = lazy(() => import("./IntegrationSettings"));
 const EmailTemplates = lazy(() => import("./EmailTemplates"));
+const MessageTemplatePanel = lazy(() => import("./features/messageTemplates/MessageTemplatePanel"));
 const CampaignReport = lazy(() => import("./CampaignReport"));
 const Conversations = lazy(() => import("./Conversations"));
 const BusinessPanel = lazy(() => import("./features/BusinessPanel"));
@@ -280,13 +281,17 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   // Display names are operator-editable, so they cannot identify a plan.
   const currentPlanKey = (currentUser?.plan || "").toLowerCase();
   const isFreePlan = !!entitlements && !entitlements.whatsappOutreach;
-  const initialBusinessTab = useRef<"learn" | "knowledge">(
+  // The retired /app/knowledge deep link (and the stale "knowledge" tab
+  // preference) now land on "Upload & teach AI", which is the closest
+  // equivalent: it is where files are fed to the AI. Everyone else gets the
+  // panel's own default, the company profile.
+  const initialBusinessTab = useRef<"learn" | undefined>(
     typeof window !== "undefined" &&
       (window.location.pathname.replace(/\/+$/, "") === "/app/knowledge" ||
         (window.location.pathname.replace(/\/+$/, "") === "/app" &&
           (localStorage.getItem("leadgenpilot_activeTab") || localStorage.getItem("nexaleadai_activeTab")) === "knowledge"))
-      ? "knowledge"
-      : "learn"
+      ? "learn"
+      : undefined
   );
   // URL-based navigation. Pathname wins on deep links; the previous localStorage
   // preference is used only when someone enters through bare /app.
@@ -299,6 +304,10 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     const pathname = typeof window !== "undefined" ? window.location.pathname : "/app";
     return initialDashboardRoute(pathname, migratedSaved).id;
   });
+
+  // Which builder the Templates tab shows: the WhatsApp component builder or
+  // the existing email template editor.
+  const [templatesChannel, setTemplatesChannel] = useState<"whatsapp" | "email">("whatsapp");
 
   const navigateToTab = useCallback(
     (tab: DashboardTab, options: { replace?: boolean } = {}) => {
@@ -428,7 +437,11 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   };
 
   // WhatsApp & SMTP Configurations
-  const [whatsappStatus, setWhatsappStatus] = useState({ status: "DISCONNECTED", qr: "" });
+  const [whatsappStatus, setWhatsappStatus] = useState<{ status: string; qr: string; qrDataUrl?: string; error?: string }>({ status: "DISCONNECTED", qr: "" });
+  // Per-slot status for the multi-account WhatsApp gateway (up to 5 accounts).
+  const [whatsappSessions, setWhatsappSessions] = useState<Array<{ slot: number; status: string; qr: string; qrDataUrl?: string; error?: string }>>([]);
+  // Which slot is mid-disconnect, so only that card shows the disconnecting state.
+  const [disconnectingSlot, setDisconnectingSlot] = useState<number | null>(null);
   const [userIntegrations, setUserIntegrations] = useState<any[]>([]);
   const [smtpHost, setSmtpHost] = useState("");
   const [smtpPort, setSmtpPort] = useState("587");
@@ -806,11 +819,12 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
         }
       }
 
-      // 7. Fetch WhatsApp status
+      // 7. Fetch WhatsApp status (single + per-slot sessions)
       const waRes = await fetch("/api/whatsapp/status");
       if (waRes.ok) {
         const wa = await waRes.json();
         setWhatsappStatus(wa);
+        if (Array.isArray(wa.sessions)) setWhatsappSessions(wa.sessions);
       }
 
       // 8. Fetch Campaign status
@@ -890,6 +904,18 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     return () => clearInterval(interval);
   }, [isRunning]);
 
+  // While any WhatsApp slot is mid-handshake (CONNECTING / QR_READY), poll the
+  // per-slot status every 2.5s so freshly generated QR codes appear and a
+  // successful scan flips the card to ACTIVE without a manual refresh.
+  useEffect(() => {
+    const pending = whatsappSessions.some(
+      s => s.status === "CONNECTING" || s.status === "QR_READY" || s.status === "AUTHENTICATING"
+    );
+    if (!pending) return;
+    const interval = setInterval(() => void fetchWhatsAppSessions(), 2500);
+    return () => clearInterval(interval);
+  }, [whatsappSessions]);
+
   const fetchStatusAndLogs = async () => {
     try {
       const statusRes = await fetch("/api/status");
@@ -943,6 +969,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
       if (waRes.ok) {
         const wa = await waRes.json();
         setWhatsappStatus(wa);
+        if (Array.isArray(wa.sessions)) setWhatsappSessions(wa.sessions);
       }
 
       const campaignRes = await fetch("/api/campaign/status");
@@ -1338,57 +1365,94 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     }
   };
 
-  const handleInitializeWhatsApp = async () => {
+  // Fetch the status of all 5 WhatsApp account slots.
+  const fetchWhatsAppSessions = async () => {
     try {
-      const res = await fetch("/api/whatsapp/initialize", { method: "POST" });
+      const res = await fetch("/api/whatsapp/sessions");
       if (res.ok) {
-        setWhatsappStatus(prev => ({ ...prev, status: "CONNECTING" }));
+        const data = await res.json();
+        if (Array.isArray(data.sessions)) setWhatsappSessions(data.sessions);
+        return;
+      }
+      // A 401/403 here means the poll will never succeed, so surface it on the
+      // cards instead of leaving them frozen on a stale state.
+      const detail = await res.json().catch(() => ({} as any));
+      console.warn("WhatsApp session poll failed:", res.status, detail);
+      setWhatsappSessions(prev =>
+        prev.map(s => (s.status === "CONNECTED" ? s : { ...s, error: detail.error || `Status unavailable (HTTP ${res.status}).` }))
+      );
+    } catch (err) {
+      console.warn("WhatsApp session poll error:", err);
+    }
+  };
+
+  const handleInitializeWhatsApp = async (slot: number = 1) => {
+    try {
+      const res = await fetch(`/api/whatsapp/sessions/${slot}/initialize`, { method: "POST" });
+      if (res.ok) {
+        // Optimistically mark that slot connecting, then poll for the QR.
+        setWhatsappSessions(prev => {
+          const next = prev.length ? [...prev] : [];
+          const idx = next.findIndex(s => s.slot === slot);
+          const connecting = { slot, status: "CONNECTING", qr: "" };
+          if (idx >= 0) next[idx] = { ...next[idx], ...connecting }; else next.push(connecting);
+          return next;
+        });
+        if (slot === 1) setWhatsappStatus(prev => ({ ...prev, status: "CONNECTING" }));
+        fetchWhatsAppSessions();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || "Failed to initialize WhatsApp gateway.");
       }
     } catch (err) {
       alert("Error initializing WhatsApp.");
     }
   };
 
-  const handleDisconnectWhatsApp = async () => {
-    if (!window.confirm("Disconnect WhatsApp session? This will log out the client and terminate active scans.")) return;
+  const handleDisconnectWhatsApp = async (slot: number = 1) => {
+    if (!window.confirm(`Disconnect WhatsApp account ${slot}? This will log out that client.`)) return;
     setIsDisconnectingWa(true);
-    // Optimistically transition the UI to connecting/generating new QR
-    setWhatsappStatus({ status: "CONNECTING", qr: "" });
+    setDisconnectingSlot(slot);
+    // Optimistically transition that slot to connecting/generating new QR
+    setWhatsappSessions(prev => prev.map(s => s.slot === slot ? { ...s, status: "CONNECTING", qr: "" } : s));
+    if (slot === 1) setWhatsappStatus({ status: "CONNECTING", qr: "" });
     try {
-      const res = await fetch("/api/whatsapp/disconnect", { method: "POST" });
-      if (res.ok) {
-        fetchData();
-      } else {
-        alert("Failed to disconnect WhatsApp.");
-        fetchData();
-      }
+      const res = await fetch(`/api/whatsapp/sessions/${slot}/disconnect`, { method: "POST" });
+      if (!res.ok) alert("Failed to disconnect WhatsApp.");
     } catch (err) {
       alert("Error disconnecting WhatsApp session.");
-      fetchData();
     } finally {
       setIsDisconnectingWa(false);
+      setDisconnectingSlot(null);
+      fetchWhatsAppSessions();
+      fetchData();
     }
   };
 
-  const handleSendTestMessage = async () => {
-    const phone = window.prompt("Enter phone number with country code (e.g. 919876543210) to send a test message, or leave blank to send to yourself:");
-    if (phone === null) return; // user cancelled
-    
+  /**
+   * Send a test WhatsApp message from a specific linked account.
+   *
+   * Returns the outcome instead of raising alerts: the dialog in
+   * IntegrationSettings renders success and failure inline, so the user can
+   * correct a bad number without the prompt/alert round trip.
+   */
+  const handleSendTestMessage = async (
+    slot: number,
+    phone: string,
+    message: string
+  ): Promise<{ ok: boolean; error?: string }> => {
     setIsSendingTestMsg(true);
     try {
       const res = await fetch("/api/whatsapp/send-test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: phone.trim() })
+        body: JSON.stringify({ phone, message, slot }),
       });
-      if (res.ok) {
-        alert("Test message sent successfully!");
-      } else {
-        const data = await res.json();
-        alert("Failed to send test message: " + (data.error || "Unknown error"));
-      }
-    } catch (e) {
-      alert("Error sending test message.");
+      const data = await res.json().catch(() => ({} as any));
+      if (res.ok) return { ok: true };
+      return { ok: false, error: data.error || `Send failed (HTTP ${res.status}).` };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || "Network error while sending the test message." };
     } finally {
       setIsSendingTestMsg(false);
     }
@@ -2242,9 +2306,9 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
           </nav>
         </div>
 
-        {/* Sidebar Footer — current plan + monthly usage + collapse toggle */}
-        <div className={`border-t ${isLight ? "border-slate-200" : "border-[#1e293b]/60"} ${sidebarCollapsed ? "p-2" : "p-3"} space-y-2 shrink-0`}>
-          {!sidebarCollapsed && (
+        {/* Sidebar Footer — current plan + monthly usage */}
+        {!sidebarCollapsed && (
+          <div className={`border-t ${isLight ? "border-slate-200" : "border-[#1e293b]/60"} p-3 space-y-2 shrink-0`}>
             <div className={`p-2.5 rounded-lg border ${isLight ? "bg-slate-50/70 border-slate-200/80" : "bg-[#040711] border-[#1e293b]/80"} space-y-1.5`}>
               <div className="flex items-center justify-between">
                 <span className={`text-[9px] font-semibold uppercase tracking-wider ${isLight ? "text-slate-400" : "text-slate-500"}`}>Current Plan</span>
@@ -2281,24 +2345,32 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                 </div>
               )}
             </div>
-          )}
-
-          <button
-            onClick={() => setSidebarCollapsed((c) => !c)}
-            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className={`w-full btn-interactive flex items-center gap-1.5 rounded-lg text-[11px] font-medium cursor-pointer transition-all ${
-              sidebarCollapsed ? "justify-center py-1.5" : "justify-center py-1.5"
-            } border ${isLight ? "border-slate-200 bg-white text-slate-600 hover:bg-slate-100" : "border-[#1e293b] bg-slate-900/40 text-slate-400 hover:bg-slate-800/60 hover:text-white"}`}
-          >
-            {sidebarCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <><ChevronLeft className="h-3.5 w-3.5" /> Collapse rail</>}
-          </button>
-        </div>
+          </div>
+        )}
       </aside>
+
+      {/* Floating Toggle Icon: half navbar and half sidebar menu (beside logo) */}
+      <button
+        onClick={() => setSidebarCollapsed((c) => !c)}
+        title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        className={`fixed top-3.5 ${sidebarCollapsed ? "left-[72px]" : "left-64"} -translate-x-1/2 z-50 h-7 w-7 rounded-full border shadow-md flex items-center justify-center cursor-pointer transition-all duration-200 ${
+          isLight
+            ? "bg-white border-slate-300 text-slate-600 hover:text-slate-900 hover:bg-slate-50 hover:shadow-lg"
+            : "bg-[#0b101d] border-slate-700 text-slate-300 hover:text-white hover:bg-slate-800 hover:border-slate-600 hover:shadow-lg"
+        }`}
+      >
+        {sidebarCollapsed ? (
+          <ChevronRight className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronLeft className="h-3.5 w-3.5" />
+        )}
+      </button>
 
       {/* Fixed main shell shared by every route */}
       <div className="min-w-0">
         {/* Fixed dashboard header */}
-        <header className={`${sidebarCollapsed ? "left-[72px]" : "left-64"} fixed top-0 right-0 h-14 ${bgHeader} px-3 sm:px-5 lg:px-6 flex items-center justify-between z-40 backdrop-blur-md transition-[left] duration-200 border-b ${borderSubtle}`}>
+        <header className={`${sidebarCollapsed ? "left-[72px]" : "left-64"} fixed top-0 right-0 h-14 ${bgHeader} pl-6 sm:pl-7 pr-3 sm:pr-5 lg:pr-6 flex items-center justify-between z-40 backdrop-blur-md transition-[left] duration-200 border-b ${borderSubtle}`}>
           <div className="flex min-w-0 items-center gap-2.5">
             <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition-all ${
               currentRoute.id === "suppressions"
@@ -2323,71 +2395,100 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
           <div className="flex items-center gap-2 sm:gap-2.5">
             {/* Animated Search Trigger & Expandable Searchbar */}
-            <div ref={headerSearchRef} className="relative">
-              {!headerSearchOpen ? (
+            <div ref={headerSearchRef} className="relative flex items-center">
+              <div
+                className={`flex items-center rounded-lg border transition-all duration-300 ease-out overflow-hidden ${
+                  headerSearchOpen
+                    ? `w-64 sm:w-80 px-2.5 py-1.5 shadow-lg ${
+                        isLight
+                          ? "bg-white border-indigo-500/60 ring-2 ring-indigo-500/15"
+                          : "bg-[#090d16] border-indigo-500/60 ring-2 ring-indigo-500/20"
+                      }`
+                    : `w-8 h-8 justify-center cursor-pointer btn-interactive ${borderSubtle} ${
+                        isLight
+                          ? "bg-white hover:bg-slate-100 text-slate-600 hover:text-slate-900"
+                          : "bg-slate-900/40 hover:bg-slate-800 text-slate-400 hover:text-white"
+                      }`
+                }`}
+                onClick={() => {
+                  if (!headerSearchOpen) {
+                    setHeaderSearchOpen(true);
+                    setTimeout(() => headerSearchInputRef.current?.focus(), 60);
+                  }
+                }}
+              >
                 <button
-                  onClick={() => setHeaderSearchOpen(true)}
-                  className={`btn-interactive group flex items-center gap-2 px-2.5 sm:px-3 py-1.5 rounded-lg border text-xs font-medium cursor-pointer transition-all duration-200 shadow-xs ${
-                    isLight
-                      ? "bg-slate-50 hover:bg-white border-slate-200 text-slate-600 hover:text-slate-900 hover:border-indigo-300"
-                      : "bg-slate-900/60 hover:bg-slate-900 border-[#1e293b] text-slate-300 hover:text-white hover:border-indigo-500/40"
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setHeaderSearchOpen(prev => !prev);
+                    if (!headerSearchOpen) {
+                      setTimeout(() => headerSearchInputRef.current?.focus(), 60);
+                    }
+                  }}
+                  className={`shrink-0 flex items-center justify-center cursor-pointer transition-colors ${
+                    headerSearchOpen
+                      ? "p-0.5 text-indigo-500"
+                      : "w-full h-full text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
                   }`}
-                  title="Quick Search (Ctrl + K)"
+                  title={headerSearchOpen ? "Close search" : "Quick Search (Ctrl + K)"}
+                  aria-label="Search"
                 >
-                  <span className="relative flex items-center justify-center">
-                    <Search className="h-3.5 w-3.5 text-indigo-500 transition-transform duration-300 group-hover:scale-110 group-hover:rotate-12 animate-pulse" />
-                    <span className="absolute -top-0.5 -right-0.5 flex h-1.5 w-1.5">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
-                    </span>
-                  </span>
-                  <span className="hidden sm:inline text-slate-400 font-normal group-hover:text-slate-300">Search...</span>
-                  <kbd className={`hidden md:inline-flex items-center px-1.5 py-0.2 text-[9px] font-mono font-semibold rounded border ${
-                    isLight ? "bg-white text-slate-400 border-slate-200" : "bg-slate-800 text-slate-400 border-slate-700/60"
-                  }`}>
-                    ⌘K
-                  </kbd>
+                  <Search className={`h-3.5 w-3.5 transition-transform duration-300 ${
+                    headerSearchOpen ? "scale-105" : "hover:scale-110"
+                  }`} />
                 </button>
-              ) : (
-                <div className="relative animate-scaleUp">
-                  <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border w-72 sm:w-80 shadow-lg transition-all ${
-                    isLight
-                      ? "bg-white border-indigo-500/60 ring-2 ring-indigo-500/15"
-                      : "bg-[#090d16] border-indigo-500/60 ring-2 ring-indigo-500/20"
-                  }`}>
-                    <Search className="h-3.5 w-3.5 text-indigo-500 shrink-0 animate-pulse" />
-                    <input
-                      ref={headerSearchInputRef}
-                      type="text"
-                      value={headerSearchQuery}
-                      onChange={(e) => setHeaderSearchQuery(e.target.value)}
-                      placeholder="Search routes, leads, tools..."
-                      className={`w-full bg-transparent text-xs focus:outline-none placeholder:text-slate-400 ${
-                        isLight ? "text-slate-900" : "text-white"
-                      }`}
-                    />
-                    {headerSearchQuery ? (
-                      <button
-                        onClick={() => setHeaderSearchQuery("")}
-                        className="text-slate-400 hover:text-slate-200 cursor-pointer"
-                        title="Clear query"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => setHeaderSearchOpen(false)}
-                        className="text-slate-400 hover:text-slate-200 text-[10px] font-mono px-1 py-0.2 rounded border border-slate-700/60 cursor-pointer"
-                        title="Close (Esc)"
-                      >
-                        ESC
-                      </button>
-                    )}
-                  </div>
 
-                  {/* Search Dropdown Results */}
-                  <div className={`absolute right-0 top-10 w-80 sm:w-96 rounded-xl shadow-2xl border overflow-hidden z-[110] transition-all p-1.5 space-y-2 ${
-                    isLight
+                {/* Smooth expanding input section */}
+                <div
+                  className={`flex items-center w-full min-w-0 transition-all duration-300 ease-out ${
+                    headerSearchOpen
+                      ? "opacity-100 ml-2"
+                      : "opacity-0 w-0 pointer-events-none hidden"
+                  }`}
+                >
+                  <input
+                    ref={headerSearchInputRef}
+                    type="text"
+                    value={headerSearchQuery}
+                    onChange={(e) => setHeaderSearchQuery(e.target.value)}
+                    placeholder="Search routes, leads, tools..."
+                    className={`w-full bg-transparent text-xs focus:outline-none placeholder:text-slate-400 ${
+                      isLight ? "text-slate-900" : "text-white"
+                    }`}
+                  />
+                  {headerSearchQuery ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setHeaderSearchQuery("");
+                      }}
+                      className="text-slate-400 hover:text-slate-200 cursor-pointer ml-1 shrink-0"
+                      title="Clear query"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setHeaderSearchOpen(false);
+                      }}
+                      className="text-slate-400 hover:text-slate-200 text-[10px] font-mono px-1 py-0.2 rounded border border-slate-700/60 cursor-pointer ml-1 shrink-0"
+                      title="Close (Esc)"
+                    >
+                      ESC
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Search Dropdown Results */}
+              {headerSearchOpen && (
+                <div className={`absolute right-0 top-10 w-80 sm:w-96 rounded-xl shadow-2xl border overflow-hidden z-[110] animate-fadeIn p-1.5 space-y-2 ${
+                  isLight
                       ? "bg-white border-slate-200 text-slate-800"
                       : "bg-[#090d16] border-[#1e293b] text-slate-100"
                   }`}>
@@ -2480,8 +2581,7 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                       </div>
                     )}
                   </div>
-                </div>
-              )}
+                )}
             </div>
             <button 
               onClick={() => setTheme(isLight ? "dark" : "light")}
@@ -4842,11 +4942,13 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
                 isLight={isLight} 
                 canWhatsapp={canWhatsapp}
                 whatsappStatus={whatsappStatus}
+                whatsappSessions={whatsappSessions}
                 onInitializeWhatsApp={handleInitializeWhatsApp}
                 onDisconnectWhatsApp={handleDisconnectWhatsApp}
                 onSendWhatsAppTest={handleSendTestMessage}
                 isSendingTestMsg={isSendingTestMsg}
                 isDisconnectingWa={isDisconnectingWa}
+                disconnectingSlot={disconnectingSlot}
                 webhookConfigured={webhookConfigured}
                 onWebhookConfiguredChange={setWebhookConfigured}
                 onIntegrationsChange={fetchData}
@@ -5593,8 +5695,37 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
 
           {/* TAB 6: EMAIL TEMPLATES BUILDER */}
           {activeTab === "templates" && (
-            <div className="space-y-6 animate-fadeIn">
-              <EmailTemplates isLight={isLight} workspaceId={currentWorkspace?.id} />
+            <div className="space-y-5 animate-fadeIn">
+              {/* Channel switcher: WhatsApp component builder vs the email editor. */}
+              <div className={`inline-flex items-center gap-1 rounded-xl border p-1 ${isLight ? "bg-slate-100/90 border-slate-200" : "bg-[#0b101d] border-[#1e293b]"}`}>
+                {([
+                  { id: "whatsapp" as const, label: "WhatsApp" },
+                  { id: "email" as const, label: "Email" },
+                ]).map((c) => (
+                  <button
+                    key={c.id}
+                    onClick={() => setTemplatesChannel(c.id)}
+                    className={`flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                      templatesChannel === c.id
+                        ? isLight ? "bg-white text-slate-900 shadow-xs border border-slate-200" : "bg-slate-800 text-white border border-slate-700"
+                        : isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    {c.id === "whatsapp"
+                      ? <WhatsAppLogo className="h-3.5 w-3.5 fill-emerald-500 text-emerald-500" />
+                      : <Mail className="h-3.5 w-3.5 text-indigo-400" />}
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+
+              <Suspense fallback={<div className="py-10 text-center text-xs text-slate-400">Loading…</div>}>
+                {templatesChannel === "whatsapp" ? (
+                  <MessageTemplatePanel isLight={isLight} businessName={currentWorkspace?.name} />
+                ) : (
+                  <EmailTemplates isLight={isLight} workspaceId={currentWorkspace?.id} />
+                )}
+              </Suspense>
             </div>
           )}
 

@@ -17,6 +17,7 @@ import { assistantPrompt } from "./assistant";
 import { icpSuggestionPrompt } from "./icpSuggestion";
 import { leadIcpFitPrompt } from "./leadIcpFit";
 import { outreachTemplateDraftPrompt } from "./outreachTemplateDraft";
+import { messageTemplateDraftPrompt } from "./messageTemplateDraft";
 import type { PromptDefinition } from "./types";
 
 export { GROUNDING_PREAMBLE, withGrounding } from "./types";
@@ -64,6 +65,12 @@ export {
   type TemplateDraftBusiness,
   type TemplateDraftInput,
 } from "./outreachTemplateDraft";
+export {
+  messageTemplateDraftPrompt,
+  validateMessageTemplateDraft,
+  type MessageTemplateDraftInput,
+  type MessageTemplateDraftOutput,
+} from "./messageTemplateDraft";
 
 /** All registered prompts, keyed by name. */
 export const PROMPTS = {
@@ -74,6 +81,7 @@ export const PROMPTS = {
   [icpSuggestionPrompt.name]: icpSuggestionPrompt,
   [leadIcpFitPrompt.name]: leadIcpFitPrompt,
   [outreachTemplateDraftPrompt.name]: outreachTemplateDraftPrompt,
+  [messageTemplateDraftPrompt.name]: messageTemplateDraftPrompt,
 } as const satisfies Record<string, PromptDefinition<any>>;
 
 export type PromptName = keyof typeof PROMPTS;

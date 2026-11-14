@@ -23,7 +23,6 @@ import {
   Building2,
   Check,
   FileText,
-  Library,
   Pencil,
   Plus,
   Sparkles,
@@ -53,6 +52,7 @@ import {
   TagInput,
   TextArea,
   TextInput,
+  ModalPortal,
   formatAgo,
   formatBytes,
   tokens,
@@ -61,13 +61,16 @@ import {
   type Themed,
 } from "../ui/primitives";
 
-type Tab = "learn" | "profile" | "products" | "services" | "knowledge";
+type Tab = "profile" | "products" | "services" | "learn";
 
-const KnowledgePanel = React.lazy(() => import("./KnowledgePanel"));
+type BusinessPanelProps = Themed & { initialTab?: Tab };
 
-type BusinessPanelProps = Themed & { initialTab?: "learn" | "knowledge" };
-
-export default function BusinessPanel({ isLight, initialTab = "learn" }: BusinessPanelProps) {
+/**
+ * Defaults to the company profile rather than the upload tab: uploading is a
+ * one-off setup step, so it sits last in the tab order and the panel opens on
+ * the data the user is most likely to come back to.
+ */
+export default function BusinessPanel({ isLight, initialTab = "profile" }: BusinessPanelProps) {
   const [tab, setTab] = useState<Tab>(initialTab);
   const products = useAsync<ProductView[]>(() => api.get("/api/business/products"));
   const services = useAsync<ServiceView[]>(() => api.get("/api/business/services"));
@@ -79,14 +82,16 @@ export default function BusinessPanel({ isLight, initialTab = "learn" }: Busines
         value={tab}
         onChange={setTab}
         tabs={[
-          { id: "learn", label: "Upload & teach AI", icon: Wand2 },
           { id: "profile", label: "Company profile", icon: Building2 },
           { id: "products", label: "Products", icon: Boxes, count: products.data?.length },
           { id: "services", label: "Services", icon: Briefcase, count: services.data?.length },
-          { id: "knowledge", label: "Knowledge library", icon: Library },
+          { id: "learn", label: "Upload & teach AI", icon: Wand2 },
         ]}
       />
 
+      {tab === "profile" && <ProfileTab isLight={isLight} />}
+      {tab === "products" && <ProductsTab isLight={isLight} state={products} />}
+      {tab === "services" && <ServicesTab isLight={isLight} state={services} />}
       {tab === "learn" && (
         <LearnTab
           isLight={isLight}
@@ -95,14 +100,6 @@ export default function BusinessPanel({ isLight, initialTab = "learn" }: Busines
             services.reload();
           }}
         />
-      )}
-      {tab === "profile" && <ProfileTab isLight={isLight} />}
-      {tab === "products" && <ProductsTab isLight={isLight} state={products} />}
-      {tab === "services" && <ServicesTab isLight={isLight} state={services} />}
-      {tab === "knowledge" && (
-        <React.Suspense fallback={<Spinner isLight={isLight} label="Loading knowledge library…" />}>
-          <KnowledgePanel isLight={isLight} />
-        </React.Suspense>
       )}
     </div>
   );
@@ -513,83 +510,6 @@ function CatalogueTab({
           </Button>
         }
       >
-        {draft && (
-          <div className={`border rounded-xl p-4 mb-4 ${t.inset}`}>
-            <div className="grid md:grid-cols-2 gap-4">
-              <Field isLight={isLight} label="Name">
-                <TextInput
-                  isLight={isLight}
-                  autoFocus
-                  value={draft.name}
-                  onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-                  placeholder={kind === "product" ? "PX-100 Autoclave" : "Annual maintenance contract"}
-                />
-              </Field>
-              <Field isLight={isLight} label="Category">
-                <TextInput
-                  isLight={isLight}
-                  value={draft.category}
-                  onChange={(e) => setDraft({ ...draft, category: e.target.value })}
-                />
-              </Field>
-              <Field isLight={isLight} label="Description" className="md:col-span-2">
-                <TextArea
-                  isLight={isLight}
-                  rows={2}
-                  value={draft.description}
-                  onChange={(e) => setDraft({ ...draft, description: e.target.value })}
-                />
-              </Field>
-              {withFeatures && (
-                <Field isLight={isLight} label="Key features">
-                  <TagInput
-                    isLight={isLight}
-                    values={draft.keyFeatures}
-                    onChange={(keyFeatures) => setDraft({ ...draft, keyFeatures })}
-                    placeholder="18 litre chamber"
-                  />
-                </Field>
-              )}
-              <Field isLight={isLight} label="Ideal for">
-                <TagInput
-                  isLight={isLight}
-                  values={draft.idealFor}
-                  onChange={(idealFor) => setDraft({ ...draft, idealFor })}
-                  placeholder="Dental clinics"
-                />
-              </Field>
-              <Field
-                isLight={isLight}
-                label="Price positioning"
-                hint="Free text. 'On application' and 'from ₹8L' are as valid as a number, and the AI will never invent one."
-                className="md:col-span-2"
-              >
-                <TextInput
-                  isLight={isLight}
-                  value={draft.priceRange}
-                  onChange={(e) => setDraft({ ...draft, priceRange: e.target.value })}
-                  placeholder="On application"
-                />
-              </Field>
-            </div>
-            <div className="flex justify-end gap-2 mt-4">
-              <Button isLight={isLight} variant="ghost" onClick={() => setDraft(null)}>
-                Cancel
-              </Button>
-              <Button
-                isLight={isLight}
-                variant="primary"
-                icon={Check}
-                busy={action.busy}
-                disabled={!draft.name.trim()}
-                onClick={submit}
-              >
-                {draft.id ? "Save" : `Add ${kind}`}
-              </Button>
-            </div>
-          </div>
-        )}
-
         {state.loading ? (
           <Spinner isLight={isLight} />
         ) : state.error ? (
@@ -680,6 +600,113 @@ function CatalogueTab({
           </div>
         )}
       </Card>
+
+      {/* Add/edit is a modal rather than an inline form: the catalogue can be
+          long, and an inline editor pushed the list down and lost the user's
+          place. The modal keeps the list stable and focuses attention on one
+          record at a time. */}
+      {draft && (
+        <ModalPortal>
+          <div
+            className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 overflow-y-auto animate-fadeIn"
+            onMouseDown={() => setDraft(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-label={draft.id ? `Edit ${kind}` : `Add ${kind}`}
+          >
+            <div
+              onMouseDown={(e) => e.stopPropagation()}
+              className={`w-full max-w-2xl rounded-2xl border p-6 shadow-2xl animate-scaleUp my-auto ${
+                isLight ? "bg-white border-slate-200" : "bg-[#090d16] border-[#1e293b]"
+              }`}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <h3 className={`text-base font-bold flex items-center gap-2 ${t.heading}`}>
+                  {React.createElement(icon, { className: "h-4.5 w-4.5 text-indigo-400" })}
+                  {draft.id ? `Edit ${kind}` : `Add ${kind}`}
+                </h3>
+                <Button isLight={isLight} variant="ghost" icon={X} onClick={() => setDraft(null)} aria-label="Close">
+                  {""}
+                </Button>
+              </div>
+
+              <div className="grid md:grid-cols-2 gap-4">
+                <Field isLight={isLight} label="Name">
+                  <TextInput
+                    isLight={isLight}
+                    autoFocus
+                    value={draft.name}
+                    onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                    onKeyDown={(e: React.KeyboardEvent) => { if (e.key === "Escape") setDraft(null); }}
+                    placeholder={kind === "product" ? "PX-100 Autoclave" : "Annual maintenance contract"}
+                  />
+                </Field>
+                <Field isLight={isLight} label="Category">
+                  <TextInput
+                    isLight={isLight}
+                    value={draft.category}
+                    onChange={(e) => setDraft({ ...draft, category: e.target.value })}
+                  />
+                </Field>
+                <Field isLight={isLight} label="Description" className="md:col-span-2">
+                  <TextArea
+                    isLight={isLight}
+                    rows={2}
+                    value={draft.description}
+                    onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                  />
+                </Field>
+                {withFeatures && (
+                  <Field isLight={isLight} label="Key features">
+                    <TagInput
+                      isLight={isLight}
+                      values={draft.keyFeatures}
+                      onChange={(keyFeatures) => setDraft({ ...draft, keyFeatures })}
+                      placeholder="18 litre chamber"
+                    />
+                  </Field>
+                )}
+                <Field isLight={isLight} label="Ideal for">
+                  <TagInput
+                    isLight={isLight}
+                    values={draft.idealFor}
+                    onChange={(idealFor) => setDraft({ ...draft, idealFor })}
+                    placeholder="Dental clinics"
+                  />
+                </Field>
+                <Field
+                  isLight={isLight}
+                  label="Price positioning"
+                  hint="Free text. 'On application' and 'from ₹8L' are as valid as a number, and the AI will never invent one."
+                  className="md:col-span-2"
+                >
+                  <TextInput
+                    isLight={isLight}
+                    value={draft.priceRange}
+                    onChange={(e) => setDraft({ ...draft, priceRange: e.target.value })}
+                    placeholder="On application"
+                  />
+                </Field>
+              </div>
+              <div className="flex justify-end gap-2 mt-5 pt-4 border-t border-slate-200/20">
+                <Button isLight={isLight} variant="ghost" onClick={() => setDraft(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  isLight={isLight}
+                  variant="primary"
+                  icon={Check}
+                  busy={action.busy}
+                  disabled={!draft.name.trim()}
+                  onClick={submit}
+                >
+                  {draft.id ? "Save Changes" : `Add ${kind}`}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </ModalPortal>
+      )}
     </div>
   );
 }

@@ -6,6 +6,12 @@ export interface DispatchInput {
   status: "SENT" | "FAILED"; sourceType: string; sourceLabel: string;
   subject?: string | null; messageSnippet?: string; errorMessage?: string;
   externalMessageId?: string; idempotencyKey?: string | null; dryRun?: boolean; occurredAt?: Date;
+  /** Analytics: UserIntegration.id of the sender account used. */
+  senderIntegrationId?: string | null;
+  /** Analytics: TemplateVariation.id used. */
+  variationId?: string | null;
+  /** Analytics: Rotation slot index of the selected variation. */
+  variationIndex?: number | null;
 }
 
 function dataFor(input: DispatchInput) {
@@ -16,6 +22,9 @@ function dataFor(input: DispatchInput) {
     subject: input.subject ?? null, messageSnippet: input.messageSnippet?.slice(0, 500) ?? null,
     errorMessage: input.errorMessage?.slice(0, 500) ?? null, externalMessageId: input.externalMessageId ?? null,
     idempotencyKey: input.idempotencyKey ?? null,
+    senderIntegrationId: input.senderIntegrationId ?? null,
+    templateVariationId: input.variationId ?? null,
+    templateVariationIndex: input.variationIndex ?? null,
     occurredAt: input.occurredAt ?? new Date(),
   };
 }
@@ -30,7 +39,14 @@ export async function recordDispatch(input: DispatchInput): Promise<void> {
  * receipt after the lease owner has already finalised it; retries are retained
  * on the message row instead of producing contradictory delivery reports.
  */
-export async function recordCampaignDispatch(input: { message: any; campaignName: string; status: "SENT" | "FAILED"; externalMessageId?: string; errorMessage?: string }): Promise<void> {
+export async function recordCampaignDispatch(input: {
+  message: any; campaignName: string; status: "SENT" | "FAILED"; externalMessageId?: string; errorMessage?: string;
+  /** Analytics: which sender account was used. */
+  senderIntegrationId?: string | null;
+  /** Analytics: which template variation was used. */
+  variationId?: string | null;
+  variationIndex?: number | null;
+}): Promise<void> {
   const data = dataFor({
     tenantId: input.message.tenantId, campaignId: input.message.campaignId, campaignMessageId: input.message.id,
     leadId: input.message.leadId, businessName: input.message.businessName, recipient: input.message.recipient,
@@ -38,6 +54,9 @@ export async function recordCampaignDispatch(input: { message: any; campaignName
     sourceLabel: input.campaignName, subject: input.message.subject, messageSnippet: input.message.body,
     externalMessageId: input.externalMessageId, errorMessage: input.errorMessage,
     idempotencyKey: input.message.idempotencyKey ?? null,
+    senderIntegrationId: input.senderIntegrationId ?? null,
+    variationId: input.variationId ?? null,
+    variationIndex: input.variationIndex ?? null,
   });
   await (prisma.campaignDispatch as any).upsert({ where: { campaignMessageId: input.message.id }, create: data, update: data });
 }

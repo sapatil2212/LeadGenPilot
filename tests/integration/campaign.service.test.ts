@@ -85,6 +85,7 @@ describe("Campaign Service", () => {
     // Clean up campaign data
     await prisma.campaignMessage.deleteMany({ where: { tenantId: TENANT_ID } });
     await prisma.campaign.deleteMany({ where: { tenantId: TENANT_ID } });
+    await prisma.messageTemplate.deleteMany({ where: { tenantId: TENANT_ID } });
     await prisma.lead.deleteMany({ where: { tenantId: TENANT_ID } });
     await prisma.leadList.deleteMany({ where: { tenantId: TENANT_ID } });
     await prisma.tenant.deleteMany({ where: { id: TENANT_ID } });
@@ -273,6 +274,86 @@ describe("Campaign Service", () => {
 
       const campaigns = await prisma.campaign.findMany({ where: { tenantId: TENANT_ID } });
       expect(campaigns).toHaveLength(0);
+    });
+
+    it("compiles a component MessageTemplate into the WhatsApp message body", async () => {
+      const list = await prisma.leadList.create({
+        data: {
+          name: "Test List",
+          tenantId: TENANT_ID,
+          userId: USER_ID,
+          businessType: "Test Business Type",
+          location: "Test Location",
+        },
+      });
+
+      // A lead with a contact name so {{first_name}} resolves to a real value.
+      await prisma.lead.create({
+        data: createLeadData(list.id, { contactName: "Rahul Sharma", businessName: "Smile Dental" }),
+      });
+
+      // A component template referencing variables and an action.
+      const payload = {
+        header: { type: "text", text: "Hello" },
+        body: { text: "Hi {{first_name}}, a note for {{company_name}}." },
+        footer: { enabled: true, text: "Reply STOP to opt out." },
+        actions: [{ id: "a1", type: "url", label: "Visit", value: "https://example.com" }],
+        quickReplies: [{ id: "q1", display: "Interested", payload: "INTERESTED" }],
+        variables: [
+          { key: "first_name", label: "First Name", sampleValue: "Rahul", isCustom: false },
+          { key: "company_name", label: "Company", sampleValue: "ABC", isCustom: false },
+        ],
+        settings: { deliveryMethod: "web", personalization: true },
+      };
+      const tpl = await prisma.messageTemplate.create({
+        data: {
+          tenantId: TENANT_ID,
+          name: "Dental Outreach",
+          channel: "whatsapp",
+          deliveryMethod: "web",
+          category: "marketing",
+          payload: JSON.stringify(payload),
+          status: "active",
+          createdById: USER_ID,
+          updatedById: USER_ID,
+        },
+      });
+
+      const result = await generateCampaign(CTX, {
+        name: "Component Campaign",
+        sourceType: "list",
+        sourceListId: list.id,
+        channels: { email: false, whatsapp: true },
+        templateIds: { whatsapp: tpl.id },
+        useAi: false,
+      });
+
+      expect(result.messageCount).toBe(1);
+
+      const message = await prisma.campaignMessage.findFirst({
+        where: { campaignId: result.campaignId, channel: "whatsapp" },
+      });
+      expect(message).toBeTruthy();
+      // Variables resolved from the lead, not left as tokens.
+      expect(message!.body).toContain("Hi Rahul, a note for Smile Dental.");
+      // Header, action and footer rendered as WhatsApp Web text.
+      expect(message!.body).toContain("Hello");
+      expect(message!.body).toContain("https://example.com");
+      expect(message!.body).toContain("Reply STOP to opt out.");
+      // AI copy was never generated for a component template.
+      expect(aiCopyGenerator.generateAICopy).not.toHaveBeenCalled();
+
+      // Usage count incremented.
+      const refreshed = await prisma.messageTemplate.findUnique({ where: { id: tpl.id } });
+      expect(refreshed!.usageCount).toBe(1);
+
+      // The campaign records which template kind was used.
+      const campaign = await prisma.campaign.findUnique({ where: { id: result.campaignId } });
+      const templatesJson = JSON.parse(campaign!.templates || "{}");
+      expect(templatesJson.whatsapp).toBe(tpl.id);
+      expect(templatesJson.whatsappKind).toBe("message_template");
+
+      await prisma.messageTemplate.deleteMany({ where: { tenantId: TENANT_ID } });
     });
   });
 

@@ -24,7 +24,10 @@ function fail(res: Response, err: any, context: string) {
   }
   if (err instanceof AiUnavailableError) {
     return res.status(503).json({
-      error: "Gemini is not currently available. Check GEMINI_API_KEY and try again.",
+      error:
+        "No AI provider could answer right now. Check that at least one of " +
+        "GEMINI_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY or ANTHROPIC_API_KEY " +
+        "is set to a valid key, then try again.",
       code: "ai_unavailable",
       attempts: err.attempts,
     });

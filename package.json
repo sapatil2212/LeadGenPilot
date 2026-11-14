@@ -35,13 +35,14 @@
     "prisma:push": "echo \"REFUSED: 'db push' bypasses migration history. Use 'npm run prisma:migrate:dev' to create a migration, or 'npm run prisma:migrate' to deploy one. Override deliberately with 'npx prisma db push'.\" && exit 1",
     "db:studio": "prisma studio",
     "setup:browsers": "node node_modules/playwright/cli.js install --with-deps chromium",
-    "postinstall": "prisma generate && npm run --silent install:browsers",
+    "postinstall": "prisma generate && npm run --silent install:browsers && node scripts/patch-wwebjs.mjs",
     "install:browsers": "node node_modules/playwright/cli.js install chromium"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@prisma/client": "^6.19.3",
     "@tailwindcss/vite": "^4.1.14",
+    "@types/qrcode": "^1.5.6",
     "@vitejs/plugin-react": "^5.0.4",
     "archiver": "7.0.1",
     "axios": "^1.17.0",
@@ -66,6 +67,7 @@
     "nodemailer": "^8.0.10",
     "pdf-parse": "1.1.1",
     "playwright": "^1.60.0",
+    "qrcode": "^1.5.4",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "recharts": "3.9.2",

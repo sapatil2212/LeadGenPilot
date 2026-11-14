@@ -23,7 +23,7 @@ import {
   deleteCampaign,
   type GenerateCampaignRequest,
 } from "./campaignService";
-import { enqueueCampaignExecution, cancelCampaignExecution } from "./campaignExecutor";
+import { enqueueCampaignExecution, cancelCampaignExecution, validateCampaignThrottleSettings } from "./campaignExecutor";
 import { assertCampaignReadiness } from "./campaignReadiness";
 
 const router = Router();
@@ -243,6 +243,61 @@ router.post(
       res.json({ success: true });
     } catch (error: any) {
       res.status(400).json({ error: error.message || "Failed to reject message." });
+    }
+  }
+);
+
+/**
+ * PATCH /api/campaigns/:id/throttle
+ *
+ * Update per-campaign throttle settings:
+ *   messageDelayMin, messageDelayMax (seconds), batchSize, batchPauseSeconds.
+ * These can be changed before or after execution starts; the running worker
+ * picks up the new values on its next iteration.
+ */
+router.patch(
+  "/:id/throttle",
+  resolveTenantContext,
+  requirePermission("SEND_CAMPAIGN"),
+  async (req: Request, res: Response) => {
+    try {
+      const ctx = ctxOf(req);
+      const { messageDelayMin, messageDelayMax, batchSize, batchPauseSeconds } = req.body;
+
+      // At least one field must be present.
+      if (messageDelayMin === undefined && messageDelayMax === undefined && batchSize === undefined && batchPauseSeconds === undefined) {
+        return res.status(400).json({ error: "Provide at least one of: messageDelayMin, messageDelayMax, batchSize, batchPauseSeconds." });
+      }
+
+      const { prisma } = await import("../prisma");
+      const campaign = await prisma.campaign.findFirst({
+        where: { id: req.params.id, tenantId: ctx.tenantId },
+        select: { id: true, messageDelayMin: true, messageDelayMax: true, batchSize: true, batchPauseSeconds: true },
+      });
+      if (!campaign) return res.status(404).json({ error: "Campaign not found." });
+
+      // Merge new values with existing values for cross-field validation.
+      const newMin = messageDelayMin !== undefined ? Number(messageDelayMin) : campaign.messageDelayMin;
+      const newMax = messageDelayMax !== undefined ? Number(messageDelayMax) : campaign.messageDelayMax;
+      const newBatch = batchSize !== undefined ? Number(batchSize) : campaign.batchSize;
+      const newPause = batchPauseSeconds !== undefined ? Number(batchPauseSeconds) : campaign.batchPauseSeconds;
+
+      const validationError = validateCampaignThrottleSettings(newMin, newMax, newBatch, newPause);
+      if (validationError) return res.status(400).json({ error: validationError });
+
+      await prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          messageDelayMin: newMin,
+          messageDelayMax: newMax,
+          batchSize: newBatch,
+          batchPauseSeconds: newPause,
+        },
+      });
+
+      res.json({ success: true, messageDelayMin: newMin, messageDelayMax: newMax, batchSize: newBatch, batchPauseSeconds: newPause });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || "Failed to update throttle settings." });
     }
   }
 );

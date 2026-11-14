@@ -18,6 +18,15 @@ import { Lead } from "./types";
 
 export const TEMPLATES_STORAGE_KEY = "leadfinder_email_templates_v3";
 
+export interface TemplateAttachment {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  dataUrl?: string;
+  url?: string;
+}
+
 export interface OutreachTemplate {
   id: string;
   name: string;
@@ -28,6 +37,7 @@ export interface OutreachTemplate {
   useLogo: boolean;
   logoType: "text" | "image";
   logoValue: string;
+  headerImage?: string;
   textAlign?: "left" | "center" | "right";
   introText: string;
   useAiBody: boolean;
@@ -40,6 +50,7 @@ export interface OutreachTemplate {
   contactText: string;
   useFooter: boolean;
   footerText: string;
+  attachments?: TemplateAttachment[];
   createdAt: string;
 }
 
