@@ -16,7 +16,7 @@
  * become factual claims in messages sent under the customer's own name.
  */
 
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Boxes,
   Briefcase,
@@ -72,6 +72,7 @@ type BusinessPanelProps = Themed & { initialTab?: Tab };
  */
 export default function BusinessPanel({ isLight, initialTab = "profile" }: BusinessPanelProps) {
   const [tab, setTab] = useState<Tab>(initialTab);
+  const profile = useAsync<BusinessProfileView>(() => api.get("/api/business/profile"));
   const products = useAsync<ProductView[]>(() => api.get("/api/business/products"));
   const services = useAsync<ServiceView[]>(() => api.get("/api/business/services"));
 
@@ -89,15 +90,22 @@ export default function BusinessPanel({ isLight, initialTab = "profile" }: Busin
         ]}
       />
 
-      {tab === "profile" && <ProfileTab isLight={isLight} />}
+      {tab === "profile" && <ProfileTab isLight={isLight} state={profile} />}
       {tab === "products" && <ProductsTab isLight={isLight} state={products} />}
       {tab === "services" && <ServicesTab isLight={isLight} state={services} />}
       {tab === "learn" && (
         <LearnTab
           isLight={isLight}
           onApplied={() => {
+            profile.reload();
             products.reload();
             services.reload();
+          }}
+          onViewProfile={() => {
+            profile.reload();
+            products.reload();
+            services.reload();
+            setTab("profile");
           }}
         />
       )}
@@ -142,11 +150,19 @@ const LIST_FIELDS = [
   },
 ];
 
-function ProfileTab({ isLight }: Themed) {
+function ProfileTab({
+  isLight,
+  state: externalState,
+}: Themed & { state?: ReturnType<typeof useAsync<BusinessProfileView>> }) {
   const t = tokens(isLight);
-  const state = useAsync<BusinessProfileView>(() => api.get("/api/business/profile"));
+  const localState = useAsync<BusinessProfileView>(() => api.get("/api/business/profile"));
+  const state = externalState || localState;
   const save = useAction();
   const [draft, setDraft] = useState<BusinessProfileView | null>(null);
+
+  useEffect(() => {
+    setDraft(null);
+  }, [state.data]);
 
   const profile = draft ?? state.data;
   const dirty = draft !== null;
@@ -330,6 +346,14 @@ function ProfileTab({ isLight }: Themed) {
               isLight={isLight}
               value={profile.contactEmail ?? ""}
               onChange={(e) => edit({ contactEmail: e.target.value })}
+            />
+          </Field>
+          <Field isLight={isLight} label="Contact phone">
+            <TextInput
+              isLight={isLight}
+              value={profile.contactPhone ?? ""}
+              onChange={(e) => edit({ contactPhone: e.target.value })}
+              placeholder="+91 77458 68073"
             />
           </Field>
         </div>
@@ -757,7 +781,11 @@ const KIND_LABEL: Record<string, string> = {
 /** 20 MB, mirroring the server's upload cap. */
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
-function LearnTab({ isLight, onApplied }: Themed & { onApplied: () => void }) {
+function LearnTab({
+  isLight,
+  onApplied,
+  onViewProfile,
+}: Themed & { onApplied: () => void; onViewProfile?: () => void }) {
   const t = tokens(isLight);
   const [text, setText] = useState("");
   const [dragging, setDragging] = useState(false);
@@ -917,9 +945,9 @@ function LearnTab({ isLight, onApplied }: Themed & { onApplied: () => void }) {
         icon={Wand2}
       >
         <Notice isLight={isLight} tone="info" title="Nothing is saved until you say so">
-          The AI's reading is shown for review first. When you apply it, fields you have already
-          filled in are never overwritten and lists are merged, not replaced — a brochure's marketing
-          copy should not silently replace something you wrote by hand.
+          The AI's reading is shown for review first. When you apply it, your profile details are
+          updated with the analyzed information, and new products, services, and list items are
+          merged into your catalogue.
         </Notice>
 
         <div className="mt-4">
@@ -998,12 +1026,28 @@ function LearnTab({ isLight, onApplied }: Themed & { onApplied: () => void }) {
           )}
 
           {result.applied && (
-            <div className="mb-4">
-              <Notice isLight={isLight} tone="success">
-                Empty fields filled, lists merged. Added {result.createdProducts} product
-                {result.createdProducts === 1 ? "" : "s"} and {result.createdServices} service
-                {result.createdServices === 1 ? "" : "s"}.
-              </Notice>
+            <div className="mb-4 p-3.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold text-emerald-800 dark:text-emerald-300">
+                  Applied to your company profile!
+                </div>
+                <div className="text-[11px] text-emerald-700/80 dark:text-emerald-400 mt-0.5">
+                  Profile details updated. Added/merged {result.createdProducts} product
+                  {result.createdProducts === 1 ? "" : "s"} and {result.createdServices} service
+                  {result.createdServices === 1 ? "" : "s"}.
+                </div>
+              </div>
+              {onViewProfile && (
+                <Button
+                  isLight={isLight}
+                  variant="primary"
+                  icon={Building2}
+                  onClick={onViewProfile}
+                  className="text-xs py-1.5 px-3"
+                >
+                  View Company Profile
+                </Button>
+              )}
             </div>
           )}
 

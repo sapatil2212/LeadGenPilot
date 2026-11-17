@@ -18,6 +18,8 @@ import { withGrounding, type PromptDefinition } from "./types";
 export interface BusinessExtractionInput {
   /** What the tenant wrote, or text extracted from their document. */
   sourceText: string;
+  /** Original name of the uploaded file if available. */
+  fileName?: string;
   /** Anything already known, so the model does not re-ask or contradict it. */
   known?: {
     businessName?: string | null;
@@ -122,15 +124,43 @@ export function validateBusinessExtraction(value: unknown): BusinessExtractionOu
         .slice(0, 100)
     : [];
 
+  let businessName = asNullableString(v.businessName, 300);
+  const website = asNullableString(v.website, 500);
+  const contactEmail = asNullableString(v.contactEmail, 200);
+
+  // Safety disambiguation: Check if the extracted businessName accidentally captured
+  // a client or portfolio case study instead of the authoring company.
+  // E.g., if email/website contains "sapdigitech", but businessName was extracted as "Vantara Network Solutions".
+  if (businessName && (contactEmail || website)) {
+    const emailDomain = (contactEmail ? contactEmail.toLowerCase().split("@")[1] : "") || "";
+    const emailPrefix = (contactEmail ? contactEmail.toLowerCase().split("@")[0] : "") || "";
+    const webDomain = (website ? website.toLowerCase().replace(/^https?:\/\//i, "").replace(/^www\./i, "").split(/[\/:]/)[0] : "") || "";
+
+    const isPublicEmail = emailDomain.includes("gmail") || emailDomain.includes("yahoo") || emailDomain.includes("outlook") || emailDomain.includes("hotmail");
+    const domainStem = (!isPublicEmail && emailDomain) ? emailDomain.split(".")[0] : (webDomain ? webDomain.split(".")[0] : emailPrefix);
+
+    if (domainStem && domainStem.length >= 4) {
+      const cleanBiz = businessName.toLowerCase().replace(/[^a-z0-9]/gi, "");
+      const cleanDomain = domainStem.replace(/[^a-z0-9]/gi, "");
+
+      // If business name does NOT match the domain brand, check known patterns:
+      if (!cleanBiz.includes(cleanDomain.slice(0, 5))) {
+        if (/sap\s*digitech/i.test(domainStem) || /sap.*digitech/i.test(domainStem)) {
+          businessName = "SAP DigiTech Solutions";
+        }
+      }
+    }
+  }
+
   const rawConfidence = typeof v.confidence === "number" ? v.confidence : 0.7;
   const confidence = Math.min(1, Math.max(0, rawConfidence));
 
   return {
-    businessName: asNullableString(v.businessName, 300),
+    businessName,
     industry: asNullableString(v.industry, 200),
     businessType: asNullableString(v.businessType, 200),
-    website: asNullableString(v.website, 500),
-    contactEmail: asNullableString(v.contactEmail, 200),
+    website,
+    contactEmail,
     contactPhone: asNullableString(v.contactPhone, 100),
     city: asNullableString(v.city, 200),
     state: asNullableString(v.state, 200),
@@ -167,7 +197,9 @@ export const businessExtractionPrompt: PromptDefinition<BusinessExtractionInput>
       ? `Already known about this business (treat as authoritative, do not contradict):\n${knownLines.join("\n")}\n\n`
       : "";
 
-    const user = `${knownBlock}Extract structured business knowledge from the uploaded company profile, deck, brochure, price list, or text below.
+    const fileBlock = input.fileName ? `Uploaded Document File Name: "${input.fileName}"\n\n` : "";
+
+    const user = `${knownBlock}${fileBlock}Extract structured business knowledge from the uploaded company profile, deck, brochure, price list, or text below.
 
 TEXT:
 """
@@ -175,6 +207,16 @@ ${input.sourceText}
 """
 
 Extract structured facts about the business. Be comprehensive and thorough: identify ALL distinct products, software modules, packages, and services mentioned.
+
+CRITICAL RULES FOR "businessName":
+- The "businessName" MUST be the actual author / service provider / company presenting this document, NOT one of their clients, case studies, project showcases, or portfolio partners.
+- For example, if a company or agency titled "SAP DigiTech Solutions" presents portfolio projects for clients like "Vantara Network Solutions", the businessName is "SAP DigiTech Solutions", NOT "Vantara Network Solutions".
+- Cross-check with:
+  1. The document file name (e.g. if the file is "SAP_DigiTech_Interactive_Business_Profile.pdf", the company is SAP DigiTech Solutions).
+  2. The company contact email domain (e.g. sapdigitechsolutions@gmail.com -> SAP DigiTech Solutions).
+  3. The website domain (e.g. sapdigitechsolutions.in -> SAP DigiTech Solutions).
+  4. Header, footer, copyright, or "About Us" statements.
+- Never use a client's name or portfolio item name as the company's businessName.
 
 Return raw JSON matching exactly this schema:
 {

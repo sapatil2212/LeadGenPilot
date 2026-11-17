@@ -424,40 +424,39 @@ export async function applyBusinessExtraction(
 ): Promise<ExtractionResult> {
   const existing = await getBusinessProfile(ctx);
 
-  // Scalars fill gaps only; uploaded marketing copy never overwrites a user's
-  // explicit profile edits.
+  // Apply non-empty extracted values to update profile.
   const patch: BusinessProfilePatch = {};
-  if (!existing.businessName && value.businessName) patch.businessName = value.businessName;
-  if (!existing.industry && value.industry) patch.industry = value.industry;
-  if (!existing.businessType && value.businessType) patch.businessType = value.businessType;
-  if (!existing.description && value.description) patch.description = value.description;
-  if (!existing.brandVoice && value.brandVoice) patch.brandVoice = value.brandVoice;
-  if (!existing.website && value.website) patch.website = value.website;
-  if (!existing.contactEmail && value.contactEmail) patch.contactEmail = value.contactEmail;
-  if (!existing.contactPhone && value.contactPhone) patch.contactPhone = value.contactPhone;
-  if (!existing.city && value.city) patch.city = value.city;
-  if (!existing.state && value.state) patch.state = value.state;
-  if (!existing.country && value.country) patch.country = value.country;
+  if (value.businessName?.trim()) patch.businessName = value.businessName.trim();
+  if (value.industry?.trim()) patch.industry = value.industry.trim();
+  if (value.businessType?.trim()) patch.businessType = value.businessType.trim();
+  if (value.description?.trim()) patch.description = value.description.trim();
+  if (value.brandVoice?.trim()) patch.brandVoice = value.brandVoice.trim();
+  if (value.website?.trim()) patch.website = value.website.trim();
+  if (value.contactEmail?.trim()) patch.contactEmail = value.contactEmail.trim();
+  if (value.contactPhone?.trim()) patch.contactPhone = value.contactPhone.trim();
+  if (value.city?.trim()) patch.city = value.city.trim();
+  if (value.state?.trim()) patch.state = value.state.trim();
+  if (value.country?.trim()) patch.country = value.country.trim();
 
   const mergeList = (current: string[], incoming: string[]) =>
-    Array.from(new Set([...current, ...incoming])).slice(0, LIMITS.listLength);
+    Array.from(new Set([...(incoming || []), ...(current || [])])).slice(0, LIMITS.listLength);
 
-  if (value.locationsServed.length) {
+  if (value.locationsServed?.length) {
     patch.locationsServed = mergeList(existing.locationsServed, value.locationsServed);
   }
-  if (value.targetCustomerTypes.length) {
+  if (value.targetCustomerTypes?.length) {
     patch.targetCustomerTypes = mergeList(existing.targetCustomerTypes, value.targetCustomerTypes);
   }
-  if (value.targetIndustries.length) {
+  if (value.targetIndustries?.length) {
     patch.targetIndustries = mergeList(existing.targetIndustries, value.targetIndustries);
   }
-  if (value.uniqueSellingPoints.length) {
+  if (value.uniqueSellingPoints?.length) {
     patch.uniqueSellingPoints = mergeList(existing.uniqueSellingPoints, value.uniqueSellingPoints);
   }
-  if (value.certifications.length) {
+  if (value.certifications?.length) {
     patch.certifications = mergeList(existing.certifications, value.certifications);
   }
-  if (value.decisionMakerRoles.length) {
+  if (value.decisionMakerRoles?.length) {
     patch.decisionMakerRoles = mergeList(existing.decisionMakerRoles, value.decisionMakerRoles);
   }
 
@@ -477,12 +476,25 @@ export async function applyBusinessExtraction(
     listProducts(ctx, true),
     listServices(ctx, true),
   ]);
-  const productNames = new Set(currentProducts.map((product) => product.name.toLowerCase()));
-  const serviceNames = new Set(currentServices.map((service) => service.name.toLowerCase()));
+  const productMap = new Map(currentProducts.map((p) => [p.name.toLowerCase().trim(), p]));
+  const serviceMap = new Map(currentServices.map((s) => [s.name.toLowerCase().trim(), s]));
 
   let createdProducts = 0;
+  let updatedProducts = 0;
   for (const product of value.products) {
-    if (productNames.has(product.name.toLowerCase())) continue;
+    const key = product.name.toLowerCase().trim();
+    const existingP = productMap.get(key);
+    if (existingP) {
+      await updateProduct(ctx, existingP.id, {
+        category: product.category || existingP.category,
+        description: product.description || existingP.description,
+        keyFeatures: product.keyFeatures?.length ? product.keyFeatures : existingP.keyFeatures,
+        idealFor: product.idealFor?.length ? product.idealFor : existingP.idealFor,
+        priceRange: product.priceRange || existingP.priceRange,
+      });
+      updatedProducts++;
+      continue;
+    }
     await createProduct(ctx, {
       name: product.name,
       category: product.category,
@@ -491,13 +503,25 @@ export async function applyBusinessExtraction(
       idealFor: product.idealFor,
       priceRange: product.priceRange,
     });
-    productNames.add(product.name.toLowerCase());
+    productMap.set(key, {} as any);
     createdProducts++;
   }
 
   let createdServices = 0;
+  let updatedServices = 0;
   for (const service of value.services) {
-    if (serviceNames.has(service.name.toLowerCase())) continue;
+    const key = service.name.toLowerCase().trim();
+    const existingS = serviceMap.get(key);
+    if (existingS) {
+      await updateService(ctx, existingS.id, {
+        category: service.category || existingS.category,
+        description: service.description || existingS.description,
+        idealFor: service.idealFor?.length ? service.idealFor : existingS.idealFor,
+        priceRange: service.priceRange || existingS.priceRange,
+      });
+      updatedServices++;
+      continue;
+    }
     await createService(ctx, {
       name: service.name,
       category: service.category,
@@ -505,13 +529,14 @@ export async function applyBusinessExtraction(
       idealFor: service.idealFor,
       priceRange: service.priceRange,
     });
-    serviceNames.add(service.name.toLowerCase());
+    serviceMap.set(key, {} as any);
     createdServices++;
   }
 
   logger.info(
     `Business extraction applied for workspace ${ctx.tenantId} from ${source}: ` +
-      `+${createdProducts} product(s), +${createdServices} service(s).`
+      `+${createdProducts} created / +${updatedProducts} updated product(s), ` +
+      `+${createdServices} created / +${updatedServices} updated service(s).`
   );
 
   return { extracted: value, applied: true, createdProducts, createdServices };
@@ -524,15 +549,11 @@ export async function applyBusinessExtraction(
  * Defaulting to review is the point of the platform's approval principle: the
  * user should see what the model concluded before it becomes the factual basis
  * for outreach sent in their name.
- *
- * Writes never overwrite a field the user has already filled in — extraction
- * fills gaps. A model summarising a brochure should not quietly replace a
- * description someone wrote by hand.
  */
 export async function extractBusinessKnowledge(
   ctx: TenantContext,
   sourceText: string,
-  options: { apply?: boolean; sourceDocumentId?: string } = {}
+  options: { apply?: boolean; sourceDocumentId?: string; fileName?: string } = {}
 ): Promise<ExtractionResult> {
   const existing = await getBusinessProfile(ctx);
 
@@ -540,6 +561,7 @@ export async function extractBusinessKnowledge(
     {
       messages: businessExtractionPrompt.build({
         sourceText: sourceText.slice(0, 60_000),
+        fileName: options.fileName,
         known: {
           businessName: existing.businessName,
           industry: existing.industry,

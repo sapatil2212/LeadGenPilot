@@ -461,7 +461,10 @@ router.post(
       }
 
       const sourceText = ingested.text.slice(0, MAX_EXTRACTION_CHARS);
-      const result = await business.extractBusinessKnowledge(ctxOf(req), sourceText, { apply });
+      const result = await business.extractBusinessKnowledge(ctxOf(req), sourceText, {
+        apply,
+        fileName: file.originalname,
+      });
 
       res.json({
         ...result,
