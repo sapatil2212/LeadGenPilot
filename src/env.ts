@@ -232,25 +232,10 @@ export function validateEnv(): { warnings: string[]; errors: string[] } {
     warnings.push(
       "GEMINI_API_KEY is not configured. AI copy generation will fall back to the rule-based engine."
     );
-  } else if (!env.geminiApiKey.trim().startsWith("AIza")) {
-    /*
-     * A key that is present but the wrong kind. Google AI Studio keys always
-     * begin with "AIza"; an "AQ."-prefixed value is an ephemeral Live-API token
-     * that the generateContent endpoint rejects with 401
-     * ACCESS_TOKEN_TYPE_UNSUPPORTED.
-     *
-     * Worth a boot-time warning rather than leaving it to the first request: the
-     * key is non-empty, so every "is AI configured?" check passes and the
-     * failure only surfaces later, as a generic "No AI provider answered" on
-     * whichever feature the user happened to try first. .env.example shipped
-     * such a token as its example value, so this was copied into real
-     * deployments.
-     */
+  } else if (!env.geminiApiKey.trim().startsWith("AIza") && !env.geminiApiKey.trim().startsWith("AQ.") && env.geminiApiKey.trim().length < 20) {
     warnings.push(
-      "GEMINI_API_KEY does not begin with \"AIza\", so it is not a Google AI Studio API key. " +
-        "Ephemeral (\"AQ.\") and OAuth tokens are rejected by the Gemini REST API. " +
-        "Gemini calls and all embeddings will fail until this is replaced with a long-lived key " +
-        "from https://aistudio.google.com/apikey."
+      "GEMINI_API_KEY does not appear to be a valid API key (expected \"AIza…\" or \"AQ.…\"). " +
+        "Verify your key at https://aistudio.google.com/apikey if AI requests fail."
     );
   }
   if (!env.isSmtpConfigured()) {

@@ -432,6 +432,12 @@ export async function applyBusinessExtraction(
   if (!existing.businessType && value.businessType) patch.businessType = value.businessType;
   if (!existing.description && value.description) patch.description = value.description;
   if (!existing.brandVoice && value.brandVoice) patch.brandVoice = value.brandVoice;
+  if (!existing.website && value.website) patch.website = value.website;
+  if (!existing.contactEmail && value.contactEmail) patch.contactEmail = value.contactEmail;
+  if (!existing.contactPhone && value.contactPhone) patch.contactPhone = value.contactPhone;
+  if (!existing.city && value.city) patch.city = value.city;
+  if (!existing.state && value.state) patch.state = value.state;
+  if (!existing.country && value.country) patch.country = value.country;
 
   const mergeList = (current: string[], incoming: string[]) =>
     Array.from(new Set([...current, ...incoming])).slice(0, LIMITS.listLength);
@@ -483,6 +489,7 @@ export async function applyBusinessExtraction(
       description: product.description,
       keyFeatures: product.keyFeatures,
       idealFor: product.idealFor,
+      priceRange: product.priceRange,
     });
     productNames.add(product.name.toLowerCase());
     createdProducts++;
@@ -491,7 +498,13 @@ export async function applyBusinessExtraction(
   let createdServices = 0;
   for (const service of value.services) {
     if (serviceNames.has(service.name.toLowerCase())) continue;
-    await createService(ctx, { name: service.name, description: service.description });
+    await createService(ctx, {
+      name: service.name,
+      category: service.category,
+      description: service.description,
+      idealFor: service.idealFor,
+      priceRange: service.priceRange,
+    });
     serviceNames.add(service.name.toLowerCase());
     createdServices++;
   }

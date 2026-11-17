@@ -2836,6 +2836,11 @@ async function startServer() {
     }
   });
 
+  // Ensure Node HTTP server does not drop long-running multipart uploads or AI requests
+  server.keepAliveTimeout = 120_000;
+  server.headersTimeout = 125_000;
+  server.requestTimeout = 300_000; // 5 minutes
+
   // ── Graceful shutdown ──
   let shuttingDown = false;
   const shutdown = async (signal: string) => {

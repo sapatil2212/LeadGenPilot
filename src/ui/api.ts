@@ -63,7 +63,27 @@ async function readBody(res: Response): Promise<any> {
   try {
     return JSON.parse(text);
   } catch {
-    return { error: text.slice(0, 300) };
+    if (res.status === 504) {
+      return {
+        error:
+          "The server timed out while processing your request (504 Gateway Time-out). The file might be large or AI processing took longer than expected. Please try again with a smaller document or check server timeout settings.",
+        code: "gateway_timeout",
+      };
+    }
+    if (res.status === 502) {
+      return {
+        error: "Bad Gateway (502). The server is temporarily unavailable or restarting. Please try again in a moment.",
+        code: "bad_gateway",
+      };
+    }
+    if (res.status === 413) {
+      return {
+        error: "The uploaded file is too large for the server to process (413 Payload Too Large). Please upload a file under 20 MB.",
+        code: "payload_too_large",
+      };
+    }
+    const clean = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    return { error: clean.slice(0, 300) || `Request failed (${res.status}).` };
   }
 }
 

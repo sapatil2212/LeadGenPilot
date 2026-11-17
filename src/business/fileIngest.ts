@@ -78,11 +78,10 @@ function isSpreadsheet(file: FileInput): boolean {
 function readGeminiKey(): string {
   const key = (process.env.GEMINI_API_KEY || "").trim();
   if (!key || key === "MY_GEMINI_API_KEY") return "";
-  // Google AI Studio keys always start with "AIza". Anything else (e.g.
-  // Firebase ephemeral tokens starting with "AQ.") will be rejected by the
-  // API with ACCESS_TOKEN_TYPE_UNSUPPORTED. Treat as unconfigured.
-  if (!key.startsWith("AIza")) return "";
-  return key;
+  if (key.startsWith("AIza") || key.startsWith("AQ.") || (key.length >= 20 && !/\s/.test(key))) {
+    return key;
+  }
+  return "";
 }
 
 /**
@@ -122,35 +121,65 @@ async function extractWithVision(file: FileInput, mimeType: string): Promise<str
   const apiKey = readGeminiKey();
   if (!apiKey) {
     throw new Error(
-      "Reading images needs the Gemini API key. Set GEMINI_API_KEY, or upload a text-based file (PDF, Word, Excel, TXT)."
+      "Reading images and scanned documents needs the Gemini API key. Set GEMINI_API_KEY in .env, or upload a text-based file (PDF, Word, Excel, TXT)."
     );
   }
 
   const { GoogleGenAI } = await import("@google/genai");
   const ai = new GoogleGenAI({ apiKey });
+  const model = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 
   const instruction =
     "You are reading a file a business owner uploaded to describe their company. " +
-    "Transcribe ALL visible text exactly, then, on separate lines, note anything useful " +
-    "about the business: its name, what it sells, products or services with any prices, " +
-    "locations served, customer types, certifications and contact details. " +
-    "Do not invent anything that is not present. Reply with plain text only.";
+    "Transcribe ALL visible text thoroughly and accurately, preserving product lists, tables, and sections. " +
+    "Pay special attention to extracting: the business name, description, products and specifications, pricing, " +
+    "services offered, target customer types, locations served, certifications, website, and contact information. " +
+    "Do not invent facts. Return plain text only.";
 
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { text: instruction },
-          { inlineData: { mimeType, data: file.buffer.toString("base64") } },
-        ],
-      },
-    ] as any,
-    config: { maxOutputTokens: 4096, temperature: 0 },
-  });
+  const generatePromise = (async () => {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: instruction },
+              { inlineData: { mimeType, data: file.buffer.toString("base64") } },
+            ],
+          },
+        ] as any,
+        config: { maxOutputTokens: 8192, temperature: 0 },
+      });
+      return String((response as any).text || "").trim();
+    } catch (err: any) {
+      // If the primary model failed with 404, retry once with gemini-3.8-flash
+      if (model !== "gemini-3.8-flash" && String(err?.message || "").includes("404")) {
+        const response = await ai.models.generateContent({
+          model: "gemini-3.8-flash",
+          contents: [
+            {
+              role: "user",
+              parts: [
+                { text: instruction },
+                { inlineData: { mimeType, data: file.buffer.toString("base64") } },
+              ],
+            },
+          ] as any,
+          config: { maxOutputTokens: 8192, temperature: 0 },
+        });
+        return String((response as any).text || "").trim();
+      }
+      throw err;
+    }
+  })();
 
-  return String((response as any).text || "").trim();
+  // 45-second timeout so vision processing never hangs indefinitely
+  const timeoutPromise = new Promise<string>((_, reject) =>
+    setTimeout(() => reject(new Error("AI document vision extraction timed out after 45s.")), 45_000)
+  );
+
+  return Promise.race([generatePromise, timeoutPromise]);
 }
 
 /**
@@ -230,15 +259,17 @@ export async function extractTextFromFile(file: FileInput): Promise<FileTextResu
 
   const outcome = await extractText(file.buffer, fileType);
 
-  // A PDF with no text layer is a scan. Fall back to Gemini vision on the PDF
-  // itself — Gemini reads PDF bytes directly — when the key is available.
-  if (outcome.charCount === 0 && fileType === "pdf" && readGeminiKey()) {
+  // A PDF with no text layer or very minimal text (< 150 chars) is likely a scan,
+  // flyer, or image-heavy deck. Fall back to Gemini vision on the PDF itself when available.
+  if ((outcome.charCount === 0 || outcome.charCount < 150) && fileType === "pdf" && readGeminiKey()) {
     try {
       const visionText = await extractWithVision(file, "application/pdf");
       const cleaned = visionText.replace(/\u0000/g, "").trim();
-      if (cleaned) return { text: cleaned, kind: "image", charCount: cleaned.length };
+      if (cleaned && cleaned.length > outcome.charCount) {
+        return { text: cleaned, kind: "image", charCount: cleaned.length };
+      }
     } catch (err: any) {
-      logger.warn(`Vision fallback for a scanned PDF failed: ${err?.message || err}`);
+      logger.warn(`Vision fallback for scanned/image-heavy PDF failed: ${err?.message || err}`);
     }
   }
 

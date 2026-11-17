@@ -95,7 +95,7 @@ function fail(res: Response, err: any, context: string) {
       err.attempts.every((a) => /not configured|no.*key|UNAUTHENTICATED|API_KEY_INVALID/i.test(a.message));
 
     const userMessage = isConfigProblem
-      ? "AI is not configured. Set a valid GEMINI_API_KEY (starts with \"AIza\") in your .env file. Get one at https://aistudio.google.com/apikey"
+      ? "AI is not configured. Set a valid GEMINI_API_KEY in your .env file. Get one at https://aistudio.google.com/apikey"
       : "AI providers are temporarily unavailable. Please try again in a moment.";
 
     return res.status(503).json({

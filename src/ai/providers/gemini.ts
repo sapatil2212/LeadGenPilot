@@ -24,8 +24,13 @@ import {
 let _shapeWarningLogged = false;
 
 function isValidKeyShape(key: string): boolean {
-  // Google AI Studio keys always begin with "AIza".
-  if (key.startsWith("AIza")) return true;
+  if (!key) return false;
+  // Google AI Studio keys commonly begin with "AIza" or "AQ."
+  if (key.startsWith("AIza") || key.startsWith("AQ.")) return true;
+  // Allow any reasonable token (at least 20 chars, no whitespace, not placeholder)
+  if (key.length >= 20 && !/\s/.test(key) && !key.toUpperCase().includes("PLACEHOLDER") && key !== "MY_GEMINI_API_KEY") {
+    return true;
+  }
   return false;
 }
 
@@ -91,18 +96,17 @@ function isRetryableMessage(message: string): boolean {
  * error, is what turns a 401 loop into a fixable message.
  */
 function credentialShapeHint(apiKey: string): string {
-  if (apiKey.startsWith("AIza")) return "";
+  if (apiKey.startsWith("AIza") || apiKey.startsWith("AQ.")) return "";
   return (
-    " GEMINI_API_KEY does not look like a Google AI Studio API key (those begin with \"AIza\"). " +
-    "Ephemeral or OAuth tokens are not accepted for this endpoint — create a long-lived key at " +
-    "https://aistudio.google.com/apikey."
+    " GEMINI_API_KEY does not look like a Google AI Studio API key (those typically begin with \"AIza\" or \"AQ.\"). " +
+    "Verify your API key at https://aistudio.google.com/apikey."
   );
 }
 
 export const geminiProvider: AiProvider = {
   id: "gemini",
-  defaultModel: "gemini-2.5-flash",
-  defaultEmbeddingModel: "text-embedding-004",
+  defaultModel: process.env.GEMINI_MODEL || "gemini-3.8-flash",
+  defaultEmbeddingModel: process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-001",
 
   isConfigured() {
     const key = readApiKey();
@@ -113,13 +117,13 @@ export const geminiProvider: AiProvider = {
         try {
           const { logger } = require("../../logger");
           logger.warn(
-            `GEMINI_API_KEY is set but does not look like a Google AI Studio key (expected "AIza…"). ` +
+            `GEMINI_API_KEY is set but does not look like a valid key shape. ` +
             `The current value starts with "${key.slice(0, 3)}…". ` +
             `Gemini provider will be skipped — create a key at https://aistudio.google.com/apikey`
           );
         } catch {
           console.warn(
-            `[WARN] GEMINI_API_KEY does not look like a Google AI Studio key (expected "AIza…"). ` +
+            `[WARN] GEMINI_API_KEY does not look like a valid key shape. ` +
             `Gemini provider will be skipped.`
           );
         }
@@ -133,7 +137,7 @@ export const geminiProvider: AiProvider = {
     const apiKey = readApiKey();
     if (!apiKey) throw new AiProviderError("gemini", "No Gemini API key configured.");
 
-    const model = request.model || geminiProvider.defaultModel;
+    let activeModel = request.model || geminiProvider.defaultModel;
     const started = Date.now();
 
     try {
@@ -142,16 +146,38 @@ export const geminiProvider: AiProvider = {
       const ai = new GoogleGenAI({ apiKey });
       const { system, contents } = splitMessages(request);
 
-      const response = await ai.models.generateContent({
-        model,
-        contents: contents as any,
-        config: {
-          ...(system ? { systemInstruction: system } : {}),
-          ...(request.json ? { responseMimeType: "application/json" } : {}),
-          ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-          ...(request.maxTokens !== undefined ? { maxOutputTokens: request.maxTokens } : {}),
-        },
-      });
+      let response;
+      try {
+        response = await ai.models.generateContent({
+          model: activeModel,
+          contents: contents as any,
+          config: {
+            ...(system ? { systemInstruction: system } : {}),
+            ...(request.json ? { responseMimeType: "application/json" } : {}),
+            ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+            ...(request.maxTokens !== undefined ? { maxOutputTokens: request.maxTokens } : {}),
+          },
+        });
+      } catch (callErr: any) {
+        // If an older model is requested and retired (e.g. 404 / no longer available),
+        // gracefully fall back to gemini-3.8-flash once rather than failing the call.
+        const msg = String(callErr?.message || "");
+        if ((msg.includes("404") || msg.includes("no longer available") || msg.includes("not found")) && activeModel !== "gemini-3.8-flash") {
+          activeModel = "gemini-3.8-flash";
+          response = await ai.models.generateContent({
+            model: activeModel,
+            contents: contents as any,
+            config: {
+              ...(system ? { systemInstruction: system } : {}),
+              ...(request.json ? { responseMimeType: "application/json" } : {}),
+              ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+              ...(request.maxTokens !== undefined ? { maxOutputTokens: request.maxTokens } : {}),
+            },
+          });
+        } else {
+          throw callErr;
+        }
+      }
 
       const text = (response.text || "").trim();
       if (!text) {
@@ -164,7 +190,7 @@ export const geminiProvider: AiProvider = {
       return {
         text,
         provider: "gemini",
-        model,
+        model: activeModel,
         usage: meta
           ? {
               promptTokens: meta.promptTokenCount,

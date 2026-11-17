@@ -1014,6 +1014,16 @@ function LearnTab({ isLight, onApplied }: Themed & { onApplied: () => void }) {
             <ReadRow isLight={isLight} label="Industry" value={extracted.industry} />
             <ReadRow isLight={isLight} label="Business type" value={extracted.businessType} />
             <ReadRow isLight={isLight} label="Brand voice" value={extracted.brandVoice} />
+            {extracted.website && <ReadRow isLight={isLight} label="Website" value={extracted.website} />}
+            {extracted.contactEmail && <ReadRow isLight={isLight} label="Contact email" value={extracted.contactEmail} />}
+            {extracted.contactPhone && <ReadRow isLight={isLight} label="Contact phone" value={extracted.contactPhone} />}
+            {(extracted.city || extracted.state || extracted.country) && (
+              <ReadRow
+                isLight={isLight}
+                label="Location"
+                value={[extracted.city, extracted.state, extracted.country].filter(Boolean).join(", ")}
+              />
+            )}
             <ReadRow
               isLight={isLight}
               label="Description"
@@ -1038,6 +1048,11 @@ function LearnTab({ isLight, onApplied }: Themed & { onApplied: () => void }) {
                   {extracted.products.map((p) => (
                     <li key={p.name} className={`text-xs ${t.body}`}>
                       <span className="font-semibold">{p.name}</span>
+                      {p.priceRange && (
+                        <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400">
+                          {p.priceRange}
+                        </span>
+                      )}
                       {p.description && <span className={t.muted}> — {p.description}</span>}
                     </li>
                   ))}
@@ -1054,6 +1069,11 @@ function LearnTab({ isLight, onApplied }: Themed & { onApplied: () => void }) {
                   {extracted.services.map((s) => (
                     <li key={s.name} className={`text-xs ${t.body}`}>
                       <span className="font-semibold">{s.name}</span>
+                      {s.priceRange && (
+                        <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400">
+                          {s.priceRange}
+                        </span>
+                      )}
                       {s.description && <span className={t.muted}> — {s.description}</span>}
                     </li>
                   ))}
