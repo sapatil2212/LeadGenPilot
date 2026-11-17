@@ -93,7 +93,8 @@ import {
 } from "./outreachTemplates";
 import TemplateDropdown from "./TemplateDropdown";
 import SearchableDropdown from "./SearchableDropdown";
-import AlertModal, { AlertModalType } from "./AlertModal";
+import AlertModal, { AlertModalType, ConfirmDeleteModal } from "./AlertModal";
+import { useDialog } from "./ui/DialogContext";
 
 /**
  * One tab is visible at a time, so the code for the other twelve does not need to
@@ -273,6 +274,7 @@ interface AppProps {
 }
 
 export default function App({ currentUser, currentWorkspace, entitlements, usage, onLogout, onRefreshAccount }: AppProps = {}) {
+  const dialog = useDialog();
   // When entitlements are absent (auth disabled / admin), everything is unlocked.
   const canWhatsapp = entitlements ? entitlements.whatsappOutreach : true;
   const canAiInsights = entitlements ? entitlements.aiInsights : true;
@@ -1296,21 +1298,25 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   };
 
   const handleResetData = async () => {
-    if (!window.confirm("CAUTION: This will permanently wipe all harvested leads, reset scraper logs, and stop active campaigns. Proceed?")) {
-      return;
-    }
+    const ok = await dialog.confirmDelete({
+      title: "Wipe All Leads and Logs?",
+      message: "This will permanently wipe all harvested leads, reset scraper logs, and abort active campaigns.",
+      consequence: "CAUTION: This action is permanent and completely irrecoverable.",
+      confirmLabel: "Wipe Database",
+    });
+    if (!ok) return;
     setIsClearing(true);
     try {
       const res = await fetch("/api/reset-data", { method: "POST" });
       if (res.ok) {
-        alert("Lead database and logs completely wiped!");
+        await dialog.success("Database Wiped", "Lead database and scraper logs have been completely wiped.");
         setSelectedLeadDetails(null);
         fetchData();
       } else {
-        alert("Server failed to wipe database.");
+        await dialog.error("Wipe Failed", "Server failed to wipe database.");
       }
     } catch (e) {
-      alert("Error calling reset API.");
+      await dialog.error("Reset Error", "Error calling reset API.");
     } finally {
       setIsClearing(false);
     }
@@ -1323,13 +1329,19 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
       const res = await fetch("/api/test-webhook", { method: "POST" });
       const data = await res.json();
       if (res.ok && data.success) {
-        alert("?? Connection Success!\n\nYour Google Sheets Webhook is verified and active! A mock lead has been successfully dispatched and appended to your spreadsheet.");
+        await dialog.success(
+          "Connection Success!",
+          "Your Google Sheets Webhook is verified and active! A mock lead has been successfully dispatched and appended to your spreadsheet."
+        );
       } else {
-        alert(`? Connection Failed:\n\n${data.error || "Google Apps Script rejected the request."}\n\nREMEDY CHECKLIST:\n1. Open your Google Sheets document.\n2. Click "Extensions" > "Apps Script".\n3. Click the blue "Deploy" button at the top-right > "Manage deployments".\n4. Locate your active Web App deployment and click the Edit (pencil) icon.\n5. Under "Configuration", ensure:\n   - "Execute as": "Me" (your email)\n   - "Who has access": "Anyone" (Anonymous/public access is mandatory)\n6. IMPORTANT: Select "New version" from the version dropdown. (Google will NOT update permissions on your old link without a new version release!)\n7. Click "Deploy", copy the new Web App URL, paste it in your .env, and try again!`);
+        await dialog.error(
+          "Connection Failed",
+          data.error || "Google Apps Script rejected the request. Please verify deployment configuration and permissions."
+        );
       }
       fetchData();
     } catch (e) {
-      alert("Error trying to trigger the webhook test API.");
+      await dialog.error("Webhook Error", "Error trying to trigger the webhook test API.");
     } finally {
       setIsTestingWebhook(false);
     }
@@ -1410,7 +1422,13 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   };
 
   const handleDisconnectWhatsApp = async (slot: number = 1) => {
-    if (!window.confirm(`Disconnect WhatsApp account ${slot}? This will log out that client.`)) return;
+    const ok = await dialog.confirm({
+      title: `Disconnect WhatsApp Slot ${slot}?`,
+      message: `Are you sure you want to disconnect WhatsApp account slot ${slot}? This will log out that client.`,
+      confirmLabel: "Disconnect",
+      tone: "warning",
+    });
+    if (!ok) return;
     setIsDisconnectingWa(true);
     setDisconnectingSlot(slot);
     // Optimistically transition that slot to connecting/generating new QR
@@ -1418,9 +1436,9 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
     if (slot === 1) setWhatsappStatus({ status: "CONNECTING", qr: "" });
     try {
       const res = await fetch(`/api/whatsapp/sessions/${slot}/disconnect`, { method: "POST" });
-      if (!res.ok) alert("Failed to disconnect WhatsApp.");
+      if (!res.ok) await dialog.error("Disconnect Failed", "Failed to disconnect WhatsApp.");
     } catch (err) {
-      alert("Error disconnecting WhatsApp session.");
+      await dialog.error("Disconnect Error", "Error disconnecting WhatsApp session.");
     } finally {
       setIsDisconnectingWa(false);
       setDisconnectingSlot(null);
@@ -1949,7 +1967,14 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
   };
 
   const handleDeleteList = async (id: string) => {
-    if (!window.confirm("Delete this list and ALL its leads permanently?")) return;
+    const listToDelete = leadLists.find(l => l.id === id);
+    const ok = await dialog.confirmDelete({
+      title: "Delete Lead List?",
+      itemName: listToDelete?.name,
+      message: "Are you sure you want to permanently delete this list and all its leads?",
+      confirmLabel: "Delete List",
+    });
+    if (!ok) return;
     setIsDeletingListId(id);
     try {
       const res = await fetch(`/api/crm/lists/${id}`, { method: "DELETE" });
@@ -1962,8 +1987,11 @@ export default function App({ currentUser, currentWorkspace, entitlements, usage
           setActiveListId(remaining.length > 0 ? remaining[0].id : null);
           setCrmLeads([]);
         }
+        await dialog.success("List Deleted", `"${listToDelete?.name || "List"}" was removed.`);
+      } else {
+        await dialog.error("Delete Failed", "Could not delete this list.");
       }
-    } catch (e) { alert("Failed to delete list."); }
+    } catch (e) { await dialog.error("Delete Error", "Failed to delete list."); }
     finally { setIsDeletingListId(null); }
   };
 

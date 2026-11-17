@@ -6,6 +6,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { Loader2 } from "lucide-react";
 import App from "./App";
+import { DialogProvider } from "./ui/DialogContext";
 import AuthPage, { type AuthedUser } from "./AuthPage";
 
 const SUPPORT_EMAIL = "leadgenpilot.in@gmail.com";
@@ -351,13 +352,15 @@ export default function AuthGate() {
 
   // Only an authenticated user with a validated workspace reaches the app.
   return (
-    <App
-      currentUser={user}
-      currentWorkspace={workspace}
-      entitlements={entitlements}
-      usage={usage}
-      onLogout={handleLogout}
-      onRefreshAccount={checkSession}
-    />
+    <DialogProvider>
+      <App
+        currentUser={user}
+        currentWorkspace={workspace}
+        entitlements={entitlements}
+        usage={usage}
+        onLogout={handleLogout}
+        onRefreshAccount={checkSession}
+      />
+    </DialogProvider>
   );
 }

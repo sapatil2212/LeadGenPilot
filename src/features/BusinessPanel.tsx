@@ -615,6 +615,8 @@ function CatalogueTab({
                     isLight={isLight}
                     icon={Trash2}
                     label="Delete"
+                    itemName={item.name}
+                    modalTitle={`Delete ${kind === "product" ? "Product" : "Service"}?`}
                     onConfirm={() => remove(item.id)}
                     busy={action.busy}
                   />

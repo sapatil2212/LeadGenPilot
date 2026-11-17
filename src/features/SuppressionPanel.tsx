@@ -14,6 +14,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ShieldOff, Search, Plus, Trash2, RefreshCw, Loader2, Mail, AlertTriangle } from "lucide-react";
 import WhatsAppLogo from "../WhatsAppLogo";
+import { useDialog } from "../ui/DialogContext";
 
 type SuppressionChannel = "email" | "whatsapp";
 
@@ -51,6 +52,7 @@ function formatWhen(iso: string): string {
 }
 
 export default function SuppressionPanel({ isLight = false }: SuppressionPanelProps) {
+  const dialog = useDialog();
   const [records, setRecords] = useState<SuppressionRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -136,7 +138,14 @@ export default function SuppressionPanel({ isLight = false }: SuppressionPanelPr
   };
 
   const removeSuppression = async (record: SuppressionRecord) => {
-    if (!window.confirm(`Allow outreach to ${record.contactKey} again on ${record.channel}?`)) return;
+    const ok = await dialog.confirm({
+      title: "Allow Outreach Again?",
+      itemName: `${record.contactKey} (${record.channel})`,
+      message: `Are you sure you want to allow outreach to ${record.contactKey} on ${record.channel}?`,
+      confirmLabel: "Allow Outreach",
+      tone: "confirm",
+    });
+    if (!ok) return;
     setRemoving(record.id);
     setError(null);
     setNotice(null);

@@ -23,6 +23,7 @@ import {
   X,
 } from "lucide-react";
 import { ApiError, messageOf } from "./api";
+import AlertModal from "../AlertModal";
 
 export interface Themed {
   isLight: boolean;
@@ -707,21 +708,30 @@ export function Meter({
   );
 }
 
-/** Small inline confirmation, so a destructive click is never a single click. */
+/** Confirmation button that triggers either a modal alert popup or an inline confirmation. */
 export function ConfirmButton({
   isLight,
   onConfirm,
   label,
-  confirmLabel = "Confirm",
+  confirmLabel = "Delete",
   icon,
   busy,
+  useModal = true,
+  modalTitle,
+  modalMessage,
+  itemName,
 }: Themed & {
   onConfirm: () => void;
   label: string;
   confirmLabel?: string;
   icon?: React.ComponentType<{ className?: string }>;
   busy?: boolean;
+  useModal?: boolean;
+  modalTitle?: string;
+  modalMessage?: string;
+  itemName?: string;
 }) {
+  const [modalOpen, setModalOpen] = useState(false);
   const [armed, setArmed] = useState(false);
   const timer = useRef<number | null>(null);
 
@@ -732,6 +742,42 @@ export function ConfirmButton({
       if (timer.current) window.clearTimeout(timer.current);
     };
   }, [armed]);
+
+  if (useModal) {
+    return (
+      <>
+        <Button
+          isLight={isLight}
+          variant="danger"
+          icon={icon}
+          onClick={() => setModalOpen(true)}
+          busy={busy}
+        >
+          {label}
+        </Button>
+        <AlertModal
+          isOpen={modalOpen}
+          type="delete"
+          title={modalTitle || `Confirm ${confirmLabel}?`}
+          message={
+            modalMessage ||
+            `Are you sure you want to ${label.toLowerCase()} ${
+              itemName ? `"${itemName}"` : "this"
+            }? This action cannot be undone.`
+          }
+          itemName={itemName}
+          confirmLabel={confirmLabel}
+          onConfirm={() => {
+            setModalOpen(false);
+            onConfirm();
+          }}
+          onCancel={() => setModalOpen(false)}
+          isLight={isLight}
+          isLoading={busy}
+        />
+      </>
+    );
+  }
 
   if (!armed) {
     return (
@@ -905,4 +951,16 @@ export function ModalPortal({ children }: { children: React.ReactNode }) {
   if (!mounted || typeof document === "undefined") return null;
   return createPortal(children, document.body);
 }
+
+export { default as AlertModal, ConfirmDeleteModal, type AlertModalProps, type AlertModalType } from "../AlertModal";
+export {
+  DialogProvider,
+  useDialog,
+  showGlobalAlert,
+  type DialogContextValue,
+  type AlertOptions,
+  type ConfirmOptions,
+  type ConfirmDeleteOptions,
+} from "./DialogContext";
+
 

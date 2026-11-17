@@ -621,6 +621,8 @@ function IcpTab({ isLight, state }: Themed & { state: ReturnType<typeof useAsync
                       isLight={isLight}
                       icon={Trash2}
                       label="Delete"
+                      itemName={profile.name}
+                      modalTitle="Delete Targeting Profile?"
                       busy={action.busy}
                       onConfirm={async () => {
                         const ok = await action.run(() => api.del(`/api/icp/${profile.id}`));

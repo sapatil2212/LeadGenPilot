@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import type { Lead, LeadList } from "../types";
 import { ModalPortal } from "../ui/primitives";
+import { useDialog } from "../ui/DialogContext";
 
 type Permission = "VIEW_LEADS" | "EDIT_LEADS" | "DELETE_LEADS" | "EXPORT_LEADS" | "MANAGE_CRM" | "CREATE_CAMPAIGN";
 type Query = {
@@ -81,6 +82,7 @@ function sourceLabel(value?: string) { return SOURCE_LABELS[value || ""] || "Unk
 function statusLabel(value?: string) { return STATUS_LABELS[value || "NEW"] || "New"; }
 
 export default function LeadsWorkspace({ isLight, onOpenOutreach, onAddToCampaign, onFindLeads }: Props) {
+  const dialog = useDialog();
   const [query, setQuery] = useState<Query>(DEFAULT_QUERY);
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState<PageResponse>({ leads: [], total: 0, page: 1, pageSize: 25, totalPages: 1 });
@@ -186,7 +188,23 @@ export default function LeadsWorkspace({ isLight, onOpenOutreach, onAddToCampaig
   const runBulk = async (action: string, extra: Record<string, unknown> = {}, confirmText?: string, idsOverride?: string[]) => {
     const ids = idsOverride ?? Array.from(selected);
     if (!ids.length) return;
-    if (confirmText && !window.confirm(`${confirmText}\n\nAffected leads: ${ids.length}`)) return;
+    if (confirmText) {
+      const isDelete = action === "delete" || action.toLowerCase().includes("delete");
+      const ok = isDelete
+        ? await dialog.confirmDelete({
+            title: "Delete Selected Leads?",
+            itemName: `${ids.length} lead${ids.length === 1 ? "" : "s"} selected`,
+            message: confirmText,
+            confirmLabel: `Delete ${ids.length} Lead${ids.length === 1 ? "" : "s"}`,
+          })
+        : await dialog.confirm({
+            title: "Confirm Action",
+            itemName: `${ids.length} lead${ids.length === 1 ? "" : "s"} selected`,
+            message: confirmText,
+            confirmLabel: "Apply",
+          });
+      if (!ok) return;
+    }
     try {
       const result = await requestJson<{ affected: number }>("/api/crm/bulk/leads", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -396,6 +414,7 @@ function ListFolderGrid({ lists, summary, isLight, canEdit, canDelete, onOpenFol
 }
 
 function FolderCard({ list, isLight, canEdit, canDelete, onOpen, onRefresh, colors }: any) {
+  const dialog = useDialog();
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState(list.name);
   const [saving, setSaving] = useState(false);
@@ -414,17 +433,23 @@ function FolderCard({ list, isLight, canEdit, canDelete, onOpen, onRefresh, colo
       setRenaming(false);
       onRefresh(`Renamed to "${trimmed}".`);
     } catch (err: any) {
-      alert(err?.message || "Failed to rename.");
+      dialog.error("Rename Failed", err?.message || "Failed to rename.");
     } finally { setSaving(false); }
   };
 
   const deleteList = async () => {
-    if (!window.confirm(`Delete "${list.name}" and all its ${list.leadCount} leads? This cannot be undone.`)) return;
+    const confirmed = await dialog.confirmDelete({
+      title: "Delete Lead List?",
+      itemName: list.name,
+      message: `Are you sure you want to delete "${list.name}" and all its ${list.leadCount} leads? This action cannot be undone.`,
+      confirmLabel: "Delete List",
+    });
+    if (!confirmed) return;
     try {
       await requestJson(`/api/crm/lists/${list.id}`, { method: "DELETE" });
       onRefresh(`"${list.name}" deleted.`);
     } catch (err: any) {
-      alert(err?.message || "Failed to delete.");
+      dialog.error("Delete Failed", err?.message || "Failed to delete.");
     }
   };
 
@@ -550,6 +575,7 @@ function SideItem({ icon: Icon, label, count, active, onClick, tone = "text-slat
 }
 
 function LeadRow({ lead, selected, isLight, canEdit, canDelete, onSelect, onView, onOutreach, onCampaign, onDelete, onRename }: any) {
+  const dialog = useDialog();
   const fit = fitOf(lead); const emails = lead.emails || []; const FitIcon = fit.Icon;
   const fitTone = fit.tone === "rose" ? "text-rose-400 bg-rose-500/10 border-rose-500/20" : fit.tone === "amber" ? "text-amber-400 bg-amber-500/10 border-amber-500/20" : fit.tone === "sky" ? "text-sky-400 bg-sky-500/10 border-sky-500/20" : "text-slate-400 bg-slate-500/10 border-slate-500/20";
   const [editingName, setEditingName] = useState(false);
@@ -577,7 +603,7 @@ function LeadRow({ lead, selected, isLight, canEdit, canDelete, onSelect, onView
       setEditingName(false);
       if (onRename) onRename(lead.id, trimmed);
     } catch (err: any) {
-      alert(err?.message || "Failed to rename lead.");
+      dialog.error("Rename Failed", err?.message || "Failed to rename lead.");
     } finally {
       setSavingName(false);
     }

@@ -940,6 +940,8 @@ function CampaignReview({
               isLight={isLight}
               icon={Trash2}
               label="Delete"
+              itemName={data.name}
+              modalTitle="Delete Campaign?"
               busy={action.busy}
               onConfirm={deleteCampaign}
             />

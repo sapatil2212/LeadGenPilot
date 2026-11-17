@@ -12,9 +12,14 @@
  */
 
 import type { Lead } from "../types";
+import { showGlobalAlert } from "../ui/DialogContext";
 export function exportLeadsToCsv(crmLeads: Lead[]): void {
     if (crmLeads.length === 0) {
-      alert("No leads available to export.");
+      showGlobalAlert({
+        type: "warning",
+        title: "No Leads to Export",
+        message: "No leads are available in this view to export.",
+      });
       return;
     }
 
@@ -69,7 +74,11 @@ export function exportLeadsToCsv(crmLeads: Lead[]): void {
 
 export async function exportLeadsToExcel(crmLeads: Lead[]): Promise<void> {
     if (crmLeads.length === 0) {
-      alert("No leads available to export.");
+      showGlobalAlert({
+        type: "warning",
+        title: "No Leads to Export",
+        message: "No leads are available in this view to export.",
+      });
       return;
     }
     const XLSX = await import("xlsx");
@@ -196,7 +205,11 @@ export async function exportLeadsToExcel(crmLeads: Lead[]): Promise<void> {
 
 export async function exportLeadsToPdf(crmLeads: Lead[]): Promise<void> {
     if (crmLeads.length === 0) {
-      alert("No leads available to export.");
+      showGlobalAlert({
+        type: "warning",
+        title: "No Leads to Export",
+        message: "No leads are available in this view to export.",
+      });
       return;
     }
 
@@ -415,7 +428,11 @@ export async function exportLeadsToPdf(crmLeads: Lead[]): Promise<void> {
 
 export async function exportLeadsToWord(crmLeads: Lead[]): Promise<void> {
     if (crmLeads.length === 0) {
-      alert("No leads available to export.");
+      showGlobalAlert({
+        type: "warning",
+        title: "No Leads to Export",
+        message: "No leads are available in this view to export.",
+      });
       return;
     }
 
