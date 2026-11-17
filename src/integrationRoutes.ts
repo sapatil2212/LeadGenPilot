@@ -68,6 +68,24 @@ router.get("/", async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
     const integrations = await getAllUserIntegrations(userId, ctxOf(req).tenantId);
+
+    // If tenant does not have a custom Google Sheet row, check if system .env webhook is present
+    const hasCustomSheet = integrations.some((item) => item.type === "google_sheet");
+    const envSheetUrl = String(
+      process.env.GOOGLE_SHEETS_WEBHOOK_URL || process.env.GOOGLE_SHEET_WEBHOOK_URL || ""
+    ).trim();
+    if (!hasCustomSheet && envSheetUrl && envSheetUrl !== "YOUR_WEBHOOK_URL") {
+      integrations.push({
+        id: "env-google-sheet",
+        type: "google_sheet" as any,
+        label: "Google Sheet (.env)",
+        enabled: true,
+        lastUsedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    }
+
     res.json({ ok: true, integrations });
   } catch (error: any) {
     console.error("Get integrations error:", error);

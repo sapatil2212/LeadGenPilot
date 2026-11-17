@@ -38,7 +38,12 @@ function hasSmtp(config: any): boolean {
 }
 
 export async function getCampaignReadiness(ctx: TenantContext): Promise<CampaignReadiness> {
-  if (!ctx.userId) return { googleSheet: false, smtp: false };
+  const envSheetUrl = String(
+    process.env.GOOGLE_SHEETS_WEBHOOK_URL || process.env.GOOGLE_SHEET_WEBHOOK_URL || ""
+  ).trim();
+  const hasEnvSheet = Boolean(envSheetUrl && envSheetUrl !== "YOUR_WEBHOOK_URL");
+
+  if (!ctx.userId) return { googleSheet: hasEnvSheet, smtp: false };
 
   const [googleSheet, smtp] = await Promise.all([
     getUserIntegration(ctx.userId, "google_sheet", ctx.tenantId),
@@ -46,7 +51,7 @@ export async function getCampaignReadiness(ctx: TenantContext): Promise<Campaign
   ]);
 
   return {
-    googleSheet: hasGoogleSheet(googleSheet),
+    googleSheet: hasGoogleSheet(googleSheet) || hasEnvSheet,
     smtp: hasSmtp(smtp),
   };
 }
@@ -57,11 +62,6 @@ export async function assertCampaignReadiness(
 ): Promise<CampaignReadiness> {
   const readiness = await getCampaignReadiness(ctx);
 
-  if (!readiness.googleSheet) {
-    throw new Error(
-      "Google Sheet is not connected for this workspace. Connect it in Integrations before creating or starting a campaign."
-    );
-  }
   if (channels.email && !readiness.smtp) {
     throw new Error(
       "SMTP email is not configured for this workspace. Connect SMTP in Integrations before creating or starting an email campaign."

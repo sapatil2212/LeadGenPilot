@@ -862,7 +862,7 @@ function CampaignReview({
   const data = campaign.data;
   const pending = data.messages.filter((m) => m.status === "pending_review");
   const readyToStart = data.status === "approved" && data.pendingCount === 0 && data.approvedCount > 0;
-  const startBlocked = !googleSheetReady || (data.channels.email && !smtpReady);
+  const startBlocked = data.channels.email && !smtpReady;
 
   const filteredMessages = data.messages.filter((m) => {
     const matchesFilter = filter === "all" || m.status === filter;
@@ -1479,15 +1479,24 @@ function CreateCampaignModal({
     }
   }, [emailTemplates, whatsappTemplates, emailTemplateId, whatsappTemplateId]);
 
-  const canSubmit =
-    !submitting &&
-    !readinessLoading &&
-    !readinessError &&
-    googleSheetReady &&
-    selectedLeadIds.length > 0 &&
-    (emailOn || whatsappOn) &&
-    (!emailOn || (smtpReady && Boolean(emailTemplateId))) &&
-    (!whatsappOn || Boolean(whatsappTemplateId));
+  const validationIssue = useMemo(() => {
+    if (selectedLeadIds.length === 0) {
+      return "Select at least one target prospect in Step 2.";
+    }
+    if (!emailOn && !whatsappOn) {
+      return "Enable at least one outreach channel: Email or WhatsApp in Step 3.";
+    }
+    if (emailOn && !smtpReady) {
+      return "SMTP is not configured for Email. Please connect SMTP in Integrations or uncheck Email Channel.";
+    }
+    if (emailOn && !emailTemplateId) {
+      return "Please select an Email template in Step 3.";
+    }
+    if (whatsappOn && !whatsappTemplateId) {
+      return "Please select a WhatsApp template in Step 3.";
+    }
+    return null;
+  }, [selectedLeadIds.length, emailOn, whatsappOn, smtpReady, emailTemplateId, whatsappTemplateId]);
 
   const toggleLead = (id: string) => {
     setSelectedLeadIds((current) =>
@@ -1504,12 +1513,10 @@ function CreateCampaignModal({
     event.preventDefault();
     setError("");
 
-    if (!googleSheetReady) return setError("Connect Google Sheets before creating a campaign.");
-    if (!emailOn && !whatsappOn) return setError("Enable at least one outreach channel.");
-    if (emailOn && !smtpReady) return setError("Configure SMTP before adding email to a campaign.");
-    if (selectedLeadIds.length === 0) return setError("Select at least one lead.");
-    if (emailOn && !emailTemplateId) return setError("Choose an email template.");
-    if (whatsappOn && !whatsappTemplateId) return setError("Choose a WhatsApp template.");
+    if (validationIssue) {
+      setError(validationIssue);
+      return;
+    }
 
     setSubmitting(true);
     try {
@@ -1929,18 +1936,26 @@ function CreateCampaignModal({
               </div>
             </div>
 
+            {/* Live requirement warning if anything is missing */}
+            {validationIssue && (
+              <div className="flex items-center gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-300 text-xs">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-500" />
+                <span>{validationIssue}</span>
+              </div>
+            )}
+
             {/* Footer Buttons */}
             <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200/70 dark:border-slate-800/70">
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-white"
+                className="px-4 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-white cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                disabled={!canSubmit}
+                disabled={submitting}
                 className="btn-interactive px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white text-xs font-bold transition-all shadow-md shadow-indigo-600/20 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer flex items-center gap-2"
               >
                 {submitting ? (

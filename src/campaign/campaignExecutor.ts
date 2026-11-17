@@ -431,11 +431,9 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
   // Integrations can be disabled after enqueue and before a worker claims the
   // job. Recheck without sending anything, restore the approved campaign, and
   // let the user reconnect and start it again.
-  const readinessError = !googleSheet
-    ? "Google Sheet is no longer connected for this workspace."
-    : channels.email && !smtp
-      ? "SMTP email is no longer configured for this workspace."
-      : null;
+  const readinessError = channels.email && !smtp
+    ? "SMTP email is no longer configured for this workspace."
+    : null;
   if (readinessError) {
     await prisma.campaign.updateMany({
       where: { id: campaign.id, tenantId: job.tenantId, status: "sending" },
@@ -788,11 +786,16 @@ export async function runCampaignWorkerCycle(workerId: string): Promise<WorkerRu
 }
 
 async function resolveTenantGoogleSheetConfig(ctx: TenantContext): Promise<TenantGoogleSheetConfig | null> {
-  if (!ctx.userId) return null;
-  const raw = (await getUserIntegration(ctx.userId, "google_sheet", ctx.tenantId)) as any;
-  const webhookUrl = String(raw?.webhookUrl || "").trim();
-  if (!webhookUrl || webhookUrl === "YOUR_WEBHOOK_URL") return null;
-  return { webhookUrl };
+  if (ctx.userId) {
+    const raw = (await getUserIntegration(ctx.userId, "google_sheet", ctx.tenantId)) as any;
+    const webhookUrl = String(raw?.webhookUrl || "").trim();
+    if (webhookUrl && webhookUrl !== "YOUR_WEBHOOK_URL") return { webhookUrl };
+  }
+  const envUrl = String(
+    process.env.GOOGLE_SHEETS_WEBHOOK_URL || process.env.GOOGLE_SHEET_WEBHOOK_URL || ""
+  ).trim();
+  if (envUrl && envUrl !== "YOUR_WEBHOOK_URL") return { webhookUrl: envUrl };
+  return null;
 }
 
 async function resolveTenantSmtpConfig(ctx: TenantContext): Promise<TenantSmtpConfig | null> {
