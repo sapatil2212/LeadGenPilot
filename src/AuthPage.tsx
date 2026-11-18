@@ -80,9 +80,10 @@ function getInitialMode(): Mode {
 
 function getInitialNotice(): string {
   if (typeof window === "undefined") return "";
-  return new URLSearchParams(window.location.search).get("reason") === "inactive"
-    ? "You were signed out after 10 minutes of inactivity."
-    : "";
+  const reason = new URLSearchParams(window.location.search).get("reason");
+  if (reason === "inactive") return "You were signed out after 10 minutes of inactivity.";
+  if (reason === "expired") return "Your session has expired. Please sign in again.";
+  return "";
 }
 
 export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: AuthedUser) => void }) {
@@ -126,6 +127,15 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
   useEffect(() => {
     if (step === "otp") setTimeout(() => otpRefs.current[0]?.focus(), 80);
   }, [step]);
+
+  useEffect(() => {
+    const onPop = () => {
+      setMode(getInitialMode());
+      setNotice(getInitialNotice());
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   // Live password requirements
   const reqLength = password.length >= 8;
@@ -981,8 +991,20 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
                   </div>
                 )}
                 {notice && !error && (
-                  <div className="text-[12px] text-emerald-700 bg-emerald-50/70 border border-emerald-200/70 rounded-lg px-2.5 py-2 flex items-start gap-1.5 leading-relaxed">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mt-1 shrink-0" />
+                  <div
+                    className={`text-[12px] border rounded-lg px-2.5 py-2 flex items-start gap-1.5 leading-relaxed ${
+                      notice.includes("signed out") || notice.includes("expired")
+                        ? "text-amber-800 bg-amber-50/80 border-amber-200/80"
+                        : "text-emerald-700 bg-emerald-50/70 border-emerald-200/70"
+                    }`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full mt-1 shrink-0 ${
+                        notice.includes("signed out") || notice.includes("expired")
+                          ? "bg-amber-500"
+                          : "bg-emerald-500"
+                      }`}
+                    />
                     <span className="flex-1">{notice}</span>
                   </div>
                 )}
@@ -1091,8 +1113,20 @@ export default function AuthPage({ onAuthenticated }: { onAuthenticated: (user: 
                   </div>
                 )}
                 {notice && !error && (
-                  <div className="text-[12px] text-emerald-700 bg-emerald-50/70 border border-emerald-200/70 rounded-lg px-2.5 py-2 flex items-start gap-1.5 leading-relaxed">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mt-1 shrink-0" />
+                  <div
+                    className={`text-[12px] border rounded-lg px-2.5 py-2 flex items-start gap-1.5 leading-relaxed ${
+                      notice.includes("signed out") || notice.includes("expired")
+                        ? "text-amber-800 bg-amber-50/80 border-amber-200/80"
+                        : "text-emerald-700 bg-emerald-50/70 border-emerald-200/70"
+                    }`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full mt-1 shrink-0 ${
+                        notice.includes("signed out") || notice.includes("expired")
+                          ? "bg-amber-500"
+                          : "bg-emerald-500"
+                      }`}
+                    />
                     <span className="flex-1">{notice}</span>
                   </div>
                 )}

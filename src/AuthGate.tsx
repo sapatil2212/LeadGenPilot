@@ -13,6 +13,49 @@ const SUPPORT_EMAIL = "leadgenpilot.in@gmail.com";
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 const ACTIVITY_WRITE_THROTTLE_MS = 5 * 1000;
 const LAST_ACTIVITY_STORAGE_KEY = "leadgenpilot_last_activity";
+const RETURN_TO_STORAGE_KEY = "leadgenpilot_return_to";
+
+function readPersistedActivity(): number {
+  try {
+    const value = Number(localStorage.getItem(LAST_ACTIVITY_STORAGE_KEY));
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function persistActivity(timestamp: number): void {
+  try {
+    localStorage.setItem(LAST_ACTIVITY_STORAGE_KEY, String(timestamp));
+  } catch {}
+}
+
+function clearPersistedActivity(): void {
+  try {
+    localStorage.removeItem(LAST_ACTIVITY_STORAGE_KEY);
+  } catch {}
+}
+
+function saveReturnPath(): void {
+  if (typeof window === "undefined") return;
+  const currentPath = window.location.pathname;
+  if (currentPath.startsWith("/app/") && currentPath !== "/app") {
+    try {
+      sessionStorage.setItem(RETURN_TO_STORAGE_KEY, currentPath + window.location.search);
+    } catch {}
+  }
+}
+
+function restoreReturnPath(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const returnTo = sessionStorage.getItem(RETURN_TO_STORAGE_KEY);
+    if (returnTo && returnTo.startsWith("/app/")) {
+      sessionStorage.removeItem(RETURN_TO_STORAGE_KEY);
+      window.history.replaceState(null, "", returnTo);
+    }
+  } catch {}
+}
 
 type Status = "loading" | "authed" | "guest" | "workspace" | "suspended" | "unavailable";
 
@@ -59,7 +102,58 @@ export default function AuthGate() {
   const [workspaceError, setWorkspaceError] = useState("");
   const logoutInProgressRef = useRef(false);
 
+  const handleLogout = useCallback(async (reason?: "inactive" | "expired") => {
+    if (logoutInProgressRef.current) return;
+    logoutInProgressRef.current = true;
+
+    // Leave protected UI immediately; cookie invalidation can finish in the
+    // background without keeping an expired dashboard visible.
+    setUser(null);
+    setEntitlements(null);
+    setUsage(null);
+    setWorkspace(null);
+    setWorkspaces([]);
+    setWorkspaceError("");
+    setStatus("guest");
+
+    clearPersistedActivity();
+    saveReturnPath();
+
+    const query =
+      reason === "inactive"
+        ? "?mode=signin&reason=inactive"
+        : reason === "expired"
+        ? "?mode=signin&reason=expired"
+        : "?mode=signin";
+    window.history.replaceState(null, "", `/app${query}`);
+
+    try {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+    } catch {
+      /* The local auth gate remains closed if the server is unreachable. */
+    } finally {
+      logoutInProgressRef.current = false;
+    }
+  }, []);
+
   const checkSession = useCallback(async () => {
+    // 1. Inactivity check: verify before attempting to mount dashboard or check session
+    const persistedActivityAt = readPersistedActivity();
+    const now = Date.now();
+    if (persistedActivityAt > 0 && now - persistedActivityAt >= INACTIVITY_TIMEOUT_MS) {
+      clearPersistedActivity();
+      saveReturnPath();
+      setUser(null);
+      setEntitlements(null);
+      setUsage(null);
+      setWorkspace(null);
+      setWorkspaces([]);
+      setStatus("guest");
+      window.history.replaceState(null, "", "/app?mode=signin&reason=inactive");
+      void fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(() => {});
+      return;
+    }
+
     try {
       const res = await fetch("/api/auth/me", { credentials: "include" });
       if (res.ok) {
@@ -78,21 +172,38 @@ export default function AuthGate() {
         setUsage(data.usage ?? null);
         setWorkspace(data.workspace ?? null);
         setWorkspaces(Array.isArray(data.workspaces) ? data.workspaces : []);
+        persistActivity(Date.now());
+
+        // Restore previously requested dashboard route if any
+        restoreReturnPath();
+
         setStatus(data.requiresWorkspaceSelection ? "workspace" : "authed");
         return;
       }
 
       const error = await res.json().catch(() => ({}));
+      clearPersistedActivity();
+      setUser(null);
       if (error.code === "account_suspended") {
         setStatus("suspended");
       } else if (res.status === 503) {
         setStatus("unavailable");
       } else {
+        saveReturnPath();
         setStatus("guest");
+        if (typeof window !== "undefined" && !window.location.search.includes("mode=signup")) {
+          const reason = error.code === "invalid_session" ? "&reason=expired" : "";
+          window.history.replaceState(null, "", `/app?mode=signin${reason}`);
+        }
       }
     } catch {
       // Server unreachable — fail open to the auth page rather than a blank screen.
+      clearPersistedActivity();
+      setUser(null);
       setStatus("guest");
+      if (typeof window !== "undefined" && !window.location.search.includes("mode=signup")) {
+        window.history.replaceState(null, "", "/app?mode=signin");
+      }
     }
   }, []);
 
@@ -100,53 +211,22 @@ export default function AuthGate() {
     checkSession();
   }, [checkSession]);
 
-  const handleLogout = useCallback(async (reason?: "inactive") => {
-    if (logoutInProgressRef.current) return;
-    logoutInProgressRef.current = true;
-
-    // Leave protected UI immediately; cookie invalidation can finish in the
-    // background without keeping an expired dashboard visible.
-    setUser(null);
-    setEntitlements(null);
-    setUsage(null);
-    setWorkspace(null);
-    setWorkspaces([]);
-    setWorkspaceError("");
-    setStatus("guest");
-    window.history.replaceState(
-      window.history.state,
-      "",
-      `/app?mode=signin${reason === "inactive" ? "&reason=inactive" : ""}`
-    );
-    try {
-      localStorage.removeItem(LAST_ACTIVITY_STORAGE_KEY);
-    } catch {
-      /* storage may be unavailable in privacy-restricted contexts */
-    }
-
-    try {
-      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
-    } catch {
-      /* The local auth gate remains closed if the server is unreachable. */
-    }
-  }, []);
+  // Global handler for 401 Unauthorized API responses across the app
+  useEffect(() => {
+    const onUnauthorized = () => {
+      void handleLogout("expired");
+    };
+    window.addEventListener("leadgenpilot:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("leadgenpilot:unauthorized", onUnauthorized);
+  }, [handleLogout]);
 
   useEffect(() => {
     if (status !== "authed" && status !== "workspace") return;
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    let localActivityAt = 0;
-    let lastPersistedAt = 0;
+    let localActivityAt = Date.now();
+    let lastPersistedAt = Date.now();
     let activityHandledAt = 0;
-
-    const readPersistedActivity = () => {
-      try {
-        const value = Number(localStorage.getItem(LAST_ACTIVITY_STORAGE_KEY));
-        return Number.isFinite(value) && value > 0 ? value : 0;
-      } catch {
-        return 0;
-      }
-    };
 
     const latestActivityAt = () => Math.max(localActivityAt, readPersistedActivity());
 
@@ -165,36 +245,21 @@ export default function AuthGate() {
       timeoutId = setTimeout(scheduleExpiry, remaining);
     };
 
-    const persistActivity = (timestamp: number, force = false) => {
-      if (!force && timestamp - lastPersistedAt < ACTIVITY_WRITE_THROTTLE_MS) return;
-      try {
-        localStorage.setItem(LAST_ACTIVITY_STORAGE_KEY, String(timestamp));
-        lastPersistedAt = timestamp;
-      } catch {
-        /* The in-memory timer still enforces inactivity for this tab. */
-      }
-    };
-
-    const recordActivity = () => {
+    const handleUserActivity = () => {
       const now = Date.now();
-      // Pointer movement can fire rapidly; one reset per second is sufficient.
-      if (now - activityHandledAt < 1000) return;
-      activityHandledAt = now;
-      localActivityAt = now;
-      persistActivity(now);
-      scheduleExpiry();
-    };
-
-    const checkElapsedBeforeRecordingActivity = () => {
-      if (Date.now() - latestActivityAt() >= INACTIVITY_TIMEOUT_MS) {
+      // First verify that session has not already timed out!
+      if (now - latestActivityAt() >= INACTIVITY_TIMEOUT_MS) {
         expireSession();
         return;
       }
-      recordActivity();
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") checkElapsedBeforeRecordingActivity();
+      if (now - activityHandledAt < 1000) return;
+      activityHandledAt = now;
+      localActivityAt = now;
+      if (now - lastPersistedAt >= ACTIVITY_WRITE_THROTTLE_MS) {
+        persistActivity(now);
+        lastPersistedAt = now;
+      }
+      scheduleExpiry();
     };
 
     const handleStorage = (event: StorageEvent) => {
@@ -211,8 +276,7 @@ export default function AuthGate() {
       }
     };
 
-    // Preserve inactivity across reloads and browser suspension. A stale
-    // authenticated cookie must not be revived merely by reopening the page.
+    // Immediate check on entering authed state
     const now = Date.now();
     const persistedActivityAt = readPersistedActivity();
     if (persistedActivityAt > 0 && now - persistedActivityAt >= INACTIVITY_TIMEOUT_MS) {
@@ -221,10 +285,8 @@ export default function AuthGate() {
       return;
     }
 
-    // With no stale activity record, reaching the authenticated page starts a
-    // fresh ten-minute window. localStorage synchronizes it across tabs.
     localActivityAt = now;
-    persistActivity(now, true);
+    persistActivity(now);
     scheduleExpiry();
 
     const activityEvents: Array<keyof WindowEventMap> = [
@@ -235,18 +297,18 @@ export default function AuthGate() {
       "touchstart",
     ];
     activityEvents.forEach((eventName) =>
-      window.addEventListener(eventName, recordActivity, { passive: true })
+      window.addEventListener(eventName, handleUserActivity, { passive: true })
     );
-    window.addEventListener("focus", checkElapsedBeforeRecordingActivity);
+    window.addEventListener("focus", handleUserActivity);
     window.addEventListener("storage", handleStorage);
-    document.addEventListener("visibilitychange", handleVisibilityChange);
+    document.addEventListener("visibilitychange", handleUserActivity);
 
     return () => {
       if (timeoutId) clearTimeout(timeoutId);
-      activityEvents.forEach((eventName) => window.removeEventListener(eventName, recordActivity));
-      window.removeEventListener("focus", checkElapsedBeforeRecordingActivity);
+      activityEvents.forEach((eventName) => window.removeEventListener(eventName, handleUserActivity));
+      window.removeEventListener("focus", handleUserActivity);
       window.removeEventListener("storage", handleStorage);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      document.removeEventListener("visibilitychange", handleUserActivity);
     };
   }, [handleLogout, status]);
 

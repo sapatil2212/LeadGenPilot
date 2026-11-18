@@ -87,6 +87,24 @@ async function readBody(res: Response): Promise<any> {
   }
 }
 
+function notifyIfUnauthorized(res: Response, path: string, parsed: any) {
+  if (
+    res.status === 401 &&
+    typeof window !== "undefined" &&
+    !path.includes("/api/auth/login") &&
+    !path.includes("/api/auth/signup") &&
+    !path.includes("/api/auth/verify-otp") &&
+    !path.includes("/api/auth/forgot-password") &&
+    !path.includes("/api/auth/reset-password")
+  ) {
+    window.dispatchEvent(
+      new CustomEvent("leadgenpilot:unauthorized", {
+        detail: { path, status: res.status, code: parsed?.code, error: parsed?.error },
+      })
+    );
+  }
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   let res: Response;
   try {
@@ -102,7 +120,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
 
   const parsed = await readBody(res);
-  if (!res.ok) throw new ApiError(res.status, parsed ?? {});
+  if (!res.ok) {
+    notifyIfUnauthorized(res, path, parsed);
+    throw new ApiError(res.status, parsed ?? {});
+  }
   return parsed as T;
 }
 
@@ -126,7 +147,10 @@ export const api = {
       throw new ApiError(0, { error: "Could not reach the server." });
     }
     const parsed = await readBody(res);
-    if (!res.ok) throw new ApiError(res.status, parsed ?? {});
+    if (!res.ok) {
+      notifyIfUnauthorized(res, path, parsed);
+      throw new ApiError(res.status, parsed ?? {});
+    }
     return parsed as T;
   },
 };
