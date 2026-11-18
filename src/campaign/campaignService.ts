@@ -405,28 +405,41 @@ export async function listCampaigns(ctx: TenantContext): Promise<CampaignView[]>
   const campaigns = await prisma.campaign.findMany({
     where: { tenantId: ctx.tenantId },
     orderBy: { createdAt: "desc" },
+    include: {
+      messages: {
+        select: { status: true },
+      },
+    },
   });
 
-  return campaigns.map((c) => ({
-    id: c.id,
-    name: c.name,
-    status: c.status,
-    sourceType: c.sourceType,
-    sourceListId: c.sourceListId,
-    channels: JSON.parse(c.channels),
-    totalMessages: c.totalMessages,
-    pendingCount: c.pendingCount,
-    approvedCount: c.approvedCount,
-    rejectedCount: c.rejectedCount,
-    sentCount: c.sentCount,
-    failedCount: c.failedCount,
-    messageDelayMin: c.messageDelayMin,
-    messageDelayMax: c.messageDelayMax,
-    batchSize: c.batchSize,
-    batchPauseSeconds: c.batchPauseSeconds,
-    createdAt: c.createdAt.toISOString(),
-    updatedAt: c.updatedAt.toISOString(),
-  }));
+  return campaigns.map((c) => {
+    const liveSent = c.messages.filter((m) => m.status === "sent").length;
+    const liveFailed = c.messages.filter((m) => m.status === "failed").length;
+    const livePending = c.messages.filter((m) => m.status === "pending_review").length;
+    const liveApproved = c.messages.filter((m) => m.status === "approved" || m.status === "ready" || m.status === "retry_wait" || m.status === "sending").length;
+    const liveRejected = c.messages.filter((m) => m.status === "rejected").length;
+
+    return {
+      id: c.id,
+      name: c.name,
+      status: c.status,
+      sourceType: c.sourceType,
+      sourceListId: c.sourceListId,
+      channels: JSON.parse(c.channels),
+      totalMessages: c.messages.length || c.totalMessages,
+      pendingCount: livePending,
+      approvedCount: liveApproved,
+      rejectedCount: liveRejected,
+      sentCount: Math.max(c.sentCount, liveSent),
+      failedCount: Math.max(c.failedCount, liveFailed),
+      messageDelayMin: c.messageDelayMin,
+      messageDelayMax: c.messageDelayMax,
+      batchSize: c.batchSize,
+      batchPauseSeconds: c.batchPauseSeconds,
+      createdAt: c.createdAt.toISOString(),
+      updatedAt: c.updatedAt.toISOString(),
+    };
+  });
 }
 
 /**
@@ -447,6 +460,12 @@ export async function getCampaign(
 
   if (!campaign) return null;
 
+  const liveSent = campaign.messages.filter((m) => m.status === "sent").length;
+  const liveFailed = campaign.messages.filter((m) => m.status === "failed").length;
+  const livePending = campaign.messages.filter((m) => m.status === "pending_review").length;
+  const liveApproved = campaign.messages.filter((m) => m.status === "approved" || m.status === "ready" || m.status === "retry_wait" || m.status === "sending").length;
+  const liveRejected = campaign.messages.filter((m) => m.status === "rejected").length;
+
   return {
     id: campaign.id,
     name: campaign.name,
@@ -454,12 +473,12 @@ export async function getCampaign(
     sourceType: campaign.sourceType,
     sourceListId: campaign.sourceListId,
     channels: JSON.parse(campaign.channels),
-    totalMessages: campaign.totalMessages,
-    pendingCount: campaign.pendingCount,
-    approvedCount: campaign.approvedCount,
-    rejectedCount: campaign.rejectedCount,
-    sentCount: campaign.sentCount,
-    failedCount: campaign.failedCount,
+    totalMessages: campaign.messages.length || campaign.totalMessages,
+    pendingCount: livePending,
+    approvedCount: liveApproved,
+    rejectedCount: liveRejected,
+    sentCount: Math.max(campaign.sentCount, liveSent),
+    failedCount: Math.max(campaign.failedCount, liveFailed),
     createdAt: campaign.createdAt.toISOString(),
     updatedAt: campaign.updatedAt.toISOString(),
     messages: campaign.messages.map((m) => ({

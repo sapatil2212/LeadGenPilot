@@ -550,6 +550,13 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
         if (await finishLeasedMessage(message, job, "sent", undefined, externalMessageId)) {
           sent++;
           batchSentCount++;
+          await prisma.campaign.updateMany({
+            where: { id: campaign.id, tenantId: job.tenantId },
+            data: {
+              sentCount: { increment: 1 },
+              approvedCount: { decrement: 1 },
+            },
+          }).catch((err) => logger.warn(`Could not increment campaign sentCount: ${err?.message || err}`));
           await recordCampaignDispatch({
             message: effectiveMessage,
             campaignName: campaign.name,
@@ -569,6 +576,13 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
       if (await finishLeasedMessage(message, job, permanent ? "failed" : "retry_wait", reason)) {
         if (permanent) {
           failed++;
+          await prisma.campaign.updateMany({
+            where: { id: campaign.id, tenantId: job.tenantId },
+            data: {
+              failedCount: { increment: 1 },
+              approvedCount: { decrement: 1 },
+            },
+          }).catch((err) => logger.warn(`Could not increment campaign failedCount: ${err?.message || err}`));
           await recordCampaignDispatch({ message, campaignName: campaign.name, status: "FAILED", errorMessage: reason }).catch((reportError) => logger.warn(`Failure persisted but report repair is needed: ${reportError?.message || reportError}${logContext(messageFields)}`));
           await syncDeliveryToCrmAndInbox(job, message, { status: "FAILED" }, googleSheet ? googleSheet.webhookUrl : undefined);
         }

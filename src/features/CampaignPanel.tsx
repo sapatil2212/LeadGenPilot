@@ -860,8 +860,14 @@ function CampaignReview({
   if (!campaign.data) return <EmptyState isLight={isLight} icon={AlertCircle} title="Campaign not found" />;
 
   const data = campaign.data;
+  const liveSent = useMemo(() => Math.max(data.sentCount || 0, data.messages.filter((m) => m.status === "sent").length), [data]);
+  const liveFailed = useMemo(() => Math.max(data.failedCount || 0, data.messages.filter((m) => m.status === "failed").length), [data]);
+  const liveApproved = useMemo(() => data.messages.filter((m) => m.status === "approved" || m.status === "ready" || m.status === "retry_wait" || m.status === "sending").length, [data]);
+  const livePending = useMemo(() => data.messages.filter((m) => m.status === "pending_review").length, [data]);
+  const totalCount = data.totalMessages || data.messages.length || 0;
+
   const pending = data.messages.filter((m) => m.status === "pending_review");
-  const readyToStart = data.status === "approved" && data.pendingCount === 0 && data.approvedCount > 0;
+  const readyToStart = data.status === "approved" && livePending === 0 && liveApproved > 0;
   const startBlocked = data.channels.email && !smtpReady;
 
   const filteredMessages = data.messages.filter((m) => {
@@ -957,7 +963,7 @@ function CampaignReview({
         <MetricCard
           isLight={isLight}
           label="Total Prospects"
-          value={data.totalMessages}
+          value={totalCount}
           sub="Materialized copies"
           icon={User}
           tone="indigo"
@@ -965,15 +971,15 @@ function CampaignReview({
         <MetricCard
           isLight={isLight}
           label="Needs Review"
-          value={data.pendingCount}
-          sub={data.pendingCount > 0 ? "Approval required" : "All approved"}
+          value={livePending}
+          sub={livePending > 0 ? "Approval required" : "All approved"}
           icon={Clock3}
-          tone={data.pendingCount > 0 ? "amber" : "neutral"}
+          tone={livePending > 0 ? "amber" : "neutral"}
         />
         <MetricCard
           isLight={isLight}
           label="Approved / Ready"
-          value={data.approvedCount}
+          value={liveApproved}
           sub="Ready for dispatch"
           icon={CheckCircle2}
           tone="emerald"
@@ -981,10 +987,10 @@ function CampaignReview({
         <MetricCard
           isLight={isLight}
           label="Dispatched"
-          value={data.sentCount}
-          sub={data.failedCount > 0 ? `${data.failedCount} failed` : "Delivered"}
+          value={liveSent}
+          sub={liveFailed > 0 ? `${liveFailed} failed` : "Delivered"}
           icon={Send}
-          tone={data.sentCount > 0 ? "emerald" : "neutral"}
+          tone={liveSent > 0 ? "emerald" : "neutral"}
         />
       </div>
 
@@ -1009,7 +1015,7 @@ function CampaignReview({
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed max-w-xl">
                   {startBlocked
                     ? "Connect your Google Sheet or SMTP gateway in Integrations to enable automated sending."
-                    : `All ${data.approvedCount} messages are approved. Dispatches will run sequentially with a randomized 5–7s anti-block time gap to protect your email and WhatsApp sender reputation.`}
+                    : `All ${liveApproved} messages are approved. Dispatches will run sequentially with a randomized 5–7s anti-block time gap to protect your email and WhatsApp sender reputation.`}
                 </p>
               </div>
             </div>
@@ -1050,7 +1056,7 @@ function CampaignReview({
             <div>
               <div className="text-xs font-bold">Campaign In Flight (Sending Sequentially)</div>
               <div className="text-[11px] opacity-80 mt-0.5">
-                Sent {data.sentCount} of {data.totalMessages} • Auto-refreshes every 3 seconds.
+                Sent {liveSent} of {totalCount} • Auto-refreshes every 3 seconds.
               </div>
             </div>
           </div>
