@@ -13,6 +13,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import type { OutreachTemplate } from "../outreachTemplates";
+import type { LeadList } from "../types";
 import WhatsAppLogo from "../WhatsAppLogo";
 import {
   AlertCircle,
@@ -28,11 +29,15 @@ import {
   Edit3,
   Eye,
   Filter,
+  Folder,
+  FolderCheck,
+  FolderOpen,
   HelpCircle,
   Laptop,
   Loader2,
   Mail,
   MessageSquare,
+  MinusSquare,
   Play,
   Plus,
   RefreshCw,
@@ -42,8 +47,10 @@ import {
   ShieldCheck,
   Smartphone,
   Sparkles,
+  Square,
   Trash2,
   User,
+  Users,
   X,
   XCircle,
 } from "lucide-react";
@@ -1441,15 +1448,77 @@ function CreateCampaignModal({
   const [delayMax, setDelayMax] = useState(60);
   const [pauseEveryMinutes, setPauseEveryMinutes] = useState(5);
 
+  const [targetMode, setTargetMode] = useState<"folders" | "leads">("folders");
+  const [folderSearch, setFolderSearch] = useState("");
+
   const templates = useAsync<OutreachTemplate[]>(() => api.get("/api/templates"));
   const messageTemplates = useAsync<{ ok: boolean; templates: { id: string; name: string; category: string }[] }>(
     () => api.get("/api/message-templates")
   );
   const leads = useAsync<any>(() => api.get("/api/crm/leads"));
+  const lists = useAsync<LeadList[]>(() => api.get("/api/crm/lists"));
   const allLeads: any[] = useMemo(() => {
     if (Array.isArray(leads.data)) return leads.data;
     return Array.isArray(leads.data?.leads) ? leads.data.leads : [];
   }, [leads.data]);
+
+  const allFolders: LeadList[] = useMemo(() => {
+    if (Array.isArray(lists.data)) return lists.data;
+    return [];
+  }, [lists.data]);
+
+  // Group leads by folder (listId)
+  const folderLeadMap = useMemo(() => {
+    const map = new Map<string, any[]>();
+    for (const lead of allLeads) {
+      const listId = lead.listId || "unassigned";
+      const existing = map.get(listId) || [];
+      existing.push(lead);
+      map.set(listId, existing);
+    }
+    return map;
+  }, [allLeads]);
+
+  const unassignedLeads = useMemo(() => {
+    return folderLeadMap.get("unassigned") || [];
+  }, [folderLeadMap]);
+
+  const toggleFolder = (folderId: string) => {
+    const folderLeads = folderLeadMap.get(folderId) || [];
+    const leadIdsInFolder = folderLeads.map((l: any) => l.id).filter(Boolean);
+    if (leadIdsInFolder.length === 0) return;
+
+    const allInFolderSelected = leadIdsInFolder.every((id: string) => selectedLeadIds.includes(id));
+    if (allInFolderSelected) {
+      setSelectedLeadIds((current) => current.filter((id) => !leadIdsInFolder.includes(id)));
+    } else {
+      setSelectedLeadIds((current) => Array.from(new Set([...current, ...leadIdsInFolder])));
+    }
+  };
+
+  const handleSelectAllFolders = () => {
+    const allIds: string[] = [];
+    for (const folder of allFolders) {
+      const folderLeads = folderLeadMap.get(folder.id) || [];
+      for (const lead of folderLeads) {
+        if (lead.id) allIds.push(lead.id);
+      }
+    }
+    for (const lead of unassignedLeads) {
+      if (lead.id) allIds.push(lead.id);
+    }
+    setSelectedLeadIds((current) => Array.from(new Set([...current, ...allIds])));
+  };
+
+  const filteredFolders = useMemo(() => {
+    const query = folderSearch.toLowerCase().trim();
+    if (!query) return allFolders;
+    return allFolders.filter((f) =>
+      [f.name, f.businessType, f.location].some((val) =>
+        String(val || "").toLowerCase().includes(query)
+      )
+    );
+  }, [allFolders, folderSearch]);
 
   const filteredLeads = useMemo(() => {
     let list = allLeads;
@@ -1611,7 +1680,7 @@ function CreateCampaignModal({
               />
             </div>
 
-            {/* Step 2: Select Leads */}
+            {/* Step 2: Select Leads / Folders */}
             <div className={`p-4 rounded-xl border space-y-3 ${
               isLight ? "bg-slate-50/60 border-slate-200" : "bg-slate-950/40 border-slate-800"
             }`}>
@@ -1623,17 +1692,27 @@ function CreateCampaignModal({
                       {selectedLeadIds.length} selected
                     </span>
                   </div>
-                  <p className="text-[10px] text-slate-400 mt-0.5">Pick leads from your verified CRM workspace.</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5">Pick folders directly or fine-tune individual leads from your CRM.</p>
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleSelectAllVisible}
-                    className="text-[10.5px] font-bold text-indigo-500 hover:underline cursor-pointer"
-                  >
-                    Select Visible ({filteredLeads.length})
-                  </button>
+                  {targetMode === "folders" ? (
+                    <button
+                      type="button"
+                      onClick={handleSelectAllFolders}
+                      className="text-[10.5px] font-bold text-indigo-500 hover:underline cursor-pointer"
+                    >
+                      Select All Folders ({allFolders.length})
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleSelectAllVisible}
+                      className="text-[10.5px] font-bold text-indigo-500 hover:underline cursor-pointer"
+                    >
+                      Select Visible ({filteredLeads.length})
+                    </button>
+                  )}
                   {selectedLeadIds.length > 0 && (
                     <button
                       type="button"
@@ -1646,110 +1725,309 @@ function CreateCampaignModal({
                 </div>
               </div>
 
-              {/* Search & Channel Filters */}
-              <div className="flex flex-col sm:flex-row items-center gap-2">
-                <div className="relative flex-1 w-full">
-                  <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
-                  <input
-                    type="search"
-                    value={leadSearch}
-                    onChange={(e) => setLeadSearch(e.target.value)}
-                    placeholder="Search by company, category, contact, or city..."
-                    className={`w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border outline-none ${
-                      isLight ? "bg-white border-slate-200 text-slate-900" : "bg-slate-900 border-slate-800 text-white"
-                    }`}
-                  />
-                </div>
-
-                <div className="flex items-center gap-1 shrink-0 self-start sm:self-auto">
-                  <button
-                    type="button"
-                    onClick={() => setChannelFilter("all")}
-                    className={`px-2 py-1 rounded-lg text-[10px] font-semibold border ${
-                      channelFilter === "all" ? "bg-indigo-600 text-white border-indigo-600" : isLight ? "border-slate-200 text-slate-600" : "border-slate-800 text-slate-400"
-                    }`}
-                  >
-                    All ({allLeads.length})
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setChannelFilter("email")}
-                    className={`px-2 py-1 rounded-lg text-[10px] font-semibold border ${
-                      channelFilter === "email" ? "bg-indigo-600 text-white border-indigo-600" : isLight ? "border-slate-200 text-slate-600" : "border-slate-800 text-slate-400"
-                    }`}
-                  >
-                    Has Email
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setChannelFilter("phone")}
-                    className={`px-2 py-1 rounded-lg text-[10px] font-semibold border ${
-                      channelFilter === "phone" ? "bg-indigo-600 text-white border-indigo-600" : isLight ? "border-slate-200 text-slate-600" : "border-slate-800 text-slate-400"
-                    }`}
-                  >
-                    Has Phone
-                  </button>
-                </div>
+              {/* Selection Mode Switcher: Folders vs Individual Leads */}
+              <div className="flex items-center gap-1 p-0.5 rounded-lg bg-slate-200/60 dark:bg-slate-800 border border-slate-300/40 dark:border-slate-700/60 w-fit">
+                <button
+                  type="button"
+                  onClick={() => setTargetMode("folders")}
+                  className={`px-3 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                    targetMode === "folders"
+                      ? isLight
+                        ? "bg-white text-indigo-600 shadow-xs"
+                        : "bg-indigo-600 text-white shadow-xs"
+                      : isLight
+                        ? "text-slate-600 hover:text-slate-900"
+                        : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  <Folder className="h-3.5 w-3.5 text-amber-500 fill-amber-500/20" />
+                  <span>Select by Folder ({allFolders.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTargetMode("leads")}
+                  className={`px-3 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                    targetMode === "leads"
+                      ? isLight
+                        ? "bg-white text-indigo-600 shadow-xs"
+                        : "bg-indigo-600 text-white shadow-xs"
+                      : isLight
+                        ? "text-slate-600 hover:text-slate-900"
+                        : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  <User className="h-3.5 w-3.5 text-indigo-500" />
+                  <span>Individual Leads ({allLeads.length})</span>
+                </button>
               </div>
 
-              {/* Leads List Box */}
-              <div className={`max-h-52 overflow-y-auto rounded-xl border ${
-                isLight ? "bg-white border-slate-200" : "bg-slate-900 border-slate-800"
-              }`}>
-                {leads.loading ? (
-                  <div className="p-8 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
-                    <Loader2 className="h-4 w-4 animate-spin text-indigo-500" /> Loading leads...
-                  </div>
-                ) : filteredLeads.length === 0 ? (
-                  <div className="p-8 text-center text-xs text-slate-400">
-                    No leads found matching your criteria.
-                  </div>
-                ) : (
-                  filteredLeads.map((lead) => {
-                    const isSelected = selectedLeadIds.includes(lead.id);
-                    return (
-                      <label
-                        key={lead.id}
-                        className={`p-2.5 border-b last:border-b-0 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
-                          isSelected
-                            ? isLight ? "bg-indigo-50/80" : "bg-indigo-500/10"
-                            : isLight ? "hover:bg-slate-50" : "hover:bg-slate-850"
-                        } ${isLight ? "border-slate-100" : "border-slate-800/60"}`}
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <input
-                            type="checkbox"
-                            checked={isSelected}
-                            onChange={() => toggleLead(lead.id)}
-                            className="rounded text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
-                          />
-                          <div className="min-w-0">
-                            <div className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate">
-                              {lead.businessName}
+              {targetMode === "folders" ? (
+                <>
+                  {/* Folder Search when more than 3 folders */}
+                  {allFolders.length > 3 && (
+                    <div className="relative w-full">
+                      <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                      <input
+                        type="search"
+                        value={folderSearch}
+                        onChange={(e) => setFolderSearch(e.target.value)}
+                        placeholder="Search folders by name, category, or location..."
+                        className={`w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border outline-none ${
+                          isLight ? "bg-white border-slate-200 text-slate-900" : "bg-slate-900 border-slate-800 text-white"
+                        }`}
+                      />
+                    </div>
+                  )}
+
+                  {/* Folders List Box */}
+                  <div className={`max-h-56 overflow-y-auto rounded-xl border p-2 space-y-2 ${
+                    isLight ? "bg-white border-slate-200" : "bg-slate-900 border-slate-800"
+                  }`}>
+                    {lists.loading || leads.loading ? (
+                      <div className="p-8 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin text-indigo-500" /> Loading lead folders...
+                      </div>
+                    ) : filteredFolders.length === 0 && unassignedLeads.length === 0 ? (
+                      <div className="p-8 text-center text-xs text-slate-400 space-y-2">
+                        <p>No lead folders found in your workspace.</p>
+                        <button
+                          type="button"
+                          onClick={() => setTargetMode("leads")}
+                          className="text-xs font-semibold text-indigo-500 hover:underline cursor-pointer"
+                        >
+                          Switch to Individual Leads tab to select leads ({allLeads.length})
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        {filteredFolders.map((folder) => {
+                          const folderLeads = folderLeadMap.get(folder.id) || [];
+                          const leadCount = folderLeads.length || folder.leadCount || 0;
+                          const leadIdsInFolder = folderLeads.map((l: any) => l.id).filter(Boolean);
+                          const selectedCount = leadIdsInFolder.filter((id: string) => selectedLeadIds.includes(id)).length;
+                          const isAllSelected = leadCount > 0 && selectedCount === leadCount;
+                          const isPartiallySelected = selectedCount > 0 && selectedCount < leadCount;
+
+                          return (
+                            <div
+                              key={folder.id}
+                              onClick={() => toggleFolder(folder.id)}
+                              className={`p-3 rounded-xl border flex items-center justify-between gap-3 cursor-pointer transition-all ${
+                                isAllSelected
+                                  ? isLight
+                                    ? "border-indigo-300 bg-indigo-50/70 shadow-xs"
+                                    : "border-indigo-500/50 bg-indigo-500/10 shadow-xs"
+                                  : isPartiallySelected
+                                    ? isLight
+                                      ? "border-amber-300 bg-amber-50/40"
+                                      : "border-amber-500/40 bg-amber-500/10"
+                                    : isLight
+                                      ? "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/70"
+                                      : "border-slate-800 bg-slate-900/80 hover:border-slate-700 hover:bg-slate-850"
+                              }`}
+                            >
+                              <div className="flex items-center gap-3 min-w-0">
+                                <div className="shrink-0">
+                                  {isAllSelected ? (
+                                    <div className="w-5 h-5 rounded-md bg-indigo-600 text-white flex items-center justify-center">
+                                      <Check className="h-3.5 w-3.5 stroke-[3]" />
+                                    </div>
+                                  ) : isPartiallySelected ? (
+                                    <div className="w-5 h-5 rounded-md bg-indigo-600 text-white flex items-center justify-center">
+                                      <span className="w-2.5 h-0.5 bg-white rounded-full" />
+                                    </div>
+                                  ) : (
+                                    <div className={`w-5 h-5 rounded-md border ${
+                                      isLight ? "border-slate-300 bg-white" : "border-slate-700 bg-slate-800"
+                                    }`} />
+                                  )}
+                                </div>
+
+                                <div className="p-2 rounded-lg bg-amber-500/10 text-amber-500 shrink-0">
+                                  <FolderOpen className="h-4 w-4" />
+                                </div>
+
+                                <div className="min-w-0">
+                                  <div className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate flex items-center gap-2">
+                                    <span>{folder.name}</span>
+                                  </div>
+                                  <div className="text-[10.5px] text-slate-400 truncate mt-0.5">
+                                    {folder.businessType || "General"} {folder.location ? `• ${folder.location}` : ""}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className={`px-2.5 py-1 rounded-full text-[10.5px] font-bold border transition-colors ${
+                                  isAllSelected
+                                    ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                                    : isPartiallySelected
+                                      ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
+                                      : isLight
+                                        ? "bg-slate-100 text-slate-500 border-slate-200"
+                                        : "bg-slate-800 text-slate-400 border-slate-700"
+                                }`}>
+                                  {isAllSelected
+                                    ? `All ${leadCount} selected`
+                                    : isPartiallySelected
+                                      ? `${selectedCount} / ${leadCount} selected`
+                                      : `${leadCount} leads`}
+                                </span>
+                              </div>
                             </div>
-                            <div className="text-[10px] text-slate-400 truncate">
-                              {lead.contactName || "Owner"} • {lead.category || "General"} {lead.address ? `• ${lead.address}` : ""}
+                          );
+                        })}
+
+                        {unassignedLeads.length > 0 && (
+                          <div
+                            onClick={() => toggleFolder("unassigned")}
+                            className={`p-3 rounded-xl border flex items-center justify-between gap-3 cursor-pointer transition-all ${
+                              unassignedLeads.every((l: any) => selectedLeadIds.includes(l.id))
+                                ? isLight
+                                  ? "border-indigo-300 bg-indigo-50/70 shadow-xs"
+                                  : "border-indigo-500/50 bg-indigo-500/10 shadow-xs"
+                                : isLight
+                                  ? "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/70"
+                                  : "border-slate-800 bg-slate-900/80 hover:border-slate-700 hover:bg-slate-850"
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="shrink-0">
+                                {unassignedLeads.every((l: any) => selectedLeadIds.includes(l.id)) ? (
+                                  <div className="w-5 h-5 rounded-md bg-indigo-600 text-white flex items-center justify-center">
+                                    <Check className="h-3.5 w-3.5 stroke-[3]" />
+                                  </div>
+                                ) : (
+                                  <div className={`w-5 h-5 rounded-md border ${
+                                    isLight ? "border-slate-300 bg-white" : "border-slate-700 bg-slate-800"
+                                  }`} />
+                                )}
+                              </div>
+                              <div className="p-2 rounded-lg bg-slate-500/10 text-slate-400 shrink-0">
+                                <Folder className="h-4 w-4" />
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold text-slate-800 dark:text-slate-100">Other / Uncategorized Leads</div>
+                                <div className="text-[10.5px] text-slate-400">Leads not assigned to a folder</div>
+                              </div>
                             </div>
+                            <span className="px-2.5 py-1 rounded-full text-[10.5px] font-bold border bg-slate-100 dark:bg-slate-800 text-slate-500 border-slate-200 dark:border-slate-700">
+                              {unassignedLeads.length} leads
+                            </span>
                           </div>
-                        </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* Search & Channel Filters for Individual Leads */}
+                  <div className="flex flex-col sm:flex-row items-center gap-2">
+                    <div className="relative flex-1 w-full">
+                      <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                      <input
+                        type="search"
+                        value={leadSearch}
+                        onChange={(e) => setLeadSearch(e.target.value)}
+                        placeholder="Search by company, category, contact, or city..."
+                        className={`w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border outline-none ${
+                          isLight ? "bg-white border-slate-200 text-slate-900" : "bg-slate-900 border-slate-800 text-white"
+                        }`}
+                      />
+                    </div>
 
-                        <div className="flex items-center gap-2 shrink-0">
-                          {leadHasEmail(lead) && (
-                            <span className="p-1 rounded bg-indigo-500/10 text-indigo-500" title="Has Email">
-                              <Mail className="h-3 w-3" />
-                            </span>
-                          )}
-                          {lead.phone && (
-                            <span className="p-1 rounded bg-emerald-500/10 text-emerald-500" title="Has Phone">
-                              <WhatsAppLogo className="h-3 w-3 fill-emerald-500" />
-                            </span>
-                          )}
-                        </div>
-                      </label>
-                    );
-                  })
-                )}
-              </div>
+                    <div className="flex items-center gap-1 shrink-0 self-start sm:self-auto">
+                      <button
+                        type="button"
+                        onClick={() => setChannelFilter("all")}
+                        className={`px-2 py-1 rounded-lg text-[10px] font-semibold border ${
+                          channelFilter === "all" ? "bg-indigo-600 text-white border-indigo-600" : isLight ? "border-slate-200 text-slate-600" : "border-slate-800 text-slate-400"
+                        }`}
+                      >
+                        All ({allLeads.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setChannelFilter("email")}
+                        className={`px-2 py-1 rounded-lg text-[10px] font-semibold border ${
+                          channelFilter === "email" ? "bg-indigo-600 text-white border-indigo-600" : isLight ? "border-slate-200 text-slate-600" : "border-slate-800 text-slate-400"
+                        }`}
+                      >
+                        Has Email
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setChannelFilter("phone")}
+                        className={`px-2 py-1 rounded-lg text-[10px] font-semibold border ${
+                          channelFilter === "phone" ? "bg-indigo-600 text-white border-indigo-600" : isLight ? "border-slate-200 text-slate-600" : "border-slate-800 text-slate-400"
+                        }`}
+                      >
+                        Has Phone
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Leads List Box */}
+                  <div className={`max-h-52 overflow-y-auto rounded-xl border ${
+                    isLight ? "bg-white border-slate-200" : "bg-slate-900 border-slate-800"
+                  }`}>
+                    {leads.loading ? (
+                      <div className="p-8 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin text-indigo-500" /> Loading leads...
+                      </div>
+                    ) : filteredLeads.length === 0 ? (
+                      <div className="p-8 text-center text-xs text-slate-400">
+                        No leads found matching your criteria.
+                      </div>
+                    ) : (
+                      filteredLeads.map((lead) => {
+                        const isSelected = selectedLeadIds.includes(lead.id);
+                        return (
+                          <label
+                            key={lead.id}
+                            className={`p-2.5 border-b last:border-b-0 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
+                              isSelected
+                                ? isLight ? "bg-indigo-50/80" : "bg-indigo-500/10"
+                                : isLight ? "hover:bg-slate-50" : "hover:bg-slate-850"
+                            } ${isLight ? "border-slate-100" : "border-slate-800/60"}`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleLead(lead.id)}
+                                className="rounded text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
+                              />
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate">
+                                  {lead.businessName}
+                                </div>
+                                <div className="text-[10px] text-slate-400 truncate">
+                                  {lead.contactName || "Owner"} • {lead.category || "General"} {lead.address ? `• ${lead.address}` : ""}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 shrink-0">
+                              {leadHasEmail(lead) && (
+                                <span className="p-1 rounded bg-indigo-500/10 text-indigo-500" title="Has Email">
+                                  <Mail className="h-3 w-3" />
+                                </span>
+                              )}
+                              {lead.phone && (
+                                <span className="p-1 rounded bg-emerald-500/10 text-emerald-500" title="Has Phone">
+                                  <WhatsAppLogo className="h-3 w-3 fill-emerald-500" />
+                                </span>
+                              )}
+                            </div>
+                          </label>
+                        );
+                      })
+                    )}
+                  </div>
+                </>
+              )}
             </div>
 
             {/* Step 3: Channels & Templates */}
