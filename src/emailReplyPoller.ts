@@ -128,7 +128,11 @@ async function pollMailbox(mb: ImapMailbox, onReply: EmailReplyHandler): Promise
       state[mb.id] = maxUid;
       saveState(state);
     } finally {
-      lock.release();
+      try {
+        lock.release();
+      } catch {
+        // Ignore if socket timed out or connection was closed
+      }
     }
   } finally {
     await client.logout().catch(() => {});

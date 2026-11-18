@@ -25,6 +25,7 @@ import {
 } from "./campaignService";
 import { enqueueCampaignExecution, cancelCampaignExecution, validateCampaignThrottleSettings } from "./campaignExecutor";
 import { assertCampaignReadiness } from "./campaignReadiness";
+import { triggerCampaignWorkerCycle } from "./campaignWorkerManager";
 
 const router = Router();
 
@@ -164,6 +165,7 @@ router.post(
         delayMs: req.body?.delayMs,
         batchSize: req.body?.batchSize,
       });
+      triggerCampaignWorkerCycle();
       res.status(202).json(result);
     } catch (error: any) {
       res.status(400).json({ error: error.message || "Failed to execute campaign." });

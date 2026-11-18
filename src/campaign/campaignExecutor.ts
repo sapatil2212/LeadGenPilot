@@ -559,7 +559,7 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
             variationId: variation?.variationId,
             variationIndex: variation?.variationIndex,
           }).catch((error) => logger.warn(`Delivery persisted but report repair is needed: ${error?.message || error}${logContext(messageFields)}`));
-          await syncDeliveryToCrmAndInbox(job, message, { status: "SENT", externalMessageId }, googleSheet!.webhookUrl);
+          await syncDeliveryToCrmAndInbox(job, message, { status: "SENT", externalMessageId }, googleSheet ? googleSheet.webhookUrl : undefined);
           logger.info(`Campaign message delivered.${logContext({ ...messageFields, providerMessageId: externalMessageId, sender: resolvedSenderId, variation: variation?.variationIndex })}`);
         }
       }
@@ -570,7 +570,7 @@ export async function runClaimedCampaignJob(job: any): Promise<WorkerRunResult> 
         if (permanent) {
           failed++;
           await recordCampaignDispatch({ message, campaignName: campaign.name, status: "FAILED", errorMessage: reason }).catch((reportError) => logger.warn(`Failure persisted but report repair is needed: ${reportError?.message || reportError}${logContext(messageFields)}`));
-          await syncDeliveryToCrmAndInbox(job, message, { status: "FAILED" }, googleSheet!.webhookUrl);
+          await syncDeliveryToCrmAndInbox(job, message, { status: "FAILED" }, googleSheet ? googleSheet.webhookUrl : undefined);
         }
       }
       logger.warn(`Campaign message ${permanent ? "failed permanently" : "will retry"}: ${reason}${logContext(messageFields)}`);

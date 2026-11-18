@@ -102,6 +102,10 @@ import {
   type DispatchHistoryQuery,
 } from "./src/campaign/campaignDispatchService";
 import { getCampaignStatus } from "./src/campaign/campaignStatusService";
+import {
+  startInProcessCampaignWorker,
+  stopInProcessCampaignWorker,
+} from "./src/campaign/campaignWorkerManager";
 import { exportCampaignHistoryToCsv, exportCampaignHistoryToPdf, exportCampaignHistoryToDocx } from "./src/campaignReportExporter";
 import {
   getUserIntegration,
@@ -2818,6 +2822,11 @@ async function startServer() {
         void reclaimAbandonedJobs().catch((err) =>
           logger.warn(`Could not reclaim interrupted jobs: ${err?.message || err}`)
         );
+        try {
+          startInProcessCampaignWorker();
+        } catch (err: any) {
+          logger.warn(`Could not start in-process campaign worker: ${err?.message || err}`);
+        }
       }
     });
     
@@ -2873,6 +2882,12 @@ async function startServer() {
       ]);
     } catch (err) {
       logger.warn(`WhatsApp cleanup during shutdown failed: ${(err as Error).message}`);
+    }
+
+    try {
+      await stopInProcessCampaignWorker(signal);
+    } catch (err: any) {
+      logger.warn(`Campaign worker cleanup during shutdown failed: ${err?.message || err}`);
     }
 
     await disconnectDatabase();
